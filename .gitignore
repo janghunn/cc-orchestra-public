@@ -1,0 +1,7 @@
+# The lead-*/dev-* agent files are generated into ~/.claude/agents by build-roster.sh.
+# templates/ is the source of truth; nothing generated belongs in history.
+agents/lead-*.md
+agents/dev-*.md
+
+# install.sh moves any pre-existing file aside rather than clobbering it.
+*.pre-cc-orchestra

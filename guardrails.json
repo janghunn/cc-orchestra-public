@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Session-scoped safety net for the orchestrator, passed via `claude --settings`.",
+    "Verified on Claude Code 2.1.197: deny rules are evaluated BEFORE the permission mode,",
+    "so these still hold under --dangerously-skip-permissions. Everything not listed here",
+    "runs without a prompt.",
+    "Absolute paths need the double-slash form: Edit(//home/... ), not Edit(/home/... ).",
+    "Use Edit(path) only — it covers every file-editing tool including Write. A Write(path)",
+    "rule is silently ineffective for file permission checks (2.1.220 warns about it).",
+    "Loosen freely — this is a backstop against irreversible accidents, not a policy.",
+    "The .claude and cc-orchestra denies exist so the hierarchy cannot rewrite its own",
+    "instructions mid-run. ~/.claude/orchestra is a symlink to the repo, so BOTH paths are",
+    "listed — permission checks resolve the real path, and denying only the symlink would",
+    "leave the repo writable. Edit the harness from an ordinary `claude` session instead."
+  ],
+  "permissions": {
+    "deny": [
+      "Edit(//home/janghun/.claude/agents/**)",
+      "Edit(//home/janghun/.claude/orchestra/**)",
+      "Edit(//home/janghun/cc-orchestra/**)",
+      "Edit(//home/janghun/.claude/settings.json)",
+      "Bash(sudo:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(mkfs:*)",
+      "Bash(dd:*)",
+      "Bash(shutdown:*)",
+      "Bash(reboot:*)"
+    ]
+  }
+}
