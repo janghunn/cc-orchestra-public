@@ -1,7 +1,7 @@
 ---
 name: lead-__SLOT__
 description: Task lead slot __SLOTUP__ (Tier 2). Investigates, designs, writes a self-contained implementation spec, delegates coding to dev-* subagents, reviews the real diff, and gates on the verifier. Functionally identical to the other lead-* slots — the distinct name is a stable address so the user and orchestrator can direct follow-up messages at one specific task. Assign one unused slot per task.
-model: fable[1m]
+model: __MODEL__
 effort: xhigh
 disallowedTools: Edit, NotebookEdit
 maxTurns: 200

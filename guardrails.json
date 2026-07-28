@@ -11,8 +11,27 @@
     "The .claude and cc-orchestra denies exist so the hierarchy cannot rewrite its own",
     "instructions mid-run. ~/.claude/orchestra is a symlink to the repo, so BOTH paths are",
     "listed — permission checks resolve the real path, and denying only the symlink would",
-    "leave the repo writable. Edit the harness from an ordinary `claude` session instead."
+    "leave the repo writable. Edit the harness from an ordinary `claude` session instead.",
+    "The hook tells Tier 1 when orch-model-guard has moved the tier to another model, since a",
+    "running session's own model cannot be changed from outside. It is registered here AND in",
+    "~/.claude/settings.json on purpose: this file is only read at startup (so it covers every",
+    "new cc-orch session), settings.json is watched (so it reaches sessions already running).",
+    "The hook de-duplicates per prompt, so loading it twice still prints one notice."
   ],
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/home/janghun/cc-orchestra/hooks/orch-model-notice.sh'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "deny": [
       "Edit(//home/janghun/.claude/agents/**)",

@@ -41,6 +41,9 @@ cd ~/cc-orchestra && ./install.sh
 `lead-*.md` / `dev-*.md`는 `build-roster.sh`가 `~/.claude/agents`에 생성하는 실제 파일이며
 git 추적 대상이 아니다. 기존 파일이 있으면 덮어쓰지 않고 `.pre-cc-orchestra`로 밀어둔다.
 
+`install.sh`는 모델 가드(systemd user 타이머 + 세션 안내 훅)도 같이 깐다 →
+[모델 가드](#모델-가드--fable-주간-한도-소진-시-자동-전환).
+
 ## 실행
 
 프로젝트 이름은 **필수**다. 세션 이름, Remote Control 브리지 이름, `$CC_ORCH_PROJECT`에 쓰이므로
@@ -57,7 +60,7 @@ cc-orch --no-rc halfres-gshead                  # Remote Control 없이
 
 ```bash
 claude --agent orchestrator \
-       --model 'fable[1m]' \
+       --model "$(orch-model-guard active)" \   # 보통 fable[1m], 한도 소진 시 opus[1m]
        --effort xhigh \
        --dangerously-skip-permissions \
        --settings ~/.claude/orchestra/guardrails.json \
@@ -195,6 +198,48 @@ worktree에서 하고 brief·plan·report·verdict는 한 곳에 모인다.
 
 너무 빡빡하면 그냥 해당 줄을 지우면 된다. 정책이 아니라 되돌릴 수 없는 사고에 대한 안전망이다.
 
+## 모델 가드 — Fable 주간 한도 소진 시 자동 전환
+
+Tier 1/2는 Fable 5로 돈다. Fable 주간 한도가 바닥나면 `orch-model-guard`가 **orchestrator와
+lead-\*를 opus[1m]로 내리고**, 주가 넘어가 한도가 리셋되면 다시 fable[1m]로 올린다.
+Tier 3(dev-\*, verifier)은 원래 Opus라 대상이 아니다.
+
+```bash
+orch-model-guard status      # 지금 뭐가 활성이고 왜 그런지 + 타이머/훅 상태
+orch-model-guard check       # 즉시 1회 폴링 (타이머가 5분마다 하는 그것)
+orch-model-guard set fallback / primary / auto     # 수동 고정(pin) 및 해제
+```
+
+판단 근거는 `claude -p /usage`의 `Current week (Fable)` 값이다 (모델 호출 없음, ~2초, 토큰 0).
+임계값은 `model-policy.conf`에 있고, 경계에서 왔다 갔다 하지 않도록 두 개다 — `>=100%`면 내리고
+`<=90%`면 올린다. 그 사이면 현재 상태를 유지한다. 100%는 벽에 부딪히는 시점이라, 몇 분의 거절도
+싫으면 `SWITCH_AT_PCT`를 98쯤으로 낮추면 된다.
+
+**실행 중인 세션에 어디까지 닿는가** — 2.1.220에서 실측한 결과:
+
+| 대상 | 자동 반영 | 근거 |
+|---|---|---|
+| `lead-*` (실행 중 세션 포함) | **된다** | `~/.claude/agents/lead-*.md`는 서브에이전트를 띄울 때마다 다시 읽힌다. 세션 도중 파일을 바꾸면 다음 스폰부터 새 모델로 뜬다. |
+| 새로 띄우는 orchestrator | **된다** | `cc-orch`가 `orch-model-guard active`를 읽어 `--model`로 넘긴다. |
+| **이미 돌고 있는 orchestrator 본인** | **안 된다** | 세션 자신의 모델은 프로세스 시작 시점에 고정된다. settings 파일도, agent 파일도, 훅도 바꾸지 못한다. |
+
+그래서 마지막 칸은 사람이 한 번 눌러야 한다. `hooks/orch-model-notice.sh`가 그 순간을 놓치지
+않게, 불일치 상태에서 프롬프트를 넣을 때마다 세션 안에서 알린다:
+
+```
+⚠️  모델 가드: Tier 1/2는 이제 opus[1m] 입니다.
+    →  /model opus[1m]   를 입력하세요. (또는 세션 재시작: cc-orch <project>)
+```
+
+이 훅은 두 군데에 등록된다. `~/.claude/settings.json`은 Claude Code가 watch하므로 **이미 돌고
+있는 세션**까지 닿고, `guardrails.json`은 시작 시점에만 읽히지만 cc-orch가 띄우는 **모든 새
+세션**에 확실히 붙는다. 둘 다 걸려도 `prompt_id` 스탬프로 한 번만 말한다. orch 세션이 아니면
+아무 것도 하지 않으므로 일반 `claude` 세션에는 영향이 없다.
+
+폴링은 systemd user 타이머(`orch-model-guard.timer`, 5분)가 돌린다. `install.sh`가 타이머와
+훅을 같이 깔고, `install.sh --check`가 둘 다 확인한다. 상태와 로그는 리포 밖에 둔다 —
+`~/.claude/orchestra-state/{state,guard.log,last-usage.txt}`.
+
 ## 프롬프트 수정
 
 `~/.claude/agents/lead-*.md`와 `dev-*.md`는 **생성 파일이다. 직접 고치지 말 것** — 다음
@@ -240,3 +285,19 @@ orch 세션 자체는 이 파일들을 못 고치도록 막혀 있으므로, 수
 - deny 규칙 > bypassPermissions. 심링크 경유 경로도 실제 경로로 해석되어 차단됨.
 - 에이전트 frontmatter 유효 키: `name, description, model, tools, disallowedTools, color, effort,
   permissionMode, mcpServers, hooks, maxTurns, skills, initialPrompt, memory, background, isolation`.
+
+2.1.220에서 모델 가드를 만들며 실측한 것들:
+
+- **에이전트 정의 파일은 스폰 때마다 다시 읽힌다.** 세션 도중 `~/.claude/agents/x.md`의 `model:`을
+  바꾸고 다시 띄우면 새 모델로 뜬다 (haiku → sonnet으로 확인). 그래서 lead-\* 전환이 실행 중
+  세션까지 닿는다.
+- **세션 자신의 모델은 시작 후 못 바꾼다.** 프로젝트 settings의 `model`을 도중에 바꿔도, `--settings`
+  파일을 바꿔도 그 세션은 계속 원래 모델로 돈다.
+- **watch되는 settings 파일의 훅은 실행 중 세션에 반영된다.** 프로젝트 `.claude/settings.json`에
+  훅을 도중에 추가하면 다음 프롬프트에서 실행된다. 반면 `--settings`로 넘긴 파일은 시작 시점에만
+  읽힌다 (훅은 등록되지만 이후 변경은 무시).
+- **훅은 세션의 환경 변수를 물려받는다.** `CC_ORCH_MODEL`을 export해 두면 훅이 그대로 본다.
+- `UserPromptSubmit` 훅 입력에는 `model` 필드가 없다. 세션이 지금 실제로 쓰는 모델은
+  `transcript_path`의 마지막 assistant 메시지에서 읽는다.
+- `claude -p /usage`는 모델 호출 없이 주간 사용률을 텍스트로 준다 (~2초, 토큰 0). 버킷 이름은
+  API 쪽 `seven_day_overage_included`가 패널의 `Current week (Fable)`에 해당한다.

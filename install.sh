@@ -47,6 +47,18 @@ check() {
   local n; n=$(ls "$CLAUDE_DIR"/agents/lead-*.md "$CLAUDE_DIR"/agents/dev-*.md 2>/dev/null | wc -l)
   echo "  roster   $n generated agent files (expect 7)"
   [[ "$n" -eq 7 ]] || ok=1
+
+  if systemctl --user is-enabled orch-model-guard.timer >/dev/null 2>&1; then
+    echo "  ok       model guard timer ($(systemctl --user is-active orch-model-guard.timer))"
+  else
+    echo "  MISSING  model guard timer"; ok=1
+  fi
+  if grep -q 'orch-model-notice.sh' "$CLAUDE_DIR/settings.json" 2>/dev/null; then
+    echo "  ok       model notice hook in settings.json"
+  else
+    echo "  MISSING  model notice hook in settings.json"; ok=1
+  fi
+  echo "  model    $("$REPO_DIR/bin/orch-model-guard" active) active for orchestrator + lead-*"
   return $ok
 }
 
@@ -64,10 +76,14 @@ link "$REPO_DIR/agents/orchestrator.md" "$CLAUDE_DIR/agents/orchestrator.md"
 link "$REPO_DIR/agents/verifier.md"     "$CLAUDE_DIR/agents/verifier.md"
 link "$REPO_DIR/bin/cc-orch"            "$BIN_DIR/cc-orch"
 
-chmod +x "$REPO_DIR"/*.sh "$REPO_DIR/bin/cc-orch"
+chmod +x "$REPO_DIR"/*.sh "$REPO_DIR/bin/"* "$REPO_DIR/hooks/"*.sh
 
 echo
 "$REPO_DIR/build-roster.sh"
+
+echo
+echo "model guard:"
+"$REPO_DIR/bin/orch-model-guard" install
 
 echo
 case ":$PATH:" in

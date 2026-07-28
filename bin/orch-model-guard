@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# orch-model-guard — keep Tier 1 / Tier 2 on a model that still has quota.
+#
+# Polls `claude -p /usage`, and when the Fable weekly bucket is spent it moves the orchestrator
+# and every lead-* slot to the fallback model; when the week rolls over it moves them back.
+#
+# What each half of the switch reaches, measured on 2.1.220 rather than assumed:
+#
+#   lead-*        ~/.claude/agents/lead-*.md is re-read when a subagent is spawned, so rewriting
+#                 the frontmatter reaches sessions that are ALREADY RUNNING. Verified: flip the
+#                 file mid-session and the next spawn comes up on the new model.
+#   orchestrator  a session's own model is fixed when the process starts — no settings file, no
+#                 agent file, nothing changes it afterwards. New sessions get it from cc-orch,
+#                 which reads `orch-model-guard active`. Running sessions cannot be switched
+#                 from outside, so hooks/orch-model-notice.sh tells the user to type /model.
+#
+# usage:
+#   orch-model-guard check              poll usage and switch if the thresholds say so
+#   orch-model-guard status             what is active, why, and what the roster actually says
+#   orch-model-guard active             print the active model (for scripts; always prints one)
+#   orch-model-guard set <m>|primary|fallback|auto
+#                                       force a model and pin it (auto un-pins, resumes polling)
+#   orch-model-guard install            install the systemd timer + the in-session notice hook
+#   orch-model-guard uninstall          remove both
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+STATE_DIR="$HOME/.claude/orchestra-state"
+STATE="$STATE_DIR/state"
+LOG="$STATE_DIR/guard.log"
+USAGE_SNAPSHOT="$STATE_DIR/last-usage.txt"
+AGENTS_DIR="$HOME/.claude/agents"
+HOOK="$REPO_DIR/hooks/orch-model-notice.sh"
+SETTINGS="$HOME/.claude/settings.json"
+UNIT_DIR="$HOME/.config/systemd/user"
+
+# shellcheck source=/dev/null
+. "$REPO_DIR/model-policy.conf"
+
+mkdir -p "$STATE_DIR"
+
+log() { printf '%s  %s\n' "$(date -Is)" "$*" >> "$LOG"; }
+
+# --- state -------------------------------------------------------------------------------
+# Flat key=value, not JSON: the notice hook runs on every user prompt and must not pay for a
+# JSON parser, and nothing here is worth a dependency.
+st() { [ -r "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | head -1; }
+
+active_model() { local m; m="$(st active)"; printf '%s\n' "${m:-$PRIMARY_MODEL}"; }
+
+write_state() { # write_state <active> <pinned> <fable_pct> <all_pct> <changed_at> <reason>
+  local tmp="$STATE.tmp"
+  {
+    printf 'active=%s\n'     "$1"
+    printf 'pinned=%s\n'     "$2"
+    printf 'fable_pct=%s\n'  "$3"
+    printf 'all_pct=%s\n'    "$4"
+    printf 'checked_at=%s\n' "$(date -Is)"
+    printf 'changed_at=%s\n' "$5"
+    printf 'reason=%s\n'     "$6"
+    printf 'primary=%s\n'    "$PRIMARY_MODEL"
+    printf 'fallback=%s\n'   "$FALLBACK_MODEL"
+  } > "$tmp" && mv -f "$tmp" "$STATE"
+}
+
+# --- usage -------------------------------------------------------------------------------
+claude_bin() { printf '%s\n' "${CLAUDE_BIN:-$(command -v claude 2>/dev/null)}"; }
+
+poll_usage() {
+  local bin; bin="$(claude_bin)"
+  [ -x "$bin" ] || { log "ERROR: claude binary not found (set CLAUDE_BIN)"; return 1; }
+  # --setting-sources project: this runs every few minutes, so it must not fire the user's
+  # session hooks. --no-session-persistence keeps it out of the session list. /usage is answered
+  # locally from the rate-limit endpoint — no model call, ~2s, no tokens.
+  timeout 120 "$bin" -p "/usage" --model haiku --no-session-persistence --setting-sources project 2>&1
+}
+
+# Pull "Current week (<label>): NN% used" out of the panel, matching <label> loosely so a
+# rename from "Fable" to "Fable 5" does not silently disable the guard.
+pct_for() { # pct_for <panel-text> <label-substring>
+  printf '%s\n' "$1" \
+    | sed -n 's/.*Current week (\([^)]*\))[^0-9]*\([0-9]\{1,3\}\)% used.*/\1|\2/p' \
+    | awk -F'|' -v want="$2" 'index(tolower($1), tolower(want)) > 0 { print $2; exit }'
+}
+
+# --- applying ----------------------------------------------------------------------------
+apply_model() { # apply_model <model> <reason>
+  local model="$1" reason="$2" n=0 f
+  shopt -s nullglob
+  for f in "$AGENTS_DIR"/lead-*.md; do
+    grep -q '^model: ' "$f" || { log "WARN: no model line in $f"; continue; }
+    sed -i "s|^model: .*|model: ${model}|" "$f" && n=$((n + 1))
+  done
+  shopt -u nullglob
+  printf '%s\n' "$n"
+}
+
+notify() { # best effort; there is usually no desktop bus behind a systemd user timer
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -u critical "cc-orchestra" "$1" >/dev/null 2>&1 || true
+}
+
+# --- commands ----------------------------------------------------------------------------
+cmd_check() {
+  # Never let two timer firings race on the roster files.
+  exec 9>"$STATE_DIR/.lock"
+  flock -n 9 || exit 0
+
+  local cur pinned changed_at panel fable all target n
+  cur="$(active_model)"
+  pinned="$(st pinned)"; pinned="${pinned:-0}"
+  changed_at="$(st changed_at)"
+
+  panel="$(poll_usage)" || { log "poll failed, keeping $cur"; exit 0; }
+  printf '%s\n' "$panel" > "$USAGE_SNAPSHOT"
+
+  fable="$(pct_for "$panel" "$USAGE_LABEL")"
+  all="$(pct_for "$panel" "all models")"
+
+  if [ -z "$fable" ]; then
+    # Either the panel changed shape or the bucket vanished. Do not guess — a wrong guess here
+    # either strands the tier on a dead model or burns Opus for a week.
+    log "WARN: no '$USAGE_LABEL' weekly bucket in /usage output, keeping $cur (see $USAGE_SNAPSHOT)"
+    exit 0
+  fi
+
+  if [ "$pinned" = "1" ]; then
+    write_state "$cur" 1 "$fable" "${all:-?}" "$changed_at" "pinned"
+    exit 0
+  fi
+
+  target="$cur"
+  if   [ "$fable" -ge "$SWITCH_AT_PCT" ];  then target="$FALLBACK_MODEL"
+  elif [ "$fable" -le "$RESTORE_AT_PCT" ]; then target="$PRIMARY_MODEL"
+  fi
+
+  if [ "$target" = "$cur" ]; then
+    write_state "$cur" 0 "$fable" "${all:-?}" "$changed_at" "${USAGE_LABEL} ${fable}%"
+    exit 0
+  fi
+
+  n="$(apply_model "$target" "auto")"
+  write_state "$target" 0 "$fable" "${all:-?}" "$(date -Is)" "auto: ${USAGE_LABEL} ${fable}% (switch>=${SWITCH_AT_PCT}, restore<=${RESTORE_AT_PCT})"
+  log "SWITCH $cur -> $target  (${USAGE_LABEL} ${fable}%, all models ${all:-?}%) — rewrote $n lead file(s)"
+
+  if [ "$target" = "$FALLBACK_MODEL" ]; then
+    notify "Fable weekly quota spent (${fable}%). lead-* moved to ${target}. Running orchestrator sessions still need: /model ${target}"
+    if [ -n "$all" ] && [ "$all" -ge 100 ] 2>/dev/null; then
+      log "WARN: the all-models weekly bucket is at ${all}% too — ${FALLBACK_MODEL} will not help until it resets"
+    fi
+  else
+    notify "Fable weekly quota reset (${fable}%). lead-* back on ${target}. Running orchestrator sessions: /model ${target}"
+  fi
+  exit 0
+}
+
+cmd_status() {
+  local f
+  echo "policy      $PRIMARY_MODEL -> $FALLBACK_MODEL   (switch >= ${SWITCH_AT_PCT}%, restore <= ${RESTORE_AT_PCT}%)"
+  echo "active      $(active_model)$([ "$(st pinned)" = "1" ] && echo "   [PINNED — auto switching is off]")"
+  if [ -r "$STATE" ]; then
+    echo "usage       ${USAGE_LABEL} $(st fable_pct)% · all models $(st all_pct)%   (checked $(st checked_at))"
+    echo "last change $(st changed_at)   $(st reason)"
+  else
+    echo "usage       (never polled — run: orch-model-guard check)"
+  fi
+  echo
+  echo "roster on disk:"
+  shopt -s nullglob
+  for f in "$AGENTS_DIR"/orchestrator.md "$AGENTS_DIR"/lead-*.md "$AGENTS_DIR"/dev-*.md "$AGENTS_DIR"/verifier.md; do
+    printf '  %-14s %s\n' "$(basename "$f" .md)" "$(sed -n 's/^model: //p' "$f" | head -1)"
+  done
+  shopt -u nullglob
+  echo "  (orchestrator.md is a symlink into the repo and keeps the primary model;"
+  echo "   cc-orch passes --model from this guard, so it is the launcher that decides.)"
+  echo
+  printf 'timer       '
+  systemctl --user is-active orch-model-guard.timer 2>/dev/null || echo "not installed"
+  systemctl --user list-timers orch-model-guard.timer --no-pager 2>/dev/null | sed -n '2p'
+  printf 'notice hook '
+  if grep -q 'orch-model-notice.sh' "$SETTINGS" 2>/dev/null; then echo "registered in $SETTINGS"; else echo "NOT registered"; fi
+}
+
+cmd_set() {
+  local want="${1:-}" model n
+  case "$want" in
+    primary)  model="$PRIMARY_MODEL" ;;
+    fallback) model="$FALLBACK_MODEL" ;;
+    auto)
+      write_state "$(active_model)" 0 "$(st fable_pct)" "$(st all_pct)" "$(st changed_at)" "un-pinned"
+      log "un-pinned, auto switching resumed"
+      echo "auto switching resumed (active: $(active_model))"
+      return 0 ;;
+    "")  echo "usage: orch-model-guard set <model>|primary|fallback|auto" >&2; return 1 ;;
+    *)   model="$want" ;;
+  esac
+  n="$(apply_model "$model" "manual")"
+  write_state "$model" 1 "$(st fable_pct)" "$(st all_pct)" "$(date -Is)" "manual pin"
+  log "MANUAL $model — rewrote $n lead file(s), pinned"
+  echo "active model is now $model (pinned; 'set auto' to resume polling) — $n lead file(s) rewritten"
+  echo "running orchestrator sessions still need:  /model $model"
+}
+
+cmd_install() {
+  local bin; bin="$(claude_bin)"
+  [ -x "$bin" ] || { echo "ERROR: claude not on PATH — cannot pin it into the systemd unit." >&2; return 1; }
+
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/orch-model-guard.service" <<EOF
+[Unit]
+Description=cc-orchestra model guard — move Tier 1/2 off Fable when its weekly quota is spent
+
+[Service]
+Type=oneshot
+# systemd user units get a minimal PATH; pin the claude that was on PATH at install time.
+Environment=PATH=$(dirname "$bin"):/usr/local/bin:/usr/bin:/bin
+ExecStart=$REPO_DIR/bin/orch-model-guard check
+EOF
+  cat > "$UNIT_DIR/orch-model-guard.timer" <<EOF
+[Unit]
+Description=Poll Claude usage every ${POLL_MINUTES} min for the cc-orchestra model guard
+
+[Timer]
+OnActiveSec=1min
+OnBootSec=2min
+OnUnitActiveSec=${POLL_MINUTES}min
+AccuracySec=30s
+Persistent=true
+Unit=orch-model-guard.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now orch-model-guard.timer >/dev/null
+  echo "  timer    orch-model-guard.timer (every ${POLL_MINUTES}m)"
+
+  register_hook install
+  echo "  hook     UserPromptSubmit -> hooks/orch-model-notice.sh in $SETTINGS"
+}
+
+cmd_uninstall() {
+  systemctl --user disable --now orch-model-guard.timer >/dev/null 2>&1
+  rm -f "$UNIT_DIR/orch-model-guard.timer" "$UNIT_DIR/orch-model-guard.service"
+  systemctl --user daemon-reload
+  register_hook uninstall
+  echo "timer and notice hook removed (state kept in $STATE_DIR)"
+}
+
+# ~/.claude/settings.json is edited rather than guardrails.json on purpose: settings.json is on
+# Claude Code's watch list, so a hook added here reaches sessions that are already running,
+# while a --settings file is only read at startup. The hook is silent outside orch sessions.
+register_hook() { # register_hook install|uninstall
+  python3 - "$1" "$HOOK" "$SETTINGS" "$HOME/.claude/backups" <<'PY'
+import json, os, shutil, sys, time
+
+mode, hook, path, backup_dir = sys.argv[1:5]
+settings = {}
+if os.path.exists(path):
+    with open(path) as fh:
+        settings = json.load(fh)
+    os.makedirs(backup_dir, exist_ok=True)
+    shutil.copy2(path, os.path.join(backup_dir, "settings.json.%d.bak" % time.time()))
+
+hooks = settings.setdefault("hooks", {})
+entries = [e for e in hooks.get("UserPromptSubmit", [])
+           if not any("orch-model-notice.sh" in h.get("command", "") for h in e.get("hooks", []))]
+
+if mode == "install":
+    entries.append({"matcher": "*", "hooks": [
+        {"type": "command", "command": "bash '%s'" % hook, "timeout": 10}]})
+
+if entries:
+    hooks["UserPromptSubmit"] = entries
+else:
+    hooks.pop("UserPromptSubmit", None)
+if not hooks:
+    settings.pop("hooks", None)
+
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(settings, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+case "${1:-check}" in
+  check)      cmd_check ;;
+  status)     cmd_status ;;
+  active)     active_model ;;
+  set)        shift; cmd_set "${1:-}" ;;
+  install)    cmd_install ;;
+  uninstall)  cmd_uninstall ;;
+  -h|--help)  sed -n '2,26p' "$0" ;;
+  *)          echo "unknown command: $1 (try --help)" >&2; exit 1 ;;
+esac

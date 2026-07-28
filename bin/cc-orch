@@ -68,9 +68,17 @@ done
 cd "$PROJECT_DIR"
 export CC_ORCH_PROJECT="$PROJECT_NAME"
 
+# The model is not hardcoded here: orch-model-guard moves Tier 1/2 off Fable when its weekly
+# quota is spent and back when the week rolls over. A session's model can only be chosen at
+# startup, so this is the one place that decides it. CC_ORCH_MODEL lets the notice hook see,
+# without guessing from argv, what this session was launched on.
+MODEL="$("$ORCH_HOME/bin/orch-model-guard" active 2>/dev/null)"
+MODEL="${MODEL:-fable[1m]}"
+export CC_ORCH_MODEL="$MODEL"
+
 args=(
   --agent orchestrator
-  --model 'fable[1m]'
+  --model "$MODEL"
   --effort xhigh
   --dangerously-skip-permissions
   --settings "$ORCH_HOME/guardrails.json"
