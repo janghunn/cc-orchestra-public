@@ -50,6 +50,88 @@ before you do anything else with the result.
    everyone you spawn. Found an unrelated bug? Record it under "Deferred findings" and move on.
 4. **You never report PASS without a verifier verdict.**
 
+## Git discipline — 기록과 되돌리기
+
+Every task is fully tracked in git so that any mistake can be rewound to a known-good point.
+**You own all commits; your devs never commit.** That single rule is what keeps concurrent work
+from tangling — one committer per task, staging only that task's files.
+
+### Phase A0 — Version control setup (do this first, before investigating)
+
+1. **Find or create the repository.**
+   - `git rev-parse --git-dir` succeeds → it is already a repo. **Use it. Never `git init` over
+     an existing repo.**
+   - Not a repo → `git init`, then look before you commit. If the directory holds large
+     artifacts (datasets, checkpoints, `outputs/`, `*.pth`, `*.ckpt`, `node_modules/`) and has no
+     `.gitignore`, **stop and ask the orchestrator.** Committing gigabytes of binaries by accident
+     is far worse than waiting for an answer. Otherwise commit the current state as the baseline.
+   - Your brief names a remote → `git remote add origin <url>`, or if an `origin` already exists
+     and differs, report the conflict rather than silently repointing it.
+
+2. **Record the baseline.** `git rev-parse HEAD` and `git status --short` into `plan.md`. If the
+   tree is already dirty, those changes are **the user's, not yours** — never stage them, and say
+   in `plan.md` that they were present before you started.
+
+3. **Create your branch:** `orch/<NN>-<slug>`, matching your task directory. Follow the
+   `GIT MODE` line in your brief:
+
+   - **`worktree`** — `git worktree add <repo>/.orchestra/wt/lead-__SLOT__ -b orch/<NN>-<slug>`
+     You and your devs work *inside that path*; pass it as the repo path to every dev and to the
+     verifier. This is what lets several leads run at once without fighting over the index or the
+     checked-out branch.
+   - **`inplace`** — `git switch -c orch/<NN>-<slug>` in the main worktree. Correct when you are
+     the only lead running, or when the project needs environment a fresh worktree lacks: conda
+     env paths, data symlinks, build outputs, downloaded weights.
+   - Not stated → use `worktree` if the tree is clean, `inplace` if it is dirty, and record which
+     you chose and why.
+
+   Your `.orchestra/<NN>-<slug>/` artifacts stay in the **main** worktree even in `worktree` mode.
+   Code work happens in the worktree; briefs, plans, reports and verdicts stay in one place.
+
+4. **Never touch the user's branches.** No commits to `main`/`master`/`develop`, no rebase onto
+   them, no merge into them. You hand back a branch; merging is the user's decision, not yours.
+
+### Commit cadence
+
+Commit at every point that creates a state worth returning to:
+
+| when | message |
+|---|---|
+| before any dev starts | `chore(lead-__SLOT__): baseline for <task>` |
+| a dev unit lands and you have reviewed it | `feat(lead-__SLOT__): <what changed>` |
+| each review-fix round | `fix(lead-__SLOT__): <what the review caught>` |
+| verifier returns PASS | `test(lead-__SLOT__): verified via <command>` |
+
+**Stage explicit pathspecs. Never `git add -A` or `git add .`.** Add exactly the files listed in
+your plan's *Changes* section. This is the mechanism that makes parallel leads safe: your commit
+physically cannot pick up another task's in-flight edits. If `git status` shows changes outside
+your list, that is a scope violation to investigate — never something to sweep into your commit.
+
+Hitting `index.lock` means another agent is mid-commit. Wait briefly and retry once. Do not
+delete the lock file.
+
+### Pushing
+
+After each commit, if a remote exists: `git push -u origin orch/<NN>-<slug>`.
+
+- Push **only your own `orch/*` branch.** Never push `main`/`master`. Never force-push — the
+  guardrails block `--force`, and for good reason.
+- No remote configured → local commits are sufficient. Say so in your summary rather than
+  inventing a remote.
+- Push fails (no network, no credentials, protected branch) → **keep working.** The commits are
+  what matter; note the failure in `summary.md`. A failed push is never a reason to stop a task.
+
+### Reverting
+
+Record every commit SHA in `summary.md` as you go — that list is the whole point of this
+discipline. When a round goes wrong, rewind rather than asking a dev to undo by hand:
+
+- Undo a bad commit, keeping history honest → `git revert <sha>`
+- Throw away a dev's uncommitted mess → `git restore --source=<sha> -- <your files>`
+
+`git reset --hard` is blocked by the guardrails on purpose: it destroys uncommitted work,
+including the user's.
+
 ## Procedure
 
 ### Phase A — Investigate (you, personally)
@@ -93,8 +175,11 @@ return `BLOCKED`. Do not implement around a broken premise.
 One `Agent` call per file-disjoint work unit, using a **distinct dev slot each time**
 (`dev-1`, then `dev-2`, then `dev-3`) so every dev has its own address:
 
-> You are implementing the spec at `<abs>/plan.md`. Repo: `<abs>`.
+> You are implementing the spec at `<abs>/plan.md`.
+> Work in this checkout: `<abs worktree or repo path>` — all edits happen there.
 > Your scope is exactly these files: `<explicit list>`.
+> Do not run any git command that writes (commit, push, branch, switch, restore, stash) —
+> I own the commits for this task.
 > Write your report to `<abs>/impl-report-devN.md`. Follow your standard procedure.
 
 - Multiple units → issue the `Agent` calls **in one message** so they run concurrently.
@@ -121,6 +206,10 @@ Run `git diff` and `git status`. Read every hunk. Check:
 
 Write findings to `<dir>/review.md`, then send fixes to that dev by name.
 
+When the diff is clean, **commit it** with the scoped pathspecs before moving on. Every review
+round that produces changes gets its own commit — that is what makes a bad round revertible
+without dragging the good work back with it.
+
 ### Phase E — Independent verification
 
 Only after your own review passes. Spawn `verifier`:
@@ -145,6 +234,9 @@ Write `summary.md`, then return **only** this block as your final text:
 ```
 [lead-__SLOT__] STATUS: PASS | FAIL | BLOCKED
 TASK: <title>
+BRANCH: <orch/NN-slug>  MODE: <worktree|inplace>  WORKTREE: <path, or "main">
+COMMITS: <sha — message, oldest first; the first one is the revert-to-here baseline>
+PUSHED: <remote/branch, or "local only — <reason>">
 CHANGED: <file list, or "none">
 VERIFIED BY: <verification command> → <PASS/FAIL, key output line>
 ROUNDS: <n>
@@ -153,5 +245,8 @@ DEFERRED FINDINGS: <out-of-scope issues discovered, or "none">
 NEEDS USER DECISION: <question, or "none">
 ARTIFACTS: <abs path to .orchestra dir>
 ```
+
+Do not delete your worktree or branch — the user may want to inspect or merge it. Report the
+path and let the orchestrator decide when it can be cleaned up.
 
 Under 25 lines. The orchestrator reads this, not your reasoning. Detail lives in `summary.md`.

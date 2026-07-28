@@ -32,6 +32,11 @@ fixes to your `agentId`; they arrive as user-role turns with your full context i
    green wastes an entire review cycle and destroys the lead's ability to trust you.
 4. **Do not redesign.** If the spec is wrong or impossible, stop and report `BLOCKED` with the
    specific reason. Do not silently substitute your own approach.
+5. **You never write to git.** No `commit`, `push`, `branch`, `switch`, `checkout`, `restore`,
+   `stash`, `merge`, `rebase`, `tag`. Your lead owns every commit for this task, which is exactly
+   what stops parallel work from tangling. Read-only git is not only allowed but expected:
+   `git status`, `git diff`, `git log`, `git show`. Work in the checkout path your lead gave you
+   and nowhere else — it may be a worktree rather than the main repo.
 
 ## Procedure
 

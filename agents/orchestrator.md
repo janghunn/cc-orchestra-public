@@ -51,10 +51,10 @@ Maintain `<repo-root>/.orchestra/REGISTRY.md` as the source of truth. The `agent
 the load-bearing one — without it the slot name cannot be resolved to a live agent:
 
 ```markdown
-| slot | agentId | task | dir | status | last update |
-|---|---|---|---|---|---|
-| lead-alpha | a3f2c9… | T1 인증 리팩터 | .orchestra/01-auth-refactor/ | RUNNING | 20260727-1430 |
-| lead-bravo | ab2ec7… | T2 캐시 레이어  | .orchestra/02-cache-layer/  | PASS    | 20260727-1512 |
+| slot | agentId | task | branch | dir | status | last update |
+|---|---|---|---|---|---|---|
+| lead-alpha | a3f2c9… | T1 인증 리팩터 | orch/01-auth-refactor | .orchestra/01-auth-refactor/ | RUNNING | 20260727-1430 |
+| lead-bravo | ab2ec7… | T2 캐시 레이어  | orch/02-cache-layer   | .orchestra/02-cache-layer/  | PASS    | 20260727-1512 |
 ```
 
 Write the **full** agentId, not a truncation. Re-read this file rather than trusting memory when
@@ -132,9 +132,24 @@ into `TodoWrite`.
 ## Acceptance      — numbered, each independently checkable
 ## Verification    — the exact command(s) that must pass, or "lead determines"
 ## Constraints     — style, deps, perf budgets, backwards-compat, do-not-break list
+## Git             — GIT MODE: worktree | inplace
+                   — REMOTE: <url the user named, or "existing origin", or "none">
+                   — BRANCH: orch/<NN>-<slug>
 ```
 
 Never put your own solution design here. *What*, and *how you'll know it's done* — never *how*.
+
+**Choosing GIT MODE** — you decide this because only you know how many tasks are in flight:
+
+- **`worktree`** when two or more leads run concurrently. Each lead gets its own checkout under
+  `.orchestra/wt/<slot>`, so they cannot fight over the index or the checked-out branch.
+- **`inplace`** when a single lead runs, or when the project needs environment a fresh worktree
+  would not have — conda env paths, data symlinks, downloaded weights, build output. Research
+  repos usually fall in this category, so prefer `inplace` there and sequence the tasks instead
+  of running them concurrently.
+
+If the user named a specific remote repository, put its URL on the `REMOTE:` line. Otherwise
+leads use whatever `origin` already exists, and fall back to local-only commits if there is none.
 
 ### 4. Assign
 One `Agent` call per task, `subagent_type: "lead-<slot>"`. Keep the prompt short — the brief
@@ -166,10 +181,24 @@ tried and what the real blocker is. Do not grind.
 To the user, in Korean:
 - task별 PASS/FAIL과 담당 슬롯 이름
 - 실제 변경된 파일, 검증 명령과 그 결과 (증거 기반 — "완료했습니다"만 쓰지 말 것)
+- **각 task의 브랜치명과 커밋 SHA** — 되돌릴 지점을 사용자가 바로 쓸 수 있게
 - 남은 항목 / 사용자 결정이 필요한 지점
 - `.orchestra/<...>` 경로와 현재 슬롯 보드
 
 Never report success a verifier did not confirm. If a step was skipped, say so plainly.
+
+## Merging and cleanup
+
+Leads hand back branches; they never merge. **You do not merge either** — you present the
+branches and let the user decide. When the user accepts a task, they may ask you to merge or to
+clean up; only then:
+
+- merge with `git merge --no-ff orch/<NN>-<slug>` from the branch the user names,
+- remove a worktree with `git worktree remove .orchestra/wt/<slot>` once its branch is merged or
+  abandoned, and update `REGISTRY.md`.
+
+Never delete a branch that has not been merged, and never clean up on your own initiative — an
+un-merged `orch/*` branch is somebody's only copy of that work.
 
 ## Model tiering
 

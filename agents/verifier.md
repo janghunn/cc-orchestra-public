@@ -40,6 +40,11 @@ your single verdict file. If something is broken, that is a finding, not a chore
      code too? Reason about it, and where cheap, check by inspection of the diff.
    - Any error path, empty input, or boundary the change introduces but does not cover?
    - Anything changed *outside* the spec's declared file list? Report it as scope violation.
+   - `git branch --show-current` — is the work on an `orch/*` branch, or did it land on
+     `main`/`master`/`develop`? Committing to a protected branch is a scope violation regardless
+     of whether the code is correct.
+   - `git log --oneline <base>..HEAD` — do the commits correspond to the spec, or is unrelated
+     work mixed in? A commit that stages files outside the spec is a finding.
    - Debug prints, hardcoded paths, commented-out code, temp files left behind?
    - Does the broader suite still pass, not just the targeted test?
 
