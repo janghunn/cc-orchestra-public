@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # UserPromptSubmit hook — the one gap orch-model-guard cannot close by itself.
 #
-# A running session's own model is fixed at process start: no settings file, agent file or hook
-# can change it (measured on 2.1.220). So when the guard moves the tier off Fable, every lead-*
-# spawned from here on picks the new model up automatically, but the orchestrator session the
-# user is sitting in keeps the model it launched with — until the user types /model.
+# A running session is frozen at process start in two ways, both measured on 2.1.197 and 2.1.220
+# with a gated probe (swap a marker in an agent file, verify it on disk, then spawn again):
+#
+#   1. The session's own model cannot be changed from outside — no settings file, agent file or
+#      hook moves it. Only /model, typed by the user, or a restart.
+#   2. Agent definitions in ~/.claude/agents/ are cached at session start, NOT re-read per spawn.
+#      A lead-* spawned an hour after the guard rewrote its file still uses the model, prompt and
+#      effort that were on disk when the session started.
+#
+# (2) is why /model alone is not a fix: it moves Tier 1 only, and this session's lead-* keep
+# spawning on the model with no quota left. A restart is the only thing that moves both tiers.
 #
 # This hook is what tells them, in the session, at the moment they type. It stays silent in
 # every other session and while Tier 1 and the guard agree.
@@ -81,12 +88,15 @@ fi
 reason="$(sed -n 's/^reason=//p' "$STATE" | head -1)"
 
 msg="⚠️  모델 가드: Tier 1/2는 이제 ${active} 입니다 (${reason}).\\n"
-msg="${msg}    lead-* 는 이미 전환됨 — 다음 스폰부터 ${active} 로 뜹니다.\\n"
-msg="${msg}    이 세션(총괄)만 아직 ${live} 로 돌고 있습니다. 실행 중 세션의 모델은 밖에서 못 바꿉니다.\\n"
-msg="${msg}    →  /model ${active}   를 입력하세요. (또는 세션 재시작: cc-orch <project>)"
+msg="${msg}    이 세션은 ${live} 로 고정돼 있고, 이 세션이 띄우는 lead-* 도 계속 ${live} 로 뜹니다\\n"
+msg="${msg}    — 에이전트 정의는 세션 시작 시점에 캐시되므로 파일을 바꿔도 안 바뀝니다.\\n"
+msg="${msg}    →  cc-orch <project>   로 재시작하세요. 두 계층을 다 옮기는 유일한 방법입니다.\\n"
+msg="${msg}       /model ${active} 는 이 세션만 옮기고 lead-* 는 ${live} 에 남습니다 (임시 조치)."
 
 ctx="시스템 상태 변경: 모델 가드가 Tier 1/2 모델을 ${active} 로 전환했다 (${reason}). "
-ctx="${ctx}앞으로 띄우는 lead-* 는 자동으로 ${active} 를 쓴다. 다만 지금 이 세션 자신은 ${live} 로 실행 중이고, "
-ctx="${ctx}실행 중인 세션의 모델은 외부에서 변경할 수 없다. 답변 첫 줄에서 사용자에게 '/model ${active}' 입력이 필요하다고 알릴 것."
+ctx="${ctx}단, 이 세션은 ${live} 로 실행 중이고 에이전트 정의는 세션 시작 시점에 캐시되므로, "
+ctx="${ctx}이 세션이 앞으로 띄우는 lead-* 도 ${live} 로 뜬다 — 파일이 바뀌어도 반영되지 않는다. "
+ctx="${ctx}답변 첫 줄에서 사용자에게 알릴 것: 두 계층을 모두 옮기려면 'cc-orch <project>' 재시작이 필요하고, "
+ctx="${ctx}'/model ${active}' 는 이 세션만 옮기는 임시 조치라는 점. 진행 중 작업이 있으면 그것을 마친 뒤 재시작을 권할 것."
 
 printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"%s"}}\n' "$msg" "$ctx"

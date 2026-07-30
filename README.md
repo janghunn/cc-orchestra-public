@@ -289,17 +289,36 @@ orch-model-guard set fallback / primary / auto     # 수동 고정(pin) 및 해�
 
 | 대상 | 자동 반영 | 근거 |
 |---|---|---|
-| `lead-*` (실행 중 세션 포함) | **된다** | `~/.claude/agents/lead-*.md`는 서브에이전트를 띄울 때마다 다시 읽힌다. 세션 도중 파일을 바꾸면 다음 스폰부터 새 모델로 뜬다. |
-| 새로 띄우는 orchestrator | **된다** | `cc-orch`가 `orch-model-guard active`를 읽어 `--model`로 넘긴다. |
-| **이미 돌고 있는 orchestrator 본인** | **안 된다** | 세션 자신의 모델은 프로세스 시작 시점에 고정된다. settings 파일도, agent 파일도, 훅도 바꾸지 못한다. |
+| 새로 띄우는 세션 (전 계층) | **된다** | `cc-orch`가 `orch-model-guard active`를 읽어 `--model`로 넘기고, 로스터 파일도 시작 시점에 읽힌다. |
+| 이미 돌고 있는 세션의 `lead-*` | **안 된다** | **에이전트 정의는 세션 시작 시점에 캐시된다.** 파일을 바꿔도 그 세션이 이후에 띄우는 서브에이전트는 시작 당시의 모델·프롬프트·effort를 쓴다. |
+| 이미 돌고 있는 orchestrator 본인 | **안 된다** | 세션 자신의 모델은 프로세스 시작 시점에 고정된다. settings 파일도, agent 파일도, 훅도 바꾸지 못한다. |
 
-그래서 마지막 칸은 사람이 한 번 눌러야 한다. `hooks/orch-model-notice.sh`가 그 순간을 놓치지
-않게, 불일치 상태에서 프롬프트를 넣을 때마다 세션 안에서 알린다:
+**측정 방법** (2.1.197·2.1.220 양쪽 동일 결과) — 파일 게이트로 타이밍 레이스를 제거한 프로브:
+세션이 프로브 에이전트를 한 번 스폰하고 게이트에서 대기 → 에이전트 파일의 마커를
+`MARKER-ALPHA`→`MARKER-BRAVO`로 바꾸고 **디스크에서 확인** → 게이트 개방 → 두 번째 스폰.
+
+```
+on-disk marker before release: MARKER-BRAVO
+RESULT: FIRST=MARKER-ALPHA  SECOND=MARKER-ALPHA
+```
+
+두 번째 스폰도 옛 마커를 받았다. 프롬프트 본문이 캐시된다면 같은 파일의 frontmatter(`model`,
+`effort`)도 당연히 캐시된다 — 같은 파싱 결과다.
+
+**그래서 실행 중 세션은 재시작해야 한다.** `/model`은 Tier 1만 옮기고 그 세션의 `lead-*`는
+소진된 모델에 그대로 남으므로 임시 조치에 그친다. `hooks/orch-model-notice.sh`가 불일치
+상태에서 프롬프트를 넣을 때마다 이 사실을 세션 안에서 알린다:
 
 ```
 ⚠️  모델 가드: Tier 1/2는 이제 opus[1m] 입니다.
-    →  /model opus[1m]   를 입력하세요. (또는 세션 재시작: cc-orch <project>)
+    이 세션은 fable[1m] 로 고정돼 있고, 이 세션이 띄우는 lead-* 도 계속 fable[1m] 로 뜹니다
+    — 에이전트 정의는 세션 시작 시점에 캐시되므로 파일을 바꿔도 안 바뀝니다.
+    →  cc-orch <project>   로 재시작하세요. 두 계층을 다 옮기는 유일한 방법입니다.
+       /model opus[1m] 는 이 세션만 옮기고 lead-* 는 fable[1m] 에 남습니다 (임시 조치).
 ```
+
+진행 중인 작업이 있으면 그것을 마친 뒤 재시작한다. `cc-orch <name> <dir> -c` 로 같은
+디렉터리의 최근 대화를 이어받으면 컨텍스트 손실을 줄일 수 있다.
 
 이 훅은 두 군데에 등록된다. `~/.claude/settings.json`은 Claude Code가 watch하므로 **이미 돌고
 있는 세션**까지 닿고, `guardrails.json`은 시작 시점에만 읽히지만 cc-orch가 띄우는 **모든 새
@@ -320,10 +339,21 @@ vi ~/cc-orchestra/templates/lead.md.tpl   # 또는 dev.md.tpl
 ~/cc-orchestra/build-roster.sh
 ```
 
-`agents/orchestrator.md`와 `agents/verifier.md`는 슬롯이 하나뿐이라 직접 편집하며, 심링크라
-빌드 없이 바로 반영된다.
+`agents/orchestrator.md`와 `agents/verifier.md`는 슬롯이 하나뿐이라 직접 편집한다. 심링크라
+빌드 단계는 필요 없다.
 
 orch 세션 자체는 이 파일들을 못 고치도록 막혀 있으므로, 수정은 일반 `claude` 세션에서.
+
+> ⚠️ **프롬프트를 고쳐도 실행 중인 세션에는 닿지 않는다.** 에이전트 정의는 세션 시작 시점에
+> 캐시되므로, 그 세션이 이후에 띄우는 `lead-*`·`dev-*`·`verifier`도 시작 당시 버전으로 뜬다
+> ([측정](#실행-중인-세션에-어디까지-닿는가)). 반영에는 **세션 재시작**이 필요하다:
+> 진행 중 작업을 마친 뒤 `cc-orch <name> <dir> -c`.
+>
+> 이것 때문에 오래 돌린 세션은 어떤 하네스 버전으로 도는지 헷갈릴 수 있다. 확인법:
+> ```bash
+> ps -o lstart= -p <PID>                          # 세션 시작 시각
+> git -C ~/cc-orchestra log --oneline --until="<그 시각>" -1   # 그때 캐시된 커밋
+> ```
 
 ## 다른 머신에 배포
 
