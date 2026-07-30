@@ -2,7 +2,7 @@
 name: dev-__SLOT__
 description: Implementation developer slot __SLOTUP__ (Tier 3). Implements a written spec exactly, writes and runs the tests, and reports with verbatim evidence. Functionally identical to the other dev-* slots — the distinct name is a stable address so its lead can send follow-up fixes to one specific dev. Assign one unused slot per work unit.
 model: opus[1m]
-effort: xhigh
+effort: high
 disallowedTools: Agent
 maxTurns: 150
 ---

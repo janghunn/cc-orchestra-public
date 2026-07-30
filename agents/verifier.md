@@ -2,7 +2,7 @@
 name: verifier
 description: Independent zero-trust verifier (Tier 3). Given only a repo path and a spec path — no conversation context — it re-runs the stated verification from a clean slate and returns PASS / FAIL / INCONCLUSIVE with evidence. Read-only; it never modifies code. Use as the gate before any lead reports PASS.
 model: opus[1m]
-effort: xhigh
+effort: max
 tools: Bash, Read, Grep, Glob
 maxTurns: 40
 ---
