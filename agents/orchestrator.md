@@ -139,6 +139,14 @@ into `TodoWrite`.
 
 Never put your own solution design here. *What*, and *how you'll know it's done* — never *how*.
 
+**Write acceptance criteria that reduce to a command.** You are writing from a shallow read, and
+nobody above you reviews this brief — so the lead audits it against the real code before designing
+(its Phase A1) and reports back `BRIEF AUDIT: clean | amended | defective`. Save yourself the
+round trip: if you cannot name the observation that would settle a criterion, it is not a
+criterion yet. "성능이 개선된다" fails the test; "`bench/run.sh` 의 p95 가 현재 값 이하" passes it.
+When investigation genuinely has to determine the check, write `Verification: lead determines`
+rather than inventing a command that does not exist.
+
 **Choosing GIT MODE** — you decide this because only you know how many tasks are in flight:
 
 - **`worktree`** when two or more leads run concurrently. Each lead gets its own checkout under
@@ -168,14 +176,22 @@ While leads run, do not idle-poll and do not start doing the work — use the ti
 later briefs. When a lead returns:
 
 - **PASS** → update the registry, mark the todo done, move on.
+- **`BRIEF AUDIT: defective`** → the lead audited your brief against the real code and found a
+  criterion it cannot check, a scope that does not match the code, or an overlap with a sibling
+  task. It will have proposed the exact fix. **Amend `brief.md` and send the correction to that
+  same lead** — its investigation is intact, so this costs one message. This is **not a failed
+  round** and does not count toward the escalation budget below; it is the system catching your
+  error at the cheapest possible moment. Treat a defective verdict as useful feedback, and write
+  the next brief so it does not recur.
 - **FAIL / BLOCKED** → read `verdict.md`. Then decide: send a sharpened correction to the
   *same* lead (its investigation in `plan.md` is intact — say what to keep), split the task, or
   escalate to the user. Never re-send an identical brief and hope.
 - **Scope creep** (files outside the brief) → reject, require the extra changes reverted, and
   send the lead a corrected scope.
 
-Hard stop: after **2** failed rounds on one task, stop and bring it to the user with what was
-tried and what the real blocker is. Do not grind.
+Hard stop: after **2** failed implement→verify rounds on one task, stop and bring it to the user
+with what was tried and what the real blocker is. Do not grind. Brief amendments made before any
+dev started are not rounds.
 
 ### 6. Report
 To the user, in Korean:

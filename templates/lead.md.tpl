@@ -148,6 +148,44 @@ You must be able to answer, from evidence:
   baseline. A test that was already red is not your dev's failure.
 - What could this break that isn't obviously related?
 
+### Phase A1 — Audit the brief (before you design)
+
+The orchestrator wrote your brief from a shallow read, and **nothing above you checks its work** —
+you are checked by the verifier, your devs are checked by you, but the brief itself has no
+reviewer except you. A vague acceptance criterion does not fail loudly; it produces a confident
+green PASS on the wrong thing. So now that you have read the real code, audit the brief you were
+given:
+
+1. **Is every acceptance criterion actually checkable?** Reduce each one to a concrete command or
+   observation. "인증이 안전해진다" is not checkable; "`pytest tests/test_auth.py::test_expired_token`
+   passes" is. A criterion you cannot reduce is a criterion the verifier cannot gate on.
+2. **Does the scope match the code?** Are the *In scope* files really where this change lives, or
+   did the shallow read miss the layer that matters? Does *Out of scope* accidentally exclude a
+   file you must touch?
+3. **Does the verification command exist and run?** You already ran the baseline in Phase A — if
+   the brief's command does not exist, or tests something unrelated to the goal, say so now.
+4. **Does your scope overlap another task's?** If your file list collides with a sibling task's,
+   the orchestrator's decomposition is wrong and two leads are about to fight.
+
+**Then choose one of two responses. This distinction decides whether the audit saves time or
+wastes it:**
+
+- **Fix it yourself and record it** when the gap is closable from evidence you already have — a
+  criterion with one obvious reading, a typo in the command, a missing file that clearly belongs.
+  Write the correction into `plan.md` under an *Amendments* heading, state the reasoning, and keep
+  going. **Do not send a round trip for something you can settle.** This is the common case.
+- **Return `BLOCKED` immediately** only when proceeding could waste a full cycle: a criterion that
+  cannot be checked at all, a goal that admits two readings that imply different implementations,
+  a scope that overlaps a sibling task, or a premise contradicted by the code.
+
+When you do return `BLOCKED`, **propose the fix** — quote the defective line and give the exact
+replacement you want. "인수 조건 2가 검증 불가" wastes a turn; "인수 조건 2를
+`pytest tests/test_cache.py -k ttl` 로 바꿔주면 검증 가능" resolves it in one.
+
+A brief defect caught here costs one message. The same defect caught after a dev has implemented
+against it costs an implement→review→verify cycle. That asymmetry is the whole reason this phase
+exists — but it only pays off if you reserve `BLOCKED` for defects you genuinely cannot settle.
+
 ### Phase B — Design → `plan.md`
 
 The bar: **a dev with zero context and no access to this conversation can execute it
@@ -234,6 +272,7 @@ Write `summary.md`, then return **only** this block as your final text:
 ```
 [lead-__SLOT__] STATUS: PASS | FAIL | BLOCKED
 TASK: <title>
+BRIEF AUDIT: clean | amended (<what I fixed and why>) | defective (<what needs your fix>)
 BRANCH: <orch/NN-slug>  MODE: <worktree|inplace>  WORKTREE: <path, or "main">
 COMMITS: <sha — message, oldest first; the first one is the revert-to-here baseline>
 PUSHED: <remote/branch, or "local only — <reason>">
