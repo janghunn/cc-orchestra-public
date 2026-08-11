@@ -35,7 +35,8 @@ check() {
     "$CLAUDE_DIR/orchestra:$REPO_DIR" \
     "$CLAUDE_DIR/agents/orchestrator.md:$REPO_DIR/agents/orchestrator.md" \
     "$CLAUDE_DIR/agents/verifier.md:$REPO_DIR/agents/verifier.md" \
-    "$BIN_DIR/cc-orch:$REPO_DIR/bin/cc-orch"
+    "$BIN_DIR/cc-orch:$REPO_DIR/bin/cc-orch" \
+    "$BIN_DIR/codex-run:$REPO_DIR/bin/codex-run"
   do
     local dest="${pair%%:*}" src="${pair#*:}"
     if [[ -L "$dest" && "$(readlink -f "$dest")" == "$(readlink -f "$src")" ]]; then
@@ -59,6 +60,19 @@ check() {
     echo "  MISSING  model notice hook in settings.json"; ok=1
   fi
   echo "  model    $("$REPO_DIR/bin/orch-model-guard" active) active for orchestrator + lead-*"
+
+  # Codex is the second provider (Tier 3 lane / Tier 4 gate) but an optional one: its absence
+  # degrades the harness to Claude-only rather than breaking it, so WARN instead of failing.
+  if command -v codex >/dev/null 2>&1; then
+    # "Logged in using ChatGPT" goes to stderr, not stdout — capture both.
+    if codex login status 2>&1 | grep -qi 'logged in'; then
+      echo "  ok       codex CLI ($(codex --version 2>/dev/null), logged in) — sol/luna lanes live"
+    else
+      echo "  WARN     codex CLI present but not logged in — codex lanes will exit 4 (run: codex login)"
+    fi
+  else
+    echo "  WARN     codex CLI not found — Tier 3/4 codex lanes disabled (Claude-only still works)"
+  fi
   return $ok
 }
 
@@ -75,6 +89,7 @@ link "$REPO_DIR"                        "$CLAUDE_DIR/orchestra"
 link "$REPO_DIR/agents/orchestrator.md" "$CLAUDE_DIR/agents/orchestrator.md"
 link "$REPO_DIR/agents/verifier.md"     "$CLAUDE_DIR/agents/verifier.md"
 link "$REPO_DIR/bin/cc-orch"            "$BIN_DIR/cc-orch"
+link "$REPO_DIR/bin/codex-run"          "$BIN_DIR/codex-run"
 
 chmod +x "$REPO_DIR"/*.sh "$REPO_DIR/bin/"* "$REPO_DIR/hooks/"*.sh
 

@@ -1,24 +1,36 @@
 # cc-orchestra
 
-Claude Code용 3계층 위임 하네스. Tier 1이 사용자와 대화하며 작업을 쪼개고, Tier 2가 분석·설계·리뷰,
-Tier 3가 구현과 독립 검증을 맡는다.
+Claude Code용 4계층·2공급자 위임 하네스. Tier 1이 사용자와 대화하며 작업을 쪼개고, Tier 2가
+분석·설계·레인 배분·리뷰, Tier 3가 구현(Claude/Codex 두 레인), Tier 4가 독립 검증(제로 컨텍스트
++ 교차 패밀리, 두 게이트)을 맡는다.
 
 ```
  사용자
    │
    ▼
- orchestrator            Fable 5 @ xhigh    총괄 관리자 — 인테이크, 분해, 배정, 릴레이, 보고
-   │                                        Edit 도구 제거됨 (구현 불가)
-   ├── lead-alpha        Fable 5 @ xhigh    작업별 관리자 — 조사, 설계, diff 리뷰, 검증 게이트
-   ├── lead-bravo                           Edit 도구 제거됨 (구현 불가)
+ orchestrator                Fable 5 @ xhigh       총괄 관리자 — 인테이크, 분해, 배정, 릴레이, 보고
+   │                                               Edit 제거 (구현 불가), codex 호출도 금지
+   ├── lead-alpha            Fable 5 @ xhigh       작업별 관리자 — 조사, 설계, 레인 배분, diff 리뷰
+   ├── lead-bravo                                  Edit 제거 — 유일하게 codex-run을 부르는 계층
    ├── lead-charlie
    └── lead-delta
          │
-         ├── dev-1       Opus 5 @ high      구현 개발자 — 구현, 테스트, 증거 기반 보고
-         ├── dev-2                          Agent 도구 제거됨 (leaf, 재위임 불가)
-         ├── dev-3
-         └── verifier    Opus 5 @ max       독립 검증자 — 읽기 전용, 컨텍스트 제로
+         ├─ Tier 3 구현 ─────────────────────────────────────────────────────────
+         │    dev-1..3             Opus 5 @ high          Claude 레인 — 기본, 병렬 유닛, 1M 컨텍스트
+         │    codex-run implement  GPT-5.6-Sol @ xhigh    Codex 레인 — 디버깅, 2차 시도, 난도 높은 단일 유닛
+         │      └ --mech           GPT-5.6-Luna @ medium  기계적 대량 수정 (rename, lint, boilerplate)
+         │
+         └─ Tier 4 검증 ─────────────────────────────────────────────────────────
+              verifier             Opus 5 @ max           제로 컨텍스트 재검증 — 읽기 전용
+              codex-run review     GPT-5.6-Sol @ xhigh    교차 패밀리 diff 리뷰 — 읽기 전용
+                └ --fast           GPT-5.6-Luna @ high    소규모·저위험 diff용
 ```
+
+공급자가 둘인 이유: 이 파이프라인의 모든 코드는 Claude 패밀리가 쓰거나 리뷰한 것이므로,
+Tier 4의 Codex 게이트가 루프 안에서 **Claude의 맹점을 공유하지 않는 유일한 의견**이다.
+그리고 양쪽 다 max-20x 플랜이라 Tier 3를 두 레인에 분산하면 주간 쿼터가 처리량의 상한이
+되는 일도 늦춰진다. Codex는 Tier 2의 도구다 — orchestrator는 부르지 않고, 리드가
+`bin/codex-run`으로만 부른다.
 
 ## 설치
 
@@ -37,6 +49,10 @@ cd ~/cc-orchestra && ./install.sh
 | `~/.claude/agents/orchestrator.md` | `agents/orchestrator.md` |
 | `~/.claude/agents/verifier.md` | `agents/verifier.md` |
 | `~/.local/bin/cc-orch` | `bin/cc-orch` |
+| `~/.local/bin/codex-run` | `bin/codex-run` |
+
+Codex 레인은 **codex CLI + ChatGPT 로그인**을 요구한다 (`codex login`, 머신마다 별도).
+없어도 하네스는 Claude 단독으로 완전히 동작하며, `install.sh --check`가 WARN으로 알려준다.
 
 `lead-*.md` / `dev-*.md`는 `build-roster.sh`가 `~/.claude/agents`에 생성하는 실제 파일이며
 git 추적 대상이 아니다. 기존 파일이 있으면 덮어쓰지 않고 `.pre-cc-orchestra`로 밀어둔다.
@@ -104,12 +120,18 @@ Remote Control은 claude.ai 구독 로그인이 필요하며, 세션을 claude.a
 | 파일 | 작성자 | 내용 |
 |---|---|---|
 | `REGISTRY.md` | orchestrator | 슬롯 ↔ agentId ↔ 작업 매핑 (루트에 위치) |
-| `brief.md` | orchestrator | 목표, 범위 경계, 인수 조건, 제외 항목 |
+| `brief.md` | orchestrator | 목표, 범위 경계, 인수 조건, RISK, 제외 항목 |
 | `plan.md` | lead | 조사 결과 + 자기완결적 구현 명세 |
+| `plan-review-codex.md` | codex (조건부) | 구현 전 설계 교차 검토 — `PLAN-REVIEW: SOUND \| ISSUES n` |
 | `impl-report-devN.md` | dev | 변경 요약, 실행 명령, 원문 출력 |
+| `impl-report-codex.md` | codex 레인 | dev 리포트와 동일 계약 (`[codex]` 헤더) |
 | `review.md` | lead | diff 리뷰 지적사항 |
 | `verdict.md` | verifier | PASS / FAIL / INCONCLUSIVE + 근거 |
+| `codex-review.md` | codex 게이트 | `CODEX-REVIEW: CLEAR \| BLOCKING n / NONBLOCKING m` + 지적 |
 | `summary.md` | lead | orchestrator에게 올리는 최종 보고 |
+
+`.codex-session`(레인별 스레드 ID·모델·effort)과 `codex-*.jsonl/.stderr.log`(이벤트 스트림)는
+`codex-run`의 배관이다 — 진행 상황은 `tail codex-implement.jsonl`로 볼 수 있다.
 
 ## Git 규율 — 전 과정 추적과 되돌리기
 
@@ -211,6 +233,54 @@ Tier 1의 오류만 끝까지 조용히 통과한다. 잘못된 분해는 리드
 여기서 잡힌 brief 결함은 메시지 하나. 같은 결함을 dev가 구현한 뒤에 잡으면
 구현→리뷰→검증 사이클 하나. 이 비대칭이 이 단계의 존재 이유다.
 
+## Codex 통합 — 두 번째 공급자
+
+Codex(OpenAI)는 에이전트가 아니라 **리드가 Bash로 부르는 CLI 레인**으로 들어온다. 래퍼는
+`bin/codex-run` 하나이고, 리드만 부른다 (orchestrator·dev는 금지).
+
+```bash
+codex-run implement   <workdir> <task-dir>              # Sol @ xhigh — plan.md를 읽고 구현
+codex-run implement   <workdir> <task-dir> --mech       # Luna @ medium — 기계적 대량 수정
+codex-run resume      <workdir> <task-dir> "<지시>"     # 같은 스레드에 후속 수정 (컨텍스트 유지)
+codex-run review      <workdir> <task-dir> --base <br>  # Sol @ xhigh — Tier 4 교차 리뷰 (읽기 전용)
+codex-run plan-review <workdir> <task-dir>              # Sol @ xhigh — 구현 전 설계 교차 검토
+codex-run status      <task-dir>                        # 스레드·산출물·최근 런 확인
+# 공통: --fast(luna@high) --escalate(effort max) --model M --effort E --dry-run
+```
+
+**역할 배분의 논리:**
+
+- **구현(Tier 3)은 성격으로 가른다.** 명세가 잘 잡힌 보통 유닛은 dev-N과 sol 어느 쪽이든 —
+  주간 쿼터를 보며 번갈아 쓴다. 원인 불명 버그·성능 미스터리는 **sol 먼저** (다른 패밀리,
+  다른 prior가 곧 fresh eyes다). 같은 유닛에서 dev가 2번 실패하면 dev를 다시 조이지 말고
+  sol로 넘긴다 (역방향도 동일). 272k를 넘는 컨텍스트가 필요하거나 촘촘한 중간 조향이
+  필요하면 Claude dev (1M, `SendMessage`).
+- **리뷰 게이트(Tier 4)는 무조건 교차 패밀리다.** codex가 구현한 diff도 리드(Claude)가
+  리뷰하므로, 어느 레인이 짰든 "Claude가 놓치는 것"은 codex 리뷰만 잡을 수 있다.
+  PASS 조건: `verdict.md` = PASS **그리고** `codex-review.md` = CLEAR 또는 NONBLOCKING만.
+  BLOCKING은 실패 라운드로 취급하고 수정 후 **두 게이트를 다시** 돌린다. 예외는 명시적으로만:
+  문서·설정 전용 diff는 `codex gate: waived (<이유>)`, 쿼터·인증 장애는
+  `codex gate: unavailable`을 `summary.md`에 남기고 verifier 단독으로 간다.
+- **`RISK:` (brief의 필드)가 강도를 정한다.** `critical`이면 plan-review 필수 + sol 게이트
+  강제(`--fast`·waive 금지), `low`면 게이트 waive 허용.
+
+**연속성** — `codex exec`는 스레드를 남기고, 래퍼가 `<task-dir>/.codex-session`에
+`레인=스레드ID|모델|effort`를 기록한다. `codex-run resume`은 그 스레드를 **그 레인의
+모델·effort 그대로** 이어간다 (`--mech`로 시작한 유닛이 후속 지시에서 조용히 sol로 승격되지
+않는다; `--escalate`만 effort를 올린다). dev의 `SendMessage` 재개와 같은 역할이다.
+
+**격리** — implement는 `--sandbox workspace-write`(쓰기가 workdir로 제한), review 계열은
+`--sandbox read-only`. 위험 플래그(`--dangerously-bypass-approvals-and-sandbox` 등)는 래퍼에
+아예 없다. codex도 dev와 같은 규칙으로 **커밋하지 않는다** — 커밋은 리드만 한다.
+
+**실패 처리** — 종료 코드로 구분한다: `3` 쿼터 소진(리뷰는 `--fast` 1회 재시도, 구현은 dev로
+폴백), `4` 인증(`codex login` 필요, Claude 단독 진행), `5` 타임아웃(구현 90분·리뷰 45분,
+스레드가 남으므로 `resume`으로 이어받기 가능). 어느 경우든 **codex 장애는 작업을 멈추지
+않는다** — 기록하고 Claude 단독으로 진행한다.
+
+Codex 쪽 주간 한도는 모델 가드의 관리 대상이 아니다 (향후 확장 여지). 대신 소진 시
+`codex-run`이 exit 3으로 알려주고 리드가 레인을 옮기므로, 실질적 폴백은 이미 있다.
+
 ## Effort 배분
 
 Effort는 직급순이 아니라 **(오류의 대가) ÷ (토큰 물량)** 으로 준다.
@@ -218,35 +288,46 @@ Effort는 직급순이 아니라 **(오류의 대가) ÷ (토큰 물량)** 으�
 | 계층 | 모델 | effort | 이유 |
 |---|---|---|---|
 | orchestrator | `fable[1m]` | `xhigh` | 분해 결정은 레버리지가 가장 크지만, 릴레이·보드 갱신 같은 저부가 턴이 대부분이고 **사용자가 직접 기다리는** 유일한 계층이라 `max`는 세금이 된다 |
-| lead-\* | `fable[1m]` | `xhigh` | 가장 어려운 사고를 한다 — 코드 조사, 설계, diff 리뷰. 컨텍스트 압박도 최대라 1M이 실제로 필요한 곳 |
+| lead-\* | `fable[1m]` | `xhigh` | 가장 어려운 사고를 한다 — 코드 조사, 설계, 레인 배분, diff 리뷰. 컨텍스트 압박도 최대라 1M이 실제로 필요한 곳 |
 | dev-\* | `opus[1m]` | `high` | 리드가 자기완결적 명세를 넘기므로 열린 추론보다 정밀한 실행에 가깝다. 150턴 × 3슬롯이라 **전체 wall-clock의 긴 다리**이기도 하다. Opus 5 자체 기본값도 `high` |
+| codex 구현 | `gpt-5.6-sol` | `xhigh` | dev보다 한 단계 높다: 이 레인에 오는 것 자체가 "명세만으로 안 풀린 것"(원인 불명 버그, 2차 시도)이라 열린 추론 비중이 크다. `--escalate`가 `max`. **sol의 자체 기본값은 `low`라서** 래퍼가 항상 명시한다 |
+| codex 기계 수정 | `gpt-5.6-luna` | `medium` | 변환 규칙이 명확한 대량 수정은 깊은 추론이 아니라 처리량 문제다. luna 자체 기본값 |
 | verifier | `opus[1m]` | `max` | 40턴 읽기 전용이라 물량은 무시할 수준인데 실패 모드가 **false PASS** — 시스템 최악의 결과. 하네스에서 가장 값싼 품질 투자 |
+| codex 리뷰 | `gpt-5.6-sol` | `xhigh` | verifier와 같은 논리의 게이트지만 물량이 더 크다(diff 전체 정독). `max`가 아닌 이유: 게이트 둘 중 실행 검증(false PASS 방어)은 verifier가 `max`로 이미 서 있고, 이쪽의 부가가치는 깊이보다 **다른 priors**에서 온다. `--fast`(luna@`high`)는 소규모 diff 전용 |
 
-dev가 미묘한 디버깅에서 막히면 올바른 대응은 Tier 3 effort를 올리는 게 아니라 **명세를 조이는
-것**이다. 그게 이 구조의 전제다.
+dev가 미묘한 디버깅에서 막히면 대응이 둘로 늘었다: **명세를 조이거나, sol 레인으로 넘긴다.**
+effort를 올리는 것은 여전히 답이 아니다 — 같은 모델의 같은 맹점에 토큰만 더 쓰는 일이다.
 
-**모델 배치는 우연이 아니다.** 설계하는 계층(Fable)과 검증하는 계층(Opus)이 다른 패밀리라
-오류가 탈상관된다 — Fable에 맹점이 있으면 또 다른 Fable보다 Opus가 잡을 확률이 높다.
-덤으로 쿼터 풀도 둘로 분산된다.
+**모델 배치는 우연이 아니다.** 설계하는 계층(Fable)과 검증하는 계층(Opus)이 다른 모델이라
+오류가 탈상관되고, Tier 4의 codex 게이트는 아예 **다른 회사의 패밀리**라 한 단계 더 굵은
+탈상관을 준다. 쿼터 풀도 셋(Fable 주간 / Opus 주간 / Codex 주간)으로 분산된다.
 
-단, [모델 가드](#모델-가드--fable-주간-한도-소진-시-자동-전환)가 fallback으로 넘어가면 Tier 1/2가
-`opus[1m]`으로 내려가 설계와 검증이 같은 패밀리가 되고 이 탈상관이 사라진다. Fable 쿼터가
-바닥난 상황이라 verifier를 Fable로 올릴 수도 없으므로, 그때 패밀리 분리를 유지하려면
-verifier를 `sonnet[1m]`으로 돌리는 선택지가 있다 (아직 적용 안 함).
+[모델 가드](#모델-가드--fable-주간-한도-소진-시-자동-전환)가 fallback으로 넘어가면 Tier 1/2가
+`opus[1m]`으로 내려가 Claude 안쪽(Fable↔Opus)의 탈상관은 사라진다 — 예전에는 이때 검증
+전체가 단일 패밀리가 됐지만, 지금은 **codex 게이트가 남아** 교차 패밀리 검증만은 유지된다.
+verifier를 `sonnet[1m]`으로 돌려 Claude 안쪽 분리까지 복원하는 선택지는 여전히 있다
+(아직 적용 안 함).
 
-per-call effort 오버라이드는 없다 — Agent 도구는 `model`만 받고 `effort`는 frontmatter 고정이다.
-그래서 "리드의 리뷰 단계만 max"는 불가능하고, 하려면 별도 reviewer 에이전트가 필요하다.
-verifier가 `max`를 가지므로 중복이라 두지 않았다.
+per-call effort 오버라이드는 Claude 쪽엔 없다 — Agent 도구는 `model`만 받고 `effort`는
+frontmatter 고정이다. 그래서 "리드의 리뷰 단계만 max"는 불가능하다. **codex 레인은 반대로
+per-call이 기본이다** — `codex-run`이 호출마다 `--effort`를 명시할 수 있으므로
+(`--escalate`가 그 예), 상황별 강도 조절이 필요한 작업은 codex 레인이 유리하다.
 
 ## 설계상의 강제 장치
 
 프롬프트로 "하지 마라"고 쓰는 것보다 도구를 빼는 쪽이 확실하다:
 
 - `orchestrator`, `lead-*` → `Edit` 제거. 직접 구현으로 흘러내리는 것을 구조적으로 차단.
-- `dev-*` → `Agent` 제거. 리프 노드이므로 임의로 4계층을 만들지 못함.
+- `dev-*` → `Agent` 제거. 리프 노드이므로 임의로 계층을 늘리지 못함.
 - `verifier` → `Bash, Read, Grep, Glob`만. 검증자가 코드를 고치는 사고를 원천 차단.
-- `maxTurns` — lead 200, dev 150, verifier 40. 무한 루프 방지.
+  프롬프트로는 다른 에이전트의 산출물(`review.md`·`codex-review.md`)을 읽는 것도 금지 —
+  두 게이트가 서로를 앵커링하면 탈상관이 무의미해진다.
+- codex → `codex-run` 래퍼로만. 샌드박스(구현 workspace-write / 리뷰 read-only)와
+  모델·effort 정책이 래퍼에 박혀 있고, 위험 플래그는 인터페이스에 존재하지 않는다.
+  sol의 자체 기본 effort가 `low`인 것도 래퍼가 항상 명시하는 이유다.
+- `maxTurns` — lead 200, dev 150, verifier 40. codex는 타임아웃(구현 90분·리뷰 45분). 무한 루프 방지.
 - 라운드 상한 — lead는 구현→검증 3회, orchestrator는 작업당 실패 2회 후 사용자에게 에스컬레이션.
+  codex BLOCKING 지적의 근거 있는 기각도 작업당 2회까지.
 
 ## 가드레일
 
@@ -365,6 +446,7 @@ orch 세션 자체는 이 파일들을 못 고치도록 막혀 있으므로, 수
 원격이 같은 리포를 clone하므로 양쪽이 동일한 히스토리를 추적하고, 어느 쪽에서든 `git log`로
 지금 돌아가는 버전을 알 수 있다. 원격에 `gh` 인증이 되어 있어야 하고(private repo),
 `$HOME`이 다르면 스크립트가 거부한다 (`guardrails.json`이 절대 경로를 박아 쓰므로).
+Codex 레인까지 쓰려면 원격에도 `codex login`이 따로 필요하다 (없으면 Claude 단독으로 동작).
 
 프롬프트를 고쳤으면: 커밋 → push → `./sync-to.sh server4`.
 
@@ -388,9 +470,10 @@ orch 세션 자체는 이 파일들을 못 고치도록 막혀 있으므로, 수
 
 2.1.220에서 모델 가드를 만들며 실측한 것들:
 
-- **에이전트 정의 파일은 스폰 때마다 다시 읽힌다.** 세션 도중 `~/.claude/agents/x.md`의 `model:`을
-  바꾸고 다시 띄우면 새 모델로 뜬다 (haiku → sonnet으로 확인). 그래서 lead-\* 전환이 실행 중
-  세션까지 닿는다.
+- **에이전트 정의는 세션 시작 시점에 캐시된다.** 세션 도중 `~/.claude/agents/x.md`를 바꿔도
+  그 세션이 이후 띄우는 서브에이전트는 시작 당시의 정의로 뜬다 — 파일 게이트 프로브로 확인
+  ([측정](#실행-중인-세션에-어디까지-닿는가)). 초기에 "스폰마다 다시 읽힌다"고 기록했던 것은
+  세션 경계를 통제하지 못한 오측이었다.
 - **세션 자신의 모델은 시작 후 못 바꾼다.** 프로젝트 settings의 `model`을 도중에 바꿔도, `--settings`
   파일을 바꿔도 그 세션은 계속 원래 모델로 돈다.
 - **watch되는 settings 파일의 훅은 실행 중 세션에 반영된다.** 프로젝트 `.claude/settings.json`에
@@ -401,3 +484,25 @@ orch 세션 자체는 이 파일들을 못 고치도록 막혀 있으므로, 수
   `transcript_path`의 마지막 assistant 메시지에서 읽는다.
 - `claude -p /usage`는 모델 호출 없이 주간 사용률을 텍스트로 준다 (~2초, 토큰 0). 버킷 이름은
   API 쪽 `seven_day_overage_included`가 패널의 `Current week (Fable)`에 해당한다.
+
+codex-cli 0.144.4에서 Codex 레인을 만들며 실측한 것들:
+
+- 모델 라인업과 effort 한계는 `~/.codex/models_cache.json`에 있다: `gpt-5.6-sol`(frontier,
+  272k ctx, effort low~**ultra**), `gpt-5.6-terra`(balanced, ~ultra), `gpt-5.6-luna`(fast,
+  ~max). `ultra`는 "max + 자동 위임"인데 분해 권한은 Tier 2 것이므로 어느 레인의 기본값도
+  아니다.
+- **sol의 기본 reasoning effort는 `low`다.** effort를 명시하지 않은 `codex exec -m gpt-5.6-sol`은
+  조용히 얕게 돈다. `codex-run`이 매 호출 `-c model_reasoning_effort=`를 강제하는 이유.
+- **exec 레벨 플래그는 `resume` 서브커맨드보다 앞에 와야 한다.**
+  `codex exec [flags] resume <id> <prompt>`는 되고, `codex exec resume <id> [flags]`는
+  `unexpected argument` 에러다.
+- **stdin이 열린 파이프면 프롬프트 인자가 있어도 EOF를 기다린다**
+  ("Reading additional input from stdin..."에서 무한 대기). 에이전트 하네스 아래가 정확히
+  이 조건이라 `codex-run`은 `< /dev/null`을 박아 넣는다.
+- `--json`의 첫 이벤트 `thread.started`가 `thread_id`를 주고, 그 id로
+  `codex exec resume <id>`가 컨텍스트를 복원한다 (이전 턴 내용 기억 확인).
+  resume 시 모델·effort를 바꿔도 스레드는 이어진다.
+- `-o <file>`은 마지막 에이전트 메시지를 그 파일에 쓴다 — 리포트 아티팩트를 에이전트의
+  파일 쓰기 능력에 의존하지 않고 CLI 레벨에서 보장하는 수단. `--json`과 동시 사용 가능.
+- `--sandbox workspace-write`에서 워크트리 밖 쓰기가 실제로 막히고, 프롬프트의 "git 쓰기
+  금지" 지시를 준수한다 (e2e: 코드 수정 + 검증 실행 + 무커밋 확인).
