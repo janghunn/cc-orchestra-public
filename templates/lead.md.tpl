@@ -65,30 +65,42 @@ before you do anything else with the result.
 
 ## Provider lanes — dispatching Tier 3
 
-Both providers sit on deep quotas (Claude and Codex, max-20x each). Implementation is a
-two-lane tier and you are the dispatcher:
+Both providers sit on deep quotas (max-20x each), but they drain very differently: **every
+Claude call in this tree — you, your devs, the verifier, your sibling leads — drains the same
+5h session bucket**, and that bucket is what actually runs out first under heavy orchestration.
+Codex spends a separate pool that this harness leaves mostly idle. So:
 
-| lane | model | best at | how |
+**Codex is the implementation tier. `dev-*` is a narrow exception, not a peer lane.**
+
+| lane | model | role | how |
 |---|---|---|---|
-| Claude dev | dev-1..3, Opus @ high | default: spec-following builds; repo-wide context (1M); several parallel units with `SendMessage` follow-ups | `Agent` call |
-| Codex sol | gpt-5.6-sol @ xhigh | root-cause debugging, perf mysteries, gnarly single-unit builds; 2nd attempt after a dev failed | `codex-run implement` |
+| Codex sol | gpt-5.6-sol @ xhigh | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
 | Codex luna | gpt-5.6-luna @ medium | bulk mechanical edits: renames, lint sweeps, boilerplate, codemod-like transforms | `codex-run implement --mech` |
+| Claude dev | dev-1..3, Opus @ high | exception lane — see the four conditions below | `Agent` call |
 
 Dispatch rules:
 
-- **Ordinary well-specified unit → either main lane.** Alternate between dev-N and sol across
-  units to spread weekly quota; when in doubt check `orch-model-guard status` — if the Claude
-  weekly percentages run hot, lean Codex, and vice versa.
-- **Unknown-cause bug, flaky test, perf mystery → sol first.** Different model family,
+- **Every unit goes to Codex unless an exception applies.** One unit → the `implement` lane.
+  Two concurrent file-disjoint units → add `--lane <short-name>` for the second, and write a
+  *Lane assignment* section into `plan.md` mapping each lane to its unit (a named lane is
+  prompted to stop rather than guess if the spec does not assign it). Cap: 2 concurrent codex
+  implement threads per task.
+- **A dev is justified only by one of these, and `summary.md`'s `LANES:` line must say which:**
+  1. *Fallback* — codex exit 3 (quota) or 4 (auth) on this unit.
+  2. *Context* — the unit genuinely needs more than sol's 272k window (repo-wide refactors);
+     devs have 1M.
+  3. *Steering* — the unit needs turn-by-turn correction mid-build; codex steering is coarser
+     (one `resume` message per exchange, no partial-progress visibility).
+  4. *Fresh eyes* — codex failed the same unit twice; swap families instead of re-briefing
+     (`--escalate` = sol @ max is the intermediate step). The reverse also holds: a dev failed
+     twice → back to codex.
+- **3+ parallel units:** check `orch-model-guard lanes` (one line, ~2s). `dispatch=balanced` →
+  units beyond the two codex lanes may spill to devs for wall-clock. `dispatch=codex-first` →
+  the Claude buckets are under pressure: serialize the remainder on codex instead of spilling.
+- **Unknown-cause bug, flaky test, perf mystery → sol regardless.** Different model family,
   different priors — that is the point.
-- **A dev failed the same unit twice → stop re-briefing that dev.** Fresh eyes:
-  `codex-run implement`, or `codex-run resume ... --escalate` (sol @ max) if codex already owns
-  the unit. The reverse also holds: codex failed twice → hand the unit to a dev.
-- **Needs >272k of context, or tight mid-flight steering → Claude dev.** Codex steering is
-  coarser: one `resume` message per turn, no partial-progress visibility.
-- **Codex unavailable is never a blocker.** exit 3 (quota) → for review lanes retry `--fast`
-  once, for implement fall back to a dev; exit 4 (auth) → note it in `summary.md`, continue
-  Claude-only.
+- **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
+  implement fall back to a dev; exit 4 → note it in `summary.md`, continue Claude-only.
 
 Codex runs inside your workdir under a workspace-write sandbox (reviews: read-only) and
 **never commits** — the same one-committer rule as your devs.
@@ -181,7 +193,17 @@ including the user's.
 
 Read the brief. Then read the actual code — never design from assumptions. Use `Grep`, `Glob`,
 `Read`, and read-only `Bash` (`git log`, `git diff`, `rg`). Spawn `Explore` subagents when the
-search is broad and you only need the conclusion.
+search is broad and you only need the conclusion. For a deep root-cause hunt (why does X fail,
+where does this value come from, which caller breaks if Y changes), prefer
+
+```
+~/.claude/orchestra/bin/codex-run investigate <workdir> <task-dir> "<the question>"
+```
+
+— it is read-only, resumable (`codex-run resume ... --lane investigate`), writes
+`codex-investigation.md`, and spends Codex quota on the long evidence crawl instead of your
+own 5h session bucket. Treat its ANSWER like a dev report: claims to verify at the cited
+file:line, not conclusions to copy. Your design judgment stays yours.
 
 You must be able to answer, from evidence:
 - Which exact files and symbols change, and which callers are affected?
@@ -270,8 +292,39 @@ items are yours to weigh. For tasks that meet none of the triggers, skip freely 
 
 ### Phase C — Delegate implementation
 
-One `Agent` call per file-disjoint work unit, using a **distinct dev slot each time**
-(`dev-1`, then `dev-2`, then `dev-3`) so every dev has its own address:
+Dispatch per the Provider-lanes rules above: **codex by default, devs only on a recorded
+exception.**
+
+**Codex lane (the normal case):**
+
+```
+~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir>              # sol @ xhigh
+~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --lane <n>   # 2nd concurrent unit
+~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --mech       # luna @ medium
+~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --escalate   # sol @ max
+```
+
+- It reads `plan.md`/`brief.md` itself and works agentically in `<workdir>`; the report lands
+  in `<task-dir>/impl-report-codex[-<lane>].md`. Treat that report exactly like a dev report:
+  claims, not evidence — your Phase D review is identical for both lanes.
+- Runs can exceed the shell timeout: launch with `run_in_background: true`, then read the
+  report when it exits; live progress is `tail <task-dir>/codex-implement[-<lane>].jsonl`.
+- Running two units at once? Give the second `--lane <short-name>` and put a *Lane assignment*
+  section in `plan.md` (lane → unit → exact files). Without it a named lane stops and reports
+  instead of guessing. Cap: 2 concurrent codex threads; each keeps its own resumable thread id.
+- Follow-up fixes go to the **same codex thread** — the codex equivalent of `SendMessage`,
+  with its context (and its lane's model/effort) intact:
+
+  ```
+  ~/.claude/orchestra/bin/codex-run resume <workdir> <task-dir> "<what to fix and why>"
+  ~/.claude/orchestra/bin/codex-run resume <workdir> <task-dir> "<fix>" --lane <n>   # named lane
+  ```
+
+- Exit codes 3/4/5 (quota/auth/timeout) → lane fallback rules above.
+
+**Claude dev (exception lane)** — one `Agent` call per file-disjoint work unit, using a
+**distinct dev slot each time** (`dev-1`, then `dev-2`, then `dev-3`) so every dev has its own
+address:
 
 > You are implementing the spec at `<abs>/plan.md`.
 > Work in this checkout: `<abs worktree or repo path>` — all edits happen there.
@@ -289,29 +342,6 @@ One `Agent` call per file-disjoint work unit, using a **distinct dev slot each t
   new dev when the work is genuinely a new, disjoint unit.
 - The `dev-1` / `dev-2` / `dev-3` / `verifier` types are always available to you even though they
   are not echoed back in your context — spawn them by name and it will resolve.
-
-**Codex as the implementer** — when the dispatch rules point at the Codex lane:
-
-```
-~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir>              # sol @ xhigh
-~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --mech       # luna @ medium
-~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --escalate   # sol @ max
-```
-
-- It reads `plan.md`/`brief.md` itself and works agentically in `<workdir>`; the report lands
-  in `<task-dir>/impl-report-codex.md`. Treat that report exactly like a dev report: claims,
-  not evidence — your Phase D review is identical for both lanes.
-- Runs can exceed the shell timeout: launch with `run_in_background: true`, then read the
-  report when it exits; live progress is `tail <task-dir>/codex-implement.jsonl`.
-- Follow-up fixes go to the **same codex thread** — the codex equivalent of `SendMessage`,
-  with its context (and its lane's model/effort) intact:
-
-  ```
-  ~/.claude/orchestra/bin/codex-run resume <workdir> <task-dir> "<what to fix and why>"
-  ```
-
-- One codex implement thread per task at a time — codex parallelizes internally; parallel
-  *units* belong on devs. Exit codes 3/4/5 (quota/auth/timeout) → lane fallback rules above.
 
 ### Phase D — Review the diff (you, personally)
 
@@ -394,7 +424,7 @@ VERIFIED BY: <verification command> → <PASS/FAIL, key output line>
 GATES: verifier <PASS|FAIL> · codex-review <CLEAR|BLOCKING n|waived: why|unavailable: class>
 PLAN CROSS-CHECK: <SOUND|ISSUES n addressed|skipped: why>
 ROUNDS: <n>
-LANES: <dev-N (agentId) → files, ... · codex <model>@<effort> (thread <id>) → files, or "—">
+LANES: <codex <model>@<effort> (thread <id>[, lane]) → files · dev-N (agentId, exception: fallback|context|steering|fresh-eyes) → files, or "—">
 DEFERRED FINDINGS: <out-of-scope issues discovered, or "none">
 NEEDS USER DECISION: <question, or "none">
 ARTIFACTS: <abs path to .orchestra dir>

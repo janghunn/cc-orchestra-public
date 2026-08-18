@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # codex-run — cc-orchestra's single entry point to the Codex CLI.
 #
-# Codex enters the hierarchy in exactly two places, both dispatched by a Tier 2 lead:
-#   Tier 3 lane   implement / resume  — gpt-5.6-sol (or luna for mechanical bulk) writes code
+# Codex enters the hierarchy in exactly three places, all dispatched by a Tier 2 lead:
+#   Tier 3 lane   implement / resume  — gpt-5.6-sol (or luna for mechanical bulk) writes code;
+#                 implement is the DEFAULT lane for every unit (dev-* is the exception), and
+#                 --lane <name> allows a second concurrent unit per task
+#   Phase A aid   investigate — read-only root-cause / codebase analysis, so long evidence
+#                 hunts spend Codex quota instead of the lead's Claude 5h session bucket
 #   Tier 4 gate   review / plan-review — read-only cross-family check of a diff or a plan
 #
 # Why a wrapper instead of raw `codex exec` in agent prompts:
@@ -21,7 +25,8 @@
 #   codex exec resume <thread-id> [flags] <prompt>     # "unexpected argument '--sandbox'"
 #
 # usage:
-#   codex-run implement   <workdir> <task-dir> [--mech|--escalate] [--model M] [--effort E]
+#   codex-run implement   <workdir> <task-dir> [--mech|--escalate] [--lane L] [--model M] [--effort E]
+#   codex-run investigate <workdir> <task-dir> "<question>" [--fast] [--model M] [--effort E]
 #   codex-run resume      <workdir> <task-dir> "<follow-up message>" [--escalate] [--lane L]
 #   codex-run review      <workdir> <task-dir> [--base <branch>] [--fast] [--model M] [--effort E]
 #   codex-run plan-review <workdir> <task-dir> [--fast] [--model M] [--effort E]
@@ -30,10 +35,13 @@
 #
 #   <workdir>   the checkout the code lives in (the lead's worktree in worktree mode)
 #   <task-dir>  the .orchestra/<NN>-<slug>/ artifact directory
+#   --lane      names a second implement thread so two units can run concurrently in one task
+#               (own artifact, own event log, own thread id; default lane is "implement")
 #
 # artifacts written into <task-dir>:
-#   implement/resume -> impl-report-codex.md      review -> codex-review.md
-#   plan-review      -> plan-review-codex.md      all    -> codex-<mode>.jsonl, .stderr.log
+#   implement/resume -> impl-report-codex[-<lane>].md    review -> codex-review.md
+#   plan-review      -> plan-review-codex.md             investigate -> codex-investigation.md
+#   all              -> codex-<mode>[-<lane>].jsonl, .stderr.log
 #   .codex-session   -> "<lane>=<thread-id>" lines; resume reads these to continue a thread
 #
 # exit codes: 0 ok · 1 codex failed · 2 usage/setup · 3 quota/rate-limit · 4 auth · 5 timeout
@@ -49,7 +57,8 @@ GLOBAL_LOG="$STATE_DIR/codex.log"
 usage() {
   cat >&2 <<'EOF'
 usage:
-  codex-run implement   <workdir> <task-dir> [--mech|--escalate] [--model M] [--effort E]
+  codex-run implement   <workdir> <task-dir> [--mech|--escalate] [--lane L] [--model M] [--effort E]
+  codex-run investigate <workdir> <task-dir> "<question>" [--fast] [--model M] [--effort E]
   codex-run resume      <workdir> <task-dir> "<follow-up message>" [--escalate] [--lane L]
   codex-run review      <workdir> <task-dir> [--base <branch>] [--fast] [--model M] [--effort E]
   codex-run plan-review <workdir> <task-dir> [--fast] [--model M] [--effort E]
@@ -58,6 +67,7 @@ usage:
 
   <workdir>   the checkout the code lives in (the lead's worktree in worktree mode)
   <task-dir>  the .orchestra/<NN>-<slug>/ artifact directory
+  --lane L    second concurrent implement thread in the same task (own artifact + thread)
   models: sol=gpt-5.6-sol  luna=gpt-5.6-luna  terra=gpt-5.6-terra (or any full slug)
   exit: 0 ok · 1 codex failed · 2 usage/setup · 3 quota · 4 auth · 5 timeout
 EOF
@@ -84,8 +94,9 @@ if [ "$MODE" = "status" ]; then
   echo "threads (.codex-session):"
   sed 's/^/  /' "$TASK_DIR/.codex-session" 2>/dev/null || echo "  (none)"
   echo "artifacts:"
-  ls -la "$TASK_DIR"/impl-report-codex.md "$TASK_DIR"/codex-review.md \
-         "$TASK_DIR"/plan-review-codex.md 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+  ls -la "$TASK_DIR"/impl-report-codex*.md "$TASK_DIR"/codex-review.md \
+         "$TASK_DIR"/plan-review-codex.md "$TASK_DIR"/codex-investigation.md \
+         2>/dev/null | sed 's/^/  /' || echo "  (none)"
   echo "recent runs (global):"
   tail -5 "$GLOBAL_LOG" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
   exit 0
@@ -96,10 +107,17 @@ WORKDIR="${1:-}"; TASK_DIR="${2:-}"; shift 2 || usage
 [ -d "${TASK_DIR:-/nonexistent}" ] || die "task-dir '$TASK_DIR' does not exist"
 WORKDIR="$(cd "$WORKDIR" && pwd)"; TASK_DIR="$(cd "$TASK_DIR" && pwd)"
 
+# The message argument is positional and comes before the flags; a leading "--" means the
+# caller forgot it and a flag would silently become the prompt (and --dry-run would run live).
 FOLLOWUP=""
 if [ "$MODE" = "resume" ]; then
   FOLLOWUP="${1:-}"; shift || true
-  [ -n "$FOLLOWUP" ] || die 'resume needs a follow-up message: codex-run resume <workdir> <task-dir> "<message>"'
+  case "$FOLLOWUP" in ""|--*) die 'resume needs a follow-up message: codex-run resume <workdir> <task-dir> "<message>" [flags]' ;; esac
+fi
+QUESTION=""
+if [ "$MODE" = "investigate" ]; then
+  QUESTION="${1:-}"; shift || true
+  case "$QUESTION" in ""|--*) die 'investigate needs a question: codex-run investigate <workdir> <task-dir> "<question>" [flags]' ;; esac
 fi
 
 MODEL="" EFFORT="" BASE="" LANE="implement" DRY=0
@@ -120,9 +138,20 @@ done
 
 SESSION_FILE="$TASK_DIR/.codex-session"
 
+# Lane names key .codex-session entries and suffix artifacts — keep them shell- and path-safe,
+# and stop an implement lane from hijacking the read-only lanes' keys/artifacts.
+if [ "$LANE" != "implement" ]; then
+  printf '%s' "$LANE" | grep -qE '^[a-z0-9][a-z0-9_-]{0,31}$' || die "invalid lane name '$LANE'"
+  if [ "$MODE" = "implement" ]; then
+    case "$LANE" in review|plan-review|investigate) die "lane '$LANE' is reserved" ;; esac
+  fi
+fi
+
 case "$MODE" in
   implement)            MODEL="${MODEL:-$CODEX_IMPL_MODEL}"   EFFORT="${EFFORT:-$CODEX_IMPL_EFFORT}"
                         TIMEOUT="${CODEX_IMPL_TIMEOUT_SECS}" ;;
+  investigate)          MODEL="${MODEL:-$CODEX_IMPL_MODEL}"   EFFORT="${EFFORT:-$CODEX_IMPL_EFFORT}"
+                        TIMEOUT="${CODEX_REVIEW_TIMEOUT_SECS}" ;;
   resume)
     # A follow-up continues the lane it resumes: same thread, and by default the same
     # model/effort that lane last ran with (a --mech run must not silently escalate to sol).
@@ -156,12 +185,21 @@ case "$MODE" in
   implement)
     [ -r "$SPEC" ] || die "no spec at $SPEC — implement runs off plan.md"
     ARTIFACT="$TASK_DIR/impl-report-codex.md"
+    SCOPE_LINE="Read first, in this order: $SPEC (the spec — its Changes list is your exact scope) and
+$BRIEF (goal and scope boundary)."
+    if [ "$LANE" != "implement" ]; then
+      ARTIFACT="$TASK_DIR/impl-report-codex-$LANE.md"
+      SCOPE_LINE="Read first, in this order: $SPEC (the spec) and $BRIEF (goal and scope boundary).
+You are lane '$LANE' of several concurrent implementation lanes. The spec's *Lane assignment*
+section maps lanes to work units — your scope is EXACTLY the unit assigned to '$LANE', nothing
+else. If the spec has no such section or does not mention '$LANE', do not guess: report the
+conflict under DEVIATIONS and stop."
+    fi
     PROMPT="You are the Codex implementation lane (Tier 3) of a multi-agent delivery system. A task
 lead wrote the spec; you write the code. Your final message is saved verbatim as the lead's
 implementation-report artifact, so its format below is mandatory.
 
-Read first, in this order: $SPEC (the spec — its Changes list is your exact scope) and
-$BRIEF (goal and scope boundary).
+$SCOPE_LINE
 All code edits happen in this checkout: $WORKDIR
 
 Rules:
@@ -183,13 +221,43 @@ DEVIATIONS: <spec points not followed exactly, and why — or \"none\">
 CONCERNS: <risks the lead should re-check in review — or \"none\">" ;;
 
   resume)
-    ARTIFACT="$TASK_DIR/impl-report-codex.md"
-    [ "$LANE" = "review" ] && ARTIFACT="$TASK_DIR/codex-review.md"
-    [ "$LANE" = "plan-review" ] && ARTIFACT="$TASK_DIR/plan-review-codex.md"
+    case "$LANE" in
+      review)      ARTIFACT="$TASK_DIR/codex-review.md" ;;
+      plan-review) ARTIFACT="$TASK_DIR/plan-review-codex.md" ;;
+      investigate) ARTIFACT="$TASK_DIR/codex-investigation.md" ;;
+      implement)   ARTIFACT="$TASK_DIR/impl-report-codex.md" ;;
+      *)           ARTIFACT="$TASK_DIR/impl-report-codex-$LANE.md" ;;
+    esac
     PROMPT="Follow-up from the task lead: $FOLLOWUP
 
 After acting on it, end with a full updated report in the same mandatory format as your
 previous final message (updated to the current state of the tree, not a delta)." ;;
+
+  investigate)
+    ARTIFACT="$TASK_DIR/codex-investigation.md"
+    PROMPT="You are the read-only investigation lane of a multi-agent delivery system. A task lead
+needs an evidence-grounded answer before designing; your final message is saved verbatim as
+the lead's investigation artifact, so its format below is mandatory.
+
+Question from the lead: $QUESTION
+
+Repo (read-only): $WORKDIR
+Context, where they exist: $BRIEF (the goal), $SPEC (the plan draft so far).
+
+Rules:
+- Evidence over hypothesis: cite file:line for every claim, and read the surrounding code
+  rather than pattern-matching. Read-only commands (rg, git log/diff/show, ls) are yours.
+- You are sandboxed read-only. If settling the question needs a write (running a build/test,
+  adding a probe), do not attempt it — propose it under NEXT instead.
+- If no single cause survives, rank the remaining hypotheses and give the one discriminating
+  check for each.
+
+Final message — exactly this shape:
+[codex] INVESTIGATION
+QUESTION: <restated in one line>
+ANSWER: <the finding — or 'inconclusive'>
+EVIDENCE: <file:line — what it shows, one per line>
+NEXT: <discriminating checks or a fix direction for the lead — or 'none'>" ;;
 
   review)
     [ -r "$SPEC" ] || die "no spec at $SPEC — the review gate compares the diff against plan.md"
@@ -245,8 +313,11 @@ then one line per issue:
 esac
 
 # --- sandbox and command assembly --------------------------------------------------------
-EVENTS="$TASK_DIR/codex-$MODE.jsonl"
-STDERR="$TASK_DIR/codex-$MODE.stderr.log"
+# Concurrent lanes must not share event logs: a named lane gets its own -<lane> suffix.
+RUN_TAG="$MODE"
+case "$MODE" in implement|resume) [ "$LANE" != "implement" ] && RUN_TAG="$MODE-$LANE" ;; esac
+EVENTS="$TASK_DIR/codex-$RUN_TAG.jsonl"
+STDERR="$TASK_DIR/codex-$RUN_TAG.stderr.log"
 
 CMD=(codex exec -C "$WORKDIR" --skip-git-repo-check
      -m "$MODEL" -c "model_reasoning_effort=$EFFORT"
@@ -278,7 +349,8 @@ RC=$?
 # Record "<lane>=<thread-id>|<model>|<effort>" so follow-ups resume with full context on the
 # same model (SendMessage's equivalent). A resume updates its lane's model/effort in place —
 # once a lead escalates, later follow-ups stay escalated.
-LANE_KEY="$MODE"; [ "$MODE" = "resume" ] && LANE_KEY="$LANE"
+LANE_KEY="$MODE"
+case "$MODE" in implement|resume) LANE_KEY="$LANE" ;; esac
 TID_NEW="$(grep -m1 -oE '"thread_id":"[0-9a-f-]{36}"' "$EVENTS" | cut -d'"' -f4)"
 TID_NEW="${TID_NEW:-${TID:-}}"
 if [ -n "$TID_NEW" ]; then

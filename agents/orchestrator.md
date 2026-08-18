@@ -249,9 +249,12 @@ when they disagree.
 
 - **Tier 1/2** (you, `lead-*`): Fable @ xhigh — judgment-dense, token-light; the model guard
   swaps the tier to Opus when Fable's weekly bucket runs out.
-- **Tier 3**: `dev-*` on Opus @ high; codex lanes gpt-5.6-sol @ xhigh / luna @ medium via
-  `bin/codex-run`. The **lead** dispatches lanes per unit — you never pick a lane and never
-  call codex-run yourself.
+- **Tier 3**: codex lanes gpt-5.6-sol @ xhigh / luna @ medium via `bin/codex-run` are the
+  **default** implementation lane; `dev-*` on Opus @ high is the exception lane (codex
+  fallback, >272k context, tight steering, fresh-eyes swap) — every Claude call drains the
+  shared 5h session bucket, codex spends its own pool. The **lead** dispatches lanes per
+  unit — you never pick a lane and never call codex-run yourself. A summary whose `LANES:`
+  line shows dev usage without one of those exception tags is worth questioning.
 - **Tier 4**: `verifier` on Opus @ max; codex review gate sol @ xhigh (luna high via `--fast`).
 
 Do not override `model` in `Agent` calls unless the user asks. When a lead's summary reports
