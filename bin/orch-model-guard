@@ -4,23 +4,24 @@
 # Polls `claude -p /usage`, and when the Fable weekly bucket is spent it moves the orchestrator
 # and every lead-* slot to the fallback model; when the week rolls over it moves them back.
 #
-# What each half of the switch reaches, measured on 2.1.220 rather than assumed:
+# What the switch reaches, measured rather than assumed: nothing that is already running.
+# Agent definitions are read once at session start, and a session's own model is fixed when the
+# process starts — no settings file, no agent file changes either afterwards. New sessions pick
+# the model up from cc-orch, which reads `orch-model-guard active`; for sessions already running,
+# hooks/orch-model-notice.sh tells the user to restart or type /model.
 #
-#   lead-*        ~/.claude/agents/lead-*.md is re-read when a subagent is spawned, so rewriting
-#                 the frontmatter reaches sessions that are ALREADY RUNNING. Verified: flip the
-#                 file mid-session and the next spawn comes up on the new model.
-#   orchestrator  a session's own model is fixed when the process starts — no settings file, no
-#                 agent file, nothing changes it afterwards. New sessions get it from cc-orch,
-#                 which reads `orch-model-guard active`. Running sessions cannot be switched
-#                 from outside, so hooks/orch-model-notice.sh tells the user to type /model.
+# It also tracks the OTHER provider's weekly bucket (Codex), which costs nothing: codex-run's own
+# runs leave a `rate_limits` snapshot in ~/.codex/sessions/**/rollout-*.jsonl. That number is what
+# turns `lanes` from a one-sided "is Claude tired?" hint into a two-sided dispatch decision.
 #
 # usage:
 #   orch-model-guard check              poll usage and switch if the thresholds say so
 #   orch-model-guard status             what is active, why, and what the roster actually says
 #   orch-model-guard active             print the active model (for scripts; always prints one)
-#   orch-model-guard lanes              one-line Tier 3 dispatch hint for leads:
-#                                       dispatch=codex-first|balanced, from the 5h session and
-#                                       weekly buckets (thresholds in model-policy.conf)
+#   orch-model-guard lanes              Tier 3 dispatch hint for leads (4 lines):
+#                                       dispatch=codex-sparing|codex-first|balanced, from the
+#                                       Claude 5h session + weekly buckets and the Codex weekly
+#                                       bucket (thresholds in model-policy.conf)
 #   orch-model-guard set <m>|primary|fallback|auto
 #                                       force a model and pin it (auto un-pins, resumes polling)
 #   orch-model-guard install            install the systemd timer + the in-session notice hook
@@ -33,6 +34,7 @@ STATE="$STATE_DIR/state"
 LOG="$STATE_DIR/guard.log"
 USAGE_SNAPSHOT="$STATE_DIR/last-usage.txt"
 AGENTS_DIR="$HOME/.claude/agents"
+CODEX_SESSIONS="${CODEX_HOME:-$HOME/.codex}/sessions"
 HOOK="$REPO_DIR/hooks/orch-model-notice.sh"
 SETTINGS="$HOME/.claude/settings.json"
 UNIT_DIR="$HOME/.config/systemd/user"
@@ -51,19 +53,27 @@ st() { [ -r "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | head -1; }
 
 active_model() { local m; m="$(st active)"; printf '%s\n' "${m:-$PRIMARY_MODEL}"; }
 
+# The codex_* fields ride along in globals rather than three more positional arguments: every
+# caller of write_state cares about the Claude switch and none of them about Codex, and they are
+# carried over unchanged when nothing refreshed them.
+CODEX_PCT=""; CODEX_RESETS=""; CODEX_ASOF=""
+
 write_state() { # write_state <active> <pinned> <fable_pct> <all_pct> <session_pct> <changed_at> <reason>
   local tmp="$STATE.tmp"
   {
-    printf 'active=%s\n'      "$1"
-    printf 'pinned=%s\n'      "$2"
-    printf 'fable_pct=%s\n'   "$3"
-    printf 'all_pct=%s\n'     "$4"
-    printf 'session_pct=%s\n' "$5"
-    printf 'checked_at=%s\n'  "$(date -Is)"
-    printf 'changed_at=%s\n'  "$6"
-    printf 'reason=%s\n'      "$7"
-    printf 'primary=%s\n'     "$PRIMARY_MODEL"
-    printf 'fallback=%s\n'    "$FALLBACK_MODEL"
+    printf 'active=%s\n'           "$1"
+    printf 'pinned=%s\n'           "$2"
+    printf 'fable_pct=%s\n'        "$3"
+    printf 'all_pct=%s\n'          "$4"
+    printf 'session_pct=%s\n'      "$5"
+    printf 'codex_pct=%s\n'        "${CODEX_PCT:-$(st codex_pct)}"
+    printf 'codex_resets_at=%s\n'  "${CODEX_RESETS:-$(st codex_resets_at)}"
+    printf 'codex_asof=%s\n'       "${CODEX_ASOF:-$(st codex_asof)}"
+    printf 'checked_at=%s\n'       "$(date -Is)"
+    printf 'changed_at=%s\n'       "$6"
+    printf 'reason=%s\n'           "$7"
+    printf 'primary=%s\n'          "$PRIMARY_MODEL"
+    printf 'fallback=%s\n'         "$FALLBACK_MODEL"
   } > "$tmp" && mv -f "$tmp" "$STATE"
 }
 
@@ -94,9 +104,85 @@ pct_session() { # pct_session <panel-text>
     | sed -n 's/.*Current session[^0-9]*\([0-9]\{1,3\}\)% used.*/\1/p' | head -1
 }
 
+# --- codex usage -------------------------------------------------------------------------
+# The Codex CLI writes a `rate_limits` object into its rollout log on every turn, so the newest
+# rollout file carries a free, current-as-of-the-last-run reading of the weekly bucket. No API
+# call, no login shell-out. Measured shape (codex-cli 0.144.4):
+#   "rate_limits":{"limit_id":"codex","primary":{"used_percent":1.0,"window_minutes":10080,
+#                  "resets_at":1787196964},"secondary":null,...,"plan_type":"pro",...}
+newest_rollout() {
+  [ -d "$CODEX_SESSIONS" ] || return 1
+  local today yesterday d f
+  today="$(date +%Y/%m/%d)"; yesterday="$(date -d yesterday +%Y/%m/%d 2>/dev/null)"
+  # Fast path first: the sessions tree grows without bound, and a full walk on a machine with
+  # months of history is not something a 5-minute timer should be doing.
+  for d in "$CODEX_SESSIONS/$today" "${yesterday:+$CODEX_SESSIONS/$yesterday}"; do
+    [ -d "$d" ] || continue
+    f="$(ls -t "$d"/rollout-*.jsonl 2>/dev/null | head -1)"
+    [ -n "$f" ] && { printf '%s\n' "$f"; return 0; }
+  done
+  f="$(find "$CODEX_SESSIONS" -name 'rollout-*.jsonl' -printf '%T@ %p\n' 2>/dev/null \
+       | sort -rn | head -1 | cut -d' ' -f2-)"
+  [ -n "$f" ] && { printf '%s\n' "$f"; return 0; }
+  return 1
+}
+
+# Sets CODEX_PCT / CODEX_RESETS / CODEX_ASOF, and returns non-zero when there was no usable
+# snapshot. Unknown reads as "assume headroom" everywhere (see model-policy.conf).
+refresh_codex_usage() {
+  # "?" rather than empty: a refresh that ran and found nothing must overwrite yesterday's
+  # reading in the state file, not silently inherit it. Empty is reserved for "never refreshed".
+  CODEX_PCT="?"; CODEX_RESETS=""; CODEX_ASOF=""
+  local f line age_h out
+  f="$(newest_rollout)" || return 1
+  age_h=$(( ( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ) / 3600 ))
+  [ "$age_h" -gt "${CODEX_USAGE_STALE_HOURS:-24}" ] && return 1
+  line="$(grep '"rate_limits"' "$f" 2>/dev/null | tail -1)" || return 1
+  [ -n "$line" ] || return 1
+  # python3 rather than a grep chain: the object is nested and its neighbours change between
+  # codex versions, so find the key by walking the JSON instead of by counting braces.
+  out="$(printf '%s' "$line" | python3 -c '
+import json, sys
+
+def find(node):
+    if isinstance(node, dict):
+        if "rate_limits" in node and isinstance(node["rate_limits"], dict):
+            return node["rate_limits"]
+        for v in node.values():
+            hit = find(v)
+            if hit: return hit
+    elif isinstance(node, list):
+        for v in node:
+            hit = find(v)
+            if hit: return hit
+    return None
+
+try:
+    rl = find(json.loads(sys.stdin.read()))
+    p = (rl or {}).get("primary") or {}
+    pct = p.get("used_percent")
+    if pct is None: raise ValueError
+    print("%d %s" % (round(float(pct)), p.get("resets_at") or ""))
+except Exception:
+    sys.exit(1)
+' 2>/dev/null)" || return 1
+  CODEX_PCT="${out%% *}"
+  CODEX_RESETS="${out#* }"; CODEX_RESETS="${CODEX_RESETS# }"
+  CODEX_ASOF="$(date -Is -d "@$(stat -c %Y "$f")" 2>/dev/null)"
+  return 0
+}
+
+codex_resets_human() { # epoch -> local time, or the raw value if it is not an epoch
+  local v="${1:-}"
+  case "$v" in
+    ''|*[!0-9]*) printf '%s\n' "${v:-?}" ;;
+    *)           date -d "@$v" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s\n' "$v" ;;
+  esac
+}
+
 # --- applying ----------------------------------------------------------------------------
-apply_model() { # apply_model <model> <reason>
-  local model="$1" reason="$2" n=0 f
+apply_model() { # apply_model <model>
+  local model="$1" n=0 f
   shopt -s nullglob
   for f in "$AGENTS_DIR"/lead-*.md; do
     grep -q '^model: ' "$f" || { log "WARN: no model line in $f"; continue; }
@@ -122,7 +208,17 @@ cmd_check() {
   pinned="$(st pinned)"; pinned="${pinned:-0}"
   changed_at="$(st changed_at)"
 
-  panel="$(poll_usage)" || { log "poll failed, keeping $cur"; exit 0; }
+  # Free and independent of the Claude poll: read it before anything can exit early, so the
+  # codex_* fields stay fresh even on a run that decides nothing.
+  refresh_codex_usage || true
+
+  panel="$(poll_usage)" || {
+    log "poll failed, keeping $cur"
+    # Still record the codex reading — it did not depend on the poll that just failed.
+    write_state "$cur" "$pinned" "$(st fable_pct)" "$(st all_pct)" "$(st session_pct)" \
+                "$changed_at" "$(st reason)"
+    exit 0
+  }
   printf '%s\n' "$panel" > "$USAGE_SNAPSHOT"
 
   fable="$(pct_for "$panel" "$USAGE_LABEL")"
@@ -151,7 +247,7 @@ cmd_check() {
     exit 0
   fi
 
-  n="$(apply_model "$target" "auto")"
+  n="$(apply_model "$target")"
   write_state "$target" 0 "$fable" "${all:-?}" "${session:-?}" "$(date -Is)" "auto: ${USAGE_LABEL} ${fable}% (switch>=${SWITCH_AT_PCT}, restore<=${RESTORE_AT_PCT})"
   log "SWITCH $cur -> $target  (${USAGE_LABEL} ${fable}%, all models ${all:-?}%) — rewrote $n lead file(s)"
 
@@ -166,13 +262,17 @@ cmd_check() {
   exit 0
 }
 
-# Tier 3 dispatch hint for leads. Codex is the default implement lane either way (see
-# templates/lead.md.tpl); this decides how much Claude spill is acceptable:
-#   codex-first  session/weekly pressure is real — serialize on codex rather than spill
-#                parallel units to dev-*, and prefer `codex-run investigate` over long
-#                lead-side investigation
-#   balanced     spilling the 3rd+ parallel unit to dev-* is fine
-# Polls live (~2s, zero tokens); falls back to the last snapshot if the poll fails.
+# Tier 3 / Phase A dispatch hint for leads, from BOTH providers' buckets:
+#   codex-sparing  Codex's own week is nearly spent — keep what is left for the Tier 4 review
+#                  gate (mandatory per task): implement on dev-*, investigate yourself, review
+#                  with --fast. Checked first: it is the only state where Claude is the answer.
+#   codex-first    Claude pressure is real — serialize on codex rather than spill parallel
+#                  units to dev-*, and send investigation to `codex-run investigate`.
+#   balanced       both pools have room; spilling the 3rd+ parallel unit to dev-* is fine.
+# Codex is the default implement and investigate lane in every state except codex-sparing (see
+# templates/lead.md.tpl); this only decides how much Claude spill is acceptable.
+# Polls Claude live (~2s, zero tokens) and falls back to the last snapshot; the Codex reading is
+# a file read of the newest rollout, and unknown reads as headroom.
 cmd_lanes() {
   local panel session all fable src="live"
   if ! panel="$(poll_usage)" || ! printf '%s' "$panel" | grep -q 'Current session'; then
@@ -185,10 +285,16 @@ cmd_lanes() {
   all="$(pct_for "$panel" "all models")"
   fable="$(pct_for "$panel" "$USAGE_LABEL")"
 
+  local cx csrc="live"
+  if refresh_codex_usage; then cx="$CODEX_PCT"; else cx="$(st codex_pct)"; csrc="state"; fi
+  case "$cx" in ''|*[!0-9]*) cx=""; csrc="unknown" ;; esac
+
   local hint="balanced" why
-  why="session ${session:-?}% < ${LANES_CODEX_FIRST_SESSION_PCT} and week(all) ${all:-?}% < ${LANES_CODEX_FIRST_WEEK_PCT}"
-  if [ -z "$session" ] && [ -z "$all" ]; then
-    hint="codex-first"; why="no usage data — assume pressure rather than burn a bucket blind"
+  why="session ${session:-?}% < ${LANES_CODEX_FIRST_SESSION_PCT}, week(all) ${all:-?}% < ${LANES_CODEX_FIRST_WEEK_PCT}, codex ${cx:-?}% < ${LANES_CODEX_SPARE_PCT}"
+  if [ -n "$cx" ] && [ "$cx" -ge "$LANES_CODEX_SPARE_PCT" ]; then
+    hint="codex-sparing"; why="codex week at ${cx}% (>= ${LANES_CODEX_SPARE_PCT}) — reserve the rest for the Tier 4 gate"
+  elif [ -z "$session" ] && [ -z "$all" ]; then
+    hint="codex-first"; why="no claude usage data — assume pressure rather than burn a bucket blind"
   elif [ -n "$session" ] && [ "$session" -ge "$LANES_CODEX_FIRST_SESSION_PCT" ]; then
     hint="codex-first"; why="claude 5h session at ${session}% (>= ${LANES_CODEX_FIRST_SESSION_PCT})"
   elif [ -n "$all" ] && [ "$all" -ge "$LANES_CODEX_FIRST_WEEK_PCT" ]; then
@@ -197,6 +303,7 @@ cmd_lanes() {
 
   echo "dispatch=$hint"
   echo "claude: session=${session:-?}% week_all=${all:-?}% week_${USAGE_LABEL,,}=${fable:-?}%  ($src)"
+  echo "codex:  week=${cx:-?}% resets=$(codex_resets_human "${CODEX_RESETS:-$(st codex_resets_at)}")  ($csrc${CODEX_ASOF:+, asof $CODEX_ASOF})"
   echo "reason: $why"
 }
 
@@ -205,7 +312,10 @@ cmd_status() {
   echo "policy      $PRIMARY_MODEL -> $FALLBACK_MODEL   (switch >= ${SWITCH_AT_PCT}%, restore <= ${RESTORE_AT_PCT}%)"
   echo "active      $(active_model)$([ "$(st pinned)" = "1" ] && echo "   [PINNED — auto switching is off]")"
   if [ -r "$STATE" ]; then
-    echo "usage       ${USAGE_LABEL} $(st fable_pct)% · all models $(st all_pct)% · 5h session $(st session_pct)%   (checked $(st checked_at))"
+    echo "claude      ${USAGE_LABEL} $(st fable_pct)% · all models $(st all_pct)% · 5h session $(st session_pct)%   (checked $(st checked_at))"
+    # The two numbers side by side are the whole point: this harness deliberately spends the
+    # Codex bucket first, and this line is where you see whether it actually is.
+    echo "codex       week $(st codex_pct)% · resets $(codex_resets_human "$(st codex_resets_at)")   (asof $(st codex_asof))"
     echo "last change $(st changed_at)   $(st reason)"
   else
     echo "usage       (never polled — run: orch-model-guard check)"
@@ -240,7 +350,7 @@ cmd_set() {
     "")  echo "usage: orch-model-guard set <model>|primary|fallback|auto" >&2; return 1 ;;
     *)   model="$want" ;;
   esac
-  n="$(apply_model "$model" "manual")"
+  n="$(apply_model "$model")"
   write_state "$model" 1 "$(st fable_pct)" "$(st all_pct)" "$(st session_pct)" "$(date -Is)" "manual pin"
   log "MANUAL $model — rewrote $n lead file(s), pinned"
   echo "active model is now $model (pinned; 'set auto' to resume polling) — $n lead file(s) rewritten"

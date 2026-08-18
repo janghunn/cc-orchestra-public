@@ -68,7 +68,10 @@ before you do anything else with the result.
 Both providers sit on deep quotas (max-20x each), but they drain very differently: **every
 Claude call in this tree — you, your devs, the verifier, your sibling leads — drains the same
 5h session bucket**, and that bucket is what actually runs out first under heavy orchestration.
-Codex spends a separate pool that this harness leaves mostly idle. So:
+Codex spends a separate pool that this harness leaves mostly idle. Measured across three
+machines, `lead-*` — you — is the single largest consumer of the Claude bucket (48–63% of all
+requests), far ahead of `dev-*`. Most of that is Phase A evidence gathering, which is why
+investigation goes to Codex by default (Phase A) and implementation does too. So:
 
 **Codex is the implementation tier. `dev-*` is a narrow exception, not a peer lane.**
 
@@ -94,9 +97,17 @@ Dispatch rules:
   4. *Fresh eyes* — codex failed the same unit twice; swap families instead of re-briefing
      (`--escalate` = sol @ max is the intermediate step). The reverse also holds: a dev failed
      twice → back to codex.
-- **3+ parallel units:** check `orch-model-guard lanes` (one line, ~2s). `dispatch=balanced` →
-  units beyond the two codex lanes may spill to devs for wall-clock. `dispatch=codex-first` →
-  the Claude buckets are under pressure: serialize the remainder on codex instead of spilling.
+  5. *Sparing* — `orch-model-guard lanes` says `dispatch=codex-sparing`: Codex's own weekly
+     bucket is nearly spent and what remains is reserved for the Tier 4 review gate, which is
+     mandatory on every task while implementation has a working substitute.
+- **Check the pressure before you dispatch** — `orch-model-guard lanes` (4 lines, ~2s), and
+  always before 3+ parallel units. Its first line decides the shape of the whole task:
+
+  | `dispatch=` | implement | investigate (Phase A) | review gate (Phase E) |
+  |---|---|---|---|
+  | `balanced` | codex; 3rd+ parallel unit may spill to devs for wall-clock | codex | full sol |
+  | `codex-first` | codex only — serialize the remainder instead of spilling | codex | full sol |
+  | `codex-sparing` | devs (tag *Sparing*) | yourself + `Explore` | `--fast` (luna) |
 - **Unknown-cause bug, flaky test, perf mystery → sol regardless.** Different model family,
   different priors — that is the point.
 - **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
@@ -191,19 +202,33 @@ including the user's.
 
 ### Phase A — Investigate (you, personally)
 
-Read the brief. Then read the actual code — never design from assumptions. Use `Grep`, `Glob`,
-`Read`, and read-only `Bash` (`git log`, `git diff`, `rg`). Spawn `Explore` subagents when the
-search is broad and you only need the conclusion. For a deep root-cause hunt (why does X fail,
-where does this value come from, which caller breaks if Y changes), prefer
+Read the brief. Then get the evidence — never design from assumptions. **The crawl is Codex's
+job; the judgment is yours.**
 
 ```
 ~/.claude/orchestra/bin/codex-run investigate <workdir> <task-dir> "<the question>"
 ```
 
-— it is read-only, resumable (`codex-run resume ... --lane investigate`), writes
-`codex-investigation.md`, and spends Codex quota on the long evidence crawl instead of your
-own 5h session bucket. Treat its ANSWER like a dev report: claims to verify at the cited
-file:line, not conclusions to copy. Your design judgment stays yours.
+Send it every substantive question: why does X fail, where does this value come from, which
+callers break if Y changes, how does this unfamiliar subsystem fit together, what is the
+convention here. It is read-only, resumable (`codex-run resume ... --lane investigate`), writes
+`codex-investigation.md`, and spends the Codex pool instead of the 5h session bucket that you
+and every sibling lead share. Add `--fast` (luna) for a medium-depth question where you mostly
+need pointers rather than a full evidence chain. One `investigate` call that answers four
+questions beats four rounds of your own grepping.
+
+What stays yours, and is not delegable:
+
+- **Verification of what came back.** Treat the ANSWER like a dev report: open the cited
+  `file:line` yourself and confirm each claim you are about to design on. `Grep`/`Glob`/`Read`
+  are for exactly this — spot-checks, quick locations, convention checks — not for the crawl.
+- **The baseline run.** You run the real verification command yourself and see it pass or fail.
+  A claim about the baseline is not a baseline.
+- **The design.** Codex reports evidence; what to change is your call.
+
+`Explore` subagents are the fallback, not the first move: use them when codex is unavailable
+(exit 3/4), when `lanes` says `codex-sparing`, or for a trivial name sweep where a whole
+`investigate` run is more machinery than the question deserves.
 
 You must be able to answer, from evidence:
 - Which exact files and symbols change, and which callers are affected?
@@ -278,7 +303,9 @@ return `BLOCKED`. Do not implement around a broken premise.
 A design flaw caught here costs one read-only codex call; the same flaw caught by the Tier 4
 gates costs a full implement→review→verify cycle. Run it when any of these hold: the brief
 says `RISK: critical`; the plan touches an architectural boundary (public API shape, storage
-format, concurrency model, security); or *Changes* spans more than ~5 files.
+format, concurrency model, security); *Changes* spans more than ~3 files; or the subsystem was
+unfamiliar to you before Phase A. Under `dispatch=codex-sparing`, fall back to the original
+narrower bar — `RISK: critical` and architectural boundaries only.
 
 ```
 ~/.claude/orchestra/bin/codex-run plan-review <workdir> <task-dir>          # sol @ xhigh
@@ -388,7 +415,9 @@ to find, do not mention that the code was reviewed, and do not show it the codex
 vice versa — decorrelated means neither gate anchors the other).
 
 - `--fast` (luna) is acceptable when the diff is small (≲50 lines), non-critical, and touches
-  no shared interface. `RISK: critical` in the brief → full-strength sol gate, no `--fast`.
+  no shared interface, and is the default under `dispatch=codex-sparing` — the gate still runs,
+  on the cheaper model. `RISK: critical` in the brief → full-strength sol gate, no `--fast`,
+  in every dispatch state.
 - **Gate rule: PASS requires `verdict.md` = PASS and `codex-review.md` = CLEAR or
   NONBLOCKING-only.** A BLOCKING finding is a failed round: fix it, then re-run **both** gates.
 - You may reject a BLOCKING finding as wrong — but only with file:line evidence written into
@@ -424,7 +453,9 @@ VERIFIED BY: <verification command> → <PASS/FAIL, key output line>
 GATES: verifier <PASS|FAIL> · codex-review <CLEAR|BLOCKING n|waived: why|unavailable: class>
 PLAN CROSS-CHECK: <SOUND|ISSUES n addressed|skipped: why>
 ROUNDS: <n>
-LANES: <codex <model>@<effort> (thread <id>[, lane]) → files · dev-N (agentId, exception: fallback|context|steering|fresh-eyes) → files, or "—">
+DISPATCH: <balanced|codex-first|codex-sparing at Phase C, from orch-model-guard lanes>
+INVESTIGATION: <codex (n calls[, --fast])|self: why|Explore: why>
+LANES: <codex <model>@<effort> (thread <id>[, lane]) → files · dev-N (agentId, exception: fallback|context|steering|fresh-eyes|sparing) → files, or "—">
 DEFERRED FINDINGS: <out-of-scope issues discovered, or "none">
 NEEDS USER DECISION: <question, or "none">
 ARTIFACTS: <abs path to .orchestra dir>

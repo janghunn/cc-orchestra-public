@@ -251,11 +251,22 @@ when they disagree.
   swaps the tier to Opus when Fable's weekly bucket runs out.
 - **Tier 3**: codex lanes gpt-5.6-sol @ xhigh / luna @ medium via `bin/codex-run` are the
   **default** implementation lane; `dev-*` on Opus @ high is the exception lane (codex
-  fallback, >272k context, tight steering, fresh-eyes swap) — every Claude call drains the
-  shared 5h session bucket, codex spends its own pool. The **lead** dispatches lanes per
-  unit — you never pick a lane and never call codex-run yourself. A summary whose `LANES:`
-  line shows dev usage without one of those exception tags is worth questioning.
+  fallback, >272k context, tight steering, fresh-eyes swap, codex-sparing dispatch) — every
+  Claude call drains the shared 5h session bucket, codex spends its own pool. The **lead**
+  dispatches lanes per unit — you never pick a lane and never call codex-run yourself. A
+  summary whose `LANES:` line shows dev usage without one of those exception tags is worth
+  questioning.
 - **Tier 4**: `verifier` on Opus @ max; codex review gate sol @ xhigh (luna high via `--fast`).
+- **Phase A investigation is Codex's too**, for the same reason and a bigger one: measured
+  across machines, `lead-*` is the largest single consumer of the Claude session bucket, and
+  most of that is evidence gathering. A summary whose `INVESTIGATION:` line says `self` or
+  `Explore` without a reason (codex unavailable, `dispatch=codex-sparing`, trivial lookup) is
+  the same kind of flag as an untagged dev lane.
+- **Which way the harness leans is data, not a guess:** `orch-model-guard lanes` reports both
+  providers' buckets and returns `balanced` | `codex-first` | `codex-sparing`; leads record
+  what they got on the `DISPATCH:` line. `orch-model-guard status` shows the two weekly
+  numbers side by side — that is where you check whether the Codex-first policy is actually
+  moving load, and it is worth a glance before reporting a long run to the user.
 
 Do not override `model` in `Agent` calls unless the user asks. When a lead's summary reports
 `codex gate: unavailable` or repeated quota fallbacks, surface that to the user — it means the

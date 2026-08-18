@@ -15,6 +15,11 @@ Claude Code용 4계층·2공급자 위임 하네스. Tier 1이 사용자와 대�
    ├── lead-charlie
    └── lead-delta
          │
+         ├─ Phase A 조사 ────────────────────────────────────────────────────────
+         │    codex-run investigate GPT-5.6-Sol @ xhigh    기본 조사 레인 — 증거 수집은 전부 여기
+         │      └ --fast           GPT-5.6-Luna @ high    중간 깊이 질문
+         │    (리드 본인 Grep/Read)                        인용 file:line 검증·베이스라인 실행만
+         │
          ├─ Tier 3 구현 ─────────────────────────────────────────────────────────
          │    codex-run implement  GPT-5.6-Sol @ xhigh    기본 구현 레인 — 모든 유닛 (--lane으로 동시 2유닛)
          │      └ --mech           GPT-5.6-Luna @ medium  기계적 대량 수정 (rename, lint, boilerplate)
@@ -30,8 +35,19 @@ Claude Code용 4계층·2공급자 위임 하네스. Tier 1이 사용자와 대�
 쿼터 풀 분리다. 특히 Claude 쪽은 트리의 **모든 호출(리드·dev·verifier)이 같은 5h 세션
 버킷을 소모**해서 무거운 세션에선 주간 한도보다 세션 한도가 먼저 바닥난다(실측: 주간
 29%/50%일 때 세션 79%). 그래서 **구현은 Codex 전담이 기본**이고 dev-\*는 좁은 예외
-레인이다 — codex 폴백, >272k 컨텍스트, 정밀 조향, 2회 실패 후 fresh-eyes 스왑.
+레인이다 — codex 폴백, >272k 컨텍스트, 정밀 조향, 2회 실패 후 fresh-eyes 스왑, codex-sparing.
 Codex는 Tier 2의 도구다 — orchestrator는 부르지 않고, 리드가 `bin/codex-run`으로만 부른다.
+
+**조사도 Codex가 기본이다.** 세 대의 머신에서 서브에이전트별 Claude 사용량을 재보니 최대
+소비처는 늘 `lead-*`였다 — 48%/63%/60%로 dev-\*(4~20%)를 크게 앞선다. 리드가 쓰는 토큰의
+대부분은 Phase A 증거 수집이므로, 크롤은 `codex-run investigate`로 넘기고 리드는 인용된
+file:line 검증·베이스라인 실행·설계 판단만 맡는다. `Explore` 서브에이전트는 codex 불가
+(exit 3/4)·`codex-sparing`·사소한 이름 스윕일 때의 폴백이다.
+
+이 배치의 목표는 "Claude 1 : Codex 2"를 요청 수로 맞추는 게 아니다 — 단위가 다르다.
+**토큰이 무거운 일(조사·구현·기계적 수정·계획 검토·diff 리뷰 게이트)은 Codex, 판단이
+무거운 일(대화·분해·설계·diff 읽기·verifier)은 Claude**로 나누고, 실제 소모율은
+`orch-model-guard status`의 두 줄로 관측한다.
 
 ## 설치
 
@@ -258,13 +274,14 @@ codex-run status      <task-dir>                        # 스레드·산출물·
   레인, 동시 2번째 유닛은 `--lane <이름>`(작업당 codex 스레드 최대 2개). dev-\*는 예외
   레인이고, 리드는 dev를 쓸 때마다 `summary.md`의 `LANES:` 줄에 사유 태그를 남긴다:
   ① codex 폴백(exit 3/4) ② >272k 컨텍스트(dev는 1M) ③ 턴 단위 정밀 조향
-  ④ codex 2회 실패 후 fresh-eyes 스왑(역방향도 동일). 3개 이상 병렬 유닛일 때만
-  `orch-model-guard lanes`의 힌트를 보고 — `balanced`면 3번째부터 dev로 spill,
-  `codex-first`(세션·주간 압박)면 spill 대신 codex에 직렬화한다. 원인 불명 버그·성능
-  미스터리는 어느 경우든 **sol 먼저** (다른 패밀리, 다른 prior가 곧 fresh eyes다).
-- **조사(Phase A)도 무거우면 codex로 넘긴다.** `codex-run investigate`는 읽기 전용
-  root-cause 헌트를 sol에 위임해 리드의 5h 세션 버킷 대신 Codex 쿼터를 태운다. 결과는
-  dev 리포트처럼 취급한다 — file:line 근거를 리드가 직접 확인하고, 설계 판단은 리드 몫.
+  ④ codex 2회 실패 후 fresh-eyes 스왑(역방향도 동일) ⑤ `codex-sparing` 디스패치.
+  리드는 Phase C 전에 `orch-model-guard lanes`를 보고 작업 전체의 모양을 정한다(아래 표).
+  원인 불명 버그·성능 미스터리는 어느 경우든 **sol 먼저** (다른 패밀리, 다른 prior가 곧
+  fresh eyes다).
+- **조사(Phase A)는 codex가 기본이다.** 실측상 Claude 최대 소비처가 `lead-*`(48~63%)이고
+  그 대부분이 증거 수집이라, 실질적인 질문은 전부 `codex-run investigate`로 보낸다
+  (중간 깊이는 `--fast`). 결과는 dev 리포트처럼 취급한다 — file:line 근거를 리드가 직접
+  확인하고, 베이스라인 커맨드는 리드가 직접 돌리고, 설계 판단은 리드 몫이다.
 - **리뷰 게이트(Tier 4)는 무조건 교차 패밀리다.** codex가 구현한 diff도 리드(Claude)가
   리뷰하므로, 어느 레인이 짰든 "Claude가 놓치는 것"은 codex 리뷰만 잡을 수 있다.
   PASS 조건: `verdict.md` = PASS **그리고** `codex-review.md` = CLEAR 또는 NONBLOCKING만.
@@ -288,8 +305,40 @@ investigate는 `--sandbox read-only`. 위험 플래그(`--dangerously-bypass-app
 스레드가 남으므로 `resume`으로 이어받기 가능). 어느 경우든 **codex 장애는 작업을 멈추지
 않는다** — 기록하고 Claude 단독으로 진행한다.
 
-Codex 쪽 주간 한도는 모델 가드의 관리 대상이 아니다 (향후 확장 여지). 대신 소진 시
-`codex-run`이 exit 3으로 알려주고 리드가 레인을 옮기므로, 실질적 폴백은 이미 있다.
+### 양쪽 사용량 관측 → 3-상태 디스패치
+
+Codex 쪽 주간 한도도 이제 모델 가드가 본다. **추가 API 호출은 없다** — `codex exec`(즉
+`codex-run`)가 매 턴 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`에 남기는 `rate_limits`
+스냅샷을 읽는다:
+
+```
+"rate_limits":{"limit_id":"codex","primary":{"used_percent":4.0,"window_minutes":10080,
+               "resets_at":1787196964},"secondary":null,...,"plan_type":"pro",...}
+```
+
+가장 최근 rollout 파일(오늘·어제 디렉토리 fast path, 없으면 mtime 전체 스캔)의 마지막
+`rate_limits`를 파싱해 `codex_pct`/`codex_resets_at`/`codex_asof`를 state에 기록한다.
+스냅샷이 없거나 24h(`CODEX_USAGE_STALE_HOURS`)보다 오래되면 **unknown = 여유 있다고 가정**한다 —
+Codex는 이 하네스에서 역사적으로 유휴 풀이고, 진짜 소진은 exit 3으로 즉시 드러나기 때문이다.
+
+`orch-model-guard lanes`는 이제 양쪽을 보고 세 상태 중 하나를 준다 (우선순위 순):
+
+| `dispatch=` | 조건 | 구현 | 조사(Phase A) | 리뷰 게이트 |
+|---|---|---|---|---|
+| `codex-sparing` | codex 주간 ≥ `LANES_CODEX_SPARE_PCT`(85) | dev (`sparing` 태그) | 리드 직접 + `Explore` | `--fast` |
+| `codex-first` | 세션 ≥ 60 · 주간(all) ≥ 75 · Claude 데이터 없음 | codex 직렬화 (spill 금지) | codex | 전력 sol |
+| `balanced` | 그 외 | codex, 3번째+ 병렬 유닛만 dev spill | codex | 전력 sol |
+
+`codex-sparing`의 85%는 주간 가드의 98%보다 훨씬 낮다 — **리뷰 게이트는 작업마다 필수인데
+구현은 대체재(dev-\*)가 있으므로**, 남은 15%는 게이트 몫으로 잡아둔다.
+
+```bash
+orch-model-guard status   # claude / codex 두 줄을 나란히 — 실제로 어느 쪽이 타고 있는지
+orch-model-guard lanes    # 4줄: dispatch / claude / codex / reason
+```
+
+리드는 자기가 받은 값을 `summary.md`와 보고 블록의 `DISPATCH:`·`INVESTIGATION:`·`LANES:`
+줄에 남기므로, 배분이 의도대로 갔는지는 사후에도 확인된다.
 
 ## Effort 배분
 
@@ -298,7 +347,8 @@ Effort는 직급순이 아니라 **(오류의 대가) ÷ (토큰 물량)** 으�
 | 계층 | 모델 | effort | 이유 |
 |---|---|---|---|
 | orchestrator | `fable[1m]` | `xhigh` | 분해 결정은 레버리지가 가장 크지만, 릴레이·보드 갱신 같은 저부가 턴이 대부분이고 **사용자가 직접 기다리는** 유일한 계층이라 `max`는 세금이 된다 |
-| lead-\* | `fable[1m]` | `xhigh` | 가장 어려운 사고를 한다 — 코드 조사, 설계, 레인 배분, diff 리뷰. 컨텍스트 압박도 최대라 1M이 실제로 필요한 곳 |
+| lead-\* | `fable[1m]` | `xhigh` | 가장 어려운 사고를 한다 — 증거 검증, 설계, 레인 배분, diff 리뷰. 컨텍스트 압박도 최대라 1M이 실제로 필요한 곳. 실측 최대 소비처이기도 해서(48~63%) 증거 **수집**은 codex 조사 레인으로 뺐다 |
+| codex 조사 | `gpt-5.6-sol` | `xhigh` | Phase A 기본 레인. 증거 크롤은 토큰이 무겁고 판단은 가벼워서, 리드의 5h 세션 버킷 대신 Codex 주간 풀에서 태우기에 가장 적합한 일이다. 중간 깊이 질문은 `--fast`(luna@`high`) |
 | dev-\* | `opus[1m]` | `high` | 리드가 자기완결적 명세를 넘기므로 열린 추론보다 정밀한 실행에 가깝다. 150턴 × 3슬롯이라 **전체 wall-clock의 긴 다리**이기도 하다. Opus 5 자체 기본값도 `high` |
 | codex 구현 | `gpt-5.6-sol` | `xhigh` | 기본 구현 레인 — 보통 유닛의 명세 실행부터 원인 불명 버그·2차 시도까지 전부 이 레인이 받으므로 상한을 넉넉히 둔다. `--escalate`가 `max`. **sol의 자체 기본값은 `low`라서** 래퍼가 항상 명시한다 |
 | codex 기계 수정 | `gpt-5.6-luna` | `medium` | 변환 규칙이 명확한 대량 수정은 깊은 추론이 아니라 처리량 문제다. luna 자체 기본값 |
@@ -363,20 +413,20 @@ per-call이 기본이다** — `codex-run`이 호출마다 `--effort`를 명시�
 
 Tier 1/2는 Fable 5로 돈다. Fable 주간 한도가 바닥나면 `orch-model-guard`가 **orchestrator와
 lead-\*를 opus[1m]로 내리고**, 주가 넘어가 한도가 리셋되면 다시 fable[1m]로 올린다.
-Tier 3(dev-\*, verifier)은 원래 Opus라 대상이 아니다.
+Tier 3(dev-\*)와 Tier 4(verifier)는 원래 Opus라 대상이 아니다.
 
 ```bash
 orch-model-guard status      # 지금 뭐가 활성이고 왜 그런지 + 타이머/훅 상태
 orch-model-guard check       # 즉시 1회 폴링 (타이머가 5분마다 하는 그것)
-orch-model-guard lanes       # Tier 3 배분 힌트: dispatch=codex-first|balanced (리드가 Phase C 전에 호출)
+orch-model-guard lanes       # 배분 힌트: dispatch=codex-sparing|codex-first|balanced (리드가 Phase C 전에 호출)
 orch-model-guard set fallback / primary / auto     # 수동 고정(pin) 및 해제
 ```
 
-가드 본체(주간 Fable 버킷 → Tier 1/2 모델 전환)와 별개로, `lanes`는 **5h 세션 버킷**을 본다 —
-트리의 모든 Claude 호출이 이 버킷을 공유해서 무거운 세션에선 주간보다 먼저 바닥나는데
-(실측: 주간 29%/50%일 때 세션 79%), 세션 `>=60%` 또는 주간(all models) `>=75%`면
-`dispatch=codex-first`를 내서 리드가 병렬 spill 없이 codex에 직렬화하게 한다. 임계값은
-`model-policy.conf`의 `LANES_*`.
+가드 본체(주간 Fable 버킷 → Tier 1/2 모델 전환)와 별개로, `lanes`는 **5h 세션 버킷과 Codex
+주간 버킷**을 함께 본다 — Claude 쪽은 트리의 모든 호출이 세션 버킷을 공유해서 무거운
+세션에선 주간보다 먼저 바닥나고(실측: 주간 29%/50%일 때 세션 79%), Codex 쪽은 반대로
+거의 유휴다(실측: 같은 주에 4%). 세 상태의 조건과 의미는 위 "양쪽 사용량 관측" 표에 있고,
+임계값은 `model-policy.conf`의 `LANES_*`다.
 
 판단 근거는 `claude -p /usage`의 `Current week (Fable)` 값이다 (모델 호출 없음, ~2초, 토큰 0).
 임계값은 `model-policy.conf`에 있고, 경계에서 왔다 갔다 하지 않도록 두 개다 — `>=98%`면 내리고
@@ -472,6 +522,9 @@ Codex 레인까지 쓰려면 원격에도 `codex login`이 따로 필요하다 (
 | 로컬 | — | 2.1.197 |
 | render (<internal-host>:2222) | `server4` (Windows에서는 `render`) | 2.1.220 |
 
+버전 열은 2026-08 초 기준이라 그대로 믿지 말 것 — 아래 "확인된 동작"의 항목들은 버전별로
+단서를 달아뒀으니, 업그레이드했다면 해당 항목을 다시 재봐야 한다.
+
 ## 확인된 동작
 
 실측으로 확인한 것들 (로컬 2.1.197 / 원격 2.1.220 양쪽):
@@ -523,3 +576,10 @@ codex-cli 0.144.4에서 Codex 레인을 만들며 실측한 것들:
   파일 쓰기 능력에 의존하지 않고 CLI 레벨에서 보장하는 수단. `--json`과 동시 사용 가능.
 - `--sandbox workspace-write`에서 워크트리 밖 쓰기가 실제로 막히고, 프롬프트의 "git 쓰기
   금지" 지시를 준수한다 (e2e: 코드 수정 + 검증 실행 + 무커밋 확인).
+- **Codex 주간 사용률은 rollout 로그에 그대로 있다.** `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`의
+  매 턴 이벤트에 `rate_limits.primary.used_percent`(+ `window_minutes: 10080`, `resets_at` epoch,
+  `plan_type`)가 실려 있어서, **추가 API 호출이나 로그인 셸아웃 없이** 파일 읽기만으로 관측된다
+  (`orch-model-guard`가 5분 주기에 같이 갱신). 다만 `codex exec`가 한 번은 돌아야 갱신되므로
+  최신성은 마지막 codex 런 시각까지다 — 24h 넘으면 unknown 처리한다.
+  `secondary`는 `null`이라 5h 상당의 단기 버킷은 여기서 읽을 수 없다 (Claude 쪽과 다른 점).
+  객체 위치·이웃 키가 버전마다 흔들려서 파서는 중괄호 세기가 아니라 JSON을 순회해 키를 찾는다.
