@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cc-orch — launch the three-tier orchestrator session with Remote Control enabled.
+# cc-orch — launch the four-tier orchestrator session with Remote Control enabled.
 #
 # The project name is required and is not cosmetic: it labels the session, the Remote Control
 # bridge, and the working directories, so several concurrent projects stay distinguishable when
@@ -8,33 +8,56 @@ set -euo pipefail
 
 ORCH_HOME="$HOME/.claude/orchestra"
 USE_RC=1
+PROFILE="normal"
+PROFILE_SET=0
+MODEL_OVERRIDE=""
+EFFORT_OVERRIDE=""
+MODEL_OVERRIDE_SET=0
+EFFORT_OVERRIDE_SET=0
+RELOAD=0
+FORCE_RELOAD=0
 
 usage() {
   cat >&2 <<'EOF'
-usage: cc-orch [--no-rc] <project-name> [project-dir] [extra claude args...]
+usage: cc-orch [options] <project-name> [project-dir] [extra claude args...]
 
   <project-name>   REQUIRED. Labels the session, the Remote Control bridge ("orch-<name>"),
                    and $CC_ORCH_PROJECT. Letters, digits, dot, dash, underscore.
   [project-dir]    Defaults to the current directory.
   --no-rc          Local only; skip the Remote Control bridge.
+  --profile P      normal (Sonnet@high), critical (Fable@high), or deep (Fable@xhigh).
+  --model M        Explicit model override for this orchestrator session.
+  --effort E       Explicit effort override (low|medium|high|xhigh|max).
+  --reload         Gracefully replace the running named session and continue its conversation.
+                   Refuses while REGISTRY.md has active lead rows.
+  --force-reload   Override only the registry safety check; still never SIGKILLs Claude.
 
 examples:
   cc-orch priorsplat
   cc-orch priorsplat ~/projects/priorsplat
   cc-orch priorsplat ~/projects/priorsplat -c      # resume last conversation
   cc-orch --no-rc halfres-gshead
+  cc-orch --reload dsv                             # apply new policy to the running dsv session
 EOF
-  exit 1
+  exit "${1:-1}"
 }
 
-if [[ "${1:-}" == "--no-rc" ]]; then
-  USE_RC=0
-  shift
-fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-rc) USE_RC=0; shift ;;
+    --profile) [[ $# -ge 2 ]] || usage; PROFILE="$2"; PROFILE_SET=1; shift 2 ;;
+    --model) [[ $# -ge 2 ]] || usage; MODEL_OVERRIDE="$2"; MODEL_OVERRIDE_SET=1; shift 2 ;;
+    --effort) [[ $# -ge 2 ]] || usage; EFFORT_OVERRIDE="$2"; EFFORT_OVERRIDE_SET=1; shift 2 ;;
+    --reload) RELOAD=1; shift ;;
+    --force-reload) RELOAD=1; FORCE_RELOAD=1; shift ;;
+    -h|--help) usage 0 ;;
+    --) shift; break ;;
+    -*) break ;;
+    *) break ;;
+  esac
+done
 
 [[ $# -ge 1 ]] || usage
-[[ "$1" == "-h" || "$1" == "--help" ]] && usage
-
 PROJECT_NAME="$1"
 shift
 
@@ -52,10 +75,98 @@ if [[ ! "$PROJECT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
   exit 1
 fi
 
+case "$PROFILE" in
+  normal|critical|deep) ;;
+  *) echo "cc-orch: invalid profile '$PROFILE' (normal|critical|deep)" >&2; exit 1 ;;
+esac
+
 PROJECT_DIR="$PWD"
+PROJECT_DIR_GIVEN=0
 if [[ $# -gt 0 && -d "$1" ]]; then
   PROJECT_DIR="$(cd "$1" && pwd)"
+  PROJECT_DIR_GIVEN=1
   shift
+fi
+
+STATE_ROOT="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
+PROJECT_STATE_DIR="$STATE_ROOT/projects"
+PROJECT_STATE="$PROJECT_STATE_DIR/$PROJECT_NAME"
+
+if [[ $RELOAD -eq 1 ]]; then
+  matches=()
+  for proc in /proc/[0-9]*; do
+    [[ -r "$proc/cmdline" ]] || continue
+    argv=()
+    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    has_agent=0; has_name=0
+    for ((i=0; i + 1 < ${#argv[@]}; i++)); do
+      [[ "${argv[i]}" == "--agent" && "${argv[i+1]}" == "orchestrator" ]] && has_agent=1
+      [[ "${argv[i]}" == "--name" && "${argv[i+1]}" == "orchestrator@${PROJECT_NAME}" ]] && has_name=1
+    done
+    [[ $has_agent -eq 1 && $has_name -eq 1 ]] && matches+=("${proc##*/}")
+  done
+  if [[ ${#matches[@]} -gt 1 ]]; then
+    echo "cc-orch: multiple running orchestrator@${PROJECT_NAME} processes: ${matches[*]}" >&2
+    exit 1
+  fi
+
+  if [[ ${#matches[@]} -eq 1 ]]; then
+    old_pid="${matches[0]}"
+    old_dir="$(readlink -f "/proc/$old_pid/cwd" 2>/dev/null || true)"
+    [[ -n "$old_dir" ]] && PROJECT_DIR="$old_dir"
+
+    registry="$PROJECT_DIR/.orchestra/REGISTRY.md"
+    active_rows=""
+    if [[ -r "$registry" ]]; then
+      active_rows="$(awk -F'|' '
+        /^\|[[:space:]]*lead-/ {
+          s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+          if (s != "" && s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)$/) print $0
+        }' "$registry")"
+    fi
+    if [[ -n "$active_rows" && $FORCE_RELOAD -ne 1 ]]; then
+      echo "cc-orch: refusing to reload '$PROJECT_NAME': active lead rows in $registry" >&2
+      printf '%s\n' "$active_rows" >&2
+      echo "Finish/stop those leads, or use --force-reload after confirming their state is on disk." >&2
+      exit 1
+    fi
+
+    echo "cc-orch: gracefully stopping orchestrator@${PROJECT_NAME} (pid $old_pid)"
+    kill -TERM "$old_pid"
+    for _ in $(seq 1 40); do
+      kill -0 "$old_pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$old_pid" 2>/dev/null; then
+      echo "cc-orch: pid $old_pid did not stop after 10s; not sending SIGKILL." >&2
+      exit 1
+    fi
+  elif [[ -r "$PROJECT_STATE" ]]; then
+    saved_dir="$(sed -n 's/^dir=//p' "$PROJECT_STATE" | head -1)"
+    [[ -d "$saved_dir" ]] && PROJECT_DIR="$saved_dir"
+  elif [[ $PROJECT_DIR_GIVEN -ne 1 ]]; then
+    echo "cc-orch: no running '$PROJECT_NAME' session or saved directory; pass [project-dir]." >&2
+    exit 1
+  fi
+
+  # Keep the session's explicit profile unless the reload command supplies a replacement.
+  # Old sessions may have no project state yet; those safely fall back to normal.
+  if [[ $PROFILE_SET -eq 0 && -r "$PROJECT_STATE" ]]; then
+    saved_profile="$(sed -n 's/^profile=//p' "$PROJECT_STATE" | head -1)"
+    [[ -n "$saved_profile" ]] && PROFILE="$saved_profile"
+  fi
+  if [[ $MODEL_OVERRIDE_SET -eq 0 && -r "$PROJECT_STATE" ]]; then
+    MODEL_OVERRIDE="$(sed -n 's/^model_override=//p' "$PROJECT_STATE" | head -1)"
+    [[ -n "$MODEL_OVERRIDE" ]] && MODEL_OVERRIDE_SET=1
+  fi
+  if [[ $EFFORT_OVERRIDE_SET -eq 0 && -r "$PROJECT_STATE" ]]; then
+    EFFORT_OVERRIDE="$(sed -n 's/^effort_override=//p' "$PROJECT_STATE" | head -1)"
+    [[ -n "$EFFORT_OVERRIDE" ]] && EFFORT_OVERRIDE_SET=1
+  fi
+
+  # Continue the last conversation in the resolved project directory. A new process is required
+  # so Claude Code re-reads every generated agent definition.
+  set -- -c "$@"
 fi
 
 for f in "$HOME/.claude/agents/orchestrator.md" "$ORCH_HOME/guardrails.json"; do
@@ -67,19 +178,57 @@ done
 
 cd "$PROJECT_DIR"
 export CC_ORCH_PROJECT="$PROJECT_NAME"
+mkdir -p "$PROJECT_STATE_DIR"
+{
+  printf 'dir=%s\n' "$PROJECT_DIR"
+  printf 'profile=%s\n' "$PROFILE"
+  printf 'model_override=%s\n' "$MODEL_OVERRIDE"
+  printf 'effort_override=%s\n' "$EFFORT_OVERRIDE"
+  printf 'updated_at=%s\n' "$(date -Is)"
+} > "$PROJECT_STATE.tmp"
+mv -f "$PROJECT_STATE.tmp" "$PROJECT_STATE"
 
-# The model is not hardcoded here: orch-model-guard moves Tier 1/2 off Fable when its weekly
-# quota is spent and back when the week rolls over. A session's model can only be chosen at
-# startup, so this is the one place that decides it. CC_ORCH_MODEL lets the notice hook see,
-# without guessing from argv, what this session was launched on.
-MODEL="$("$ORCH_HOME/bin/orch-model-guard" active 2>/dev/null)"
-MODEL="${MODEL:-fable[1m]}"
+# shellcheck source=/dev/null
+. "$ORCH_HOME/model-policy.conf"
+
+# The normal orchestrator is Sonnet. Fable is selected only for an explicit critical/deep
+# session. Fable exhaustion overrides every control profile, including critical/deep, to Opus.
+ACTIVE_CONTROL="$("$ORCH_HOME/bin/orch-model-guard" active 2>/dev/null)"
+ACTIVE_CONTROL="${ACTIVE_CONTROL:-$PRIMARY_MODEL}"
+case "$PROFILE" in
+  normal)   MODEL="$PRIMARY_MODEL";       EFFORT="$ORCH_EFFORT" ;;
+  critical) MODEL="$LEAD_CRITICAL_MODEL"; EFFORT="$LEAD_CRITICAL_EFFORT" ;;
+  deep)     MODEL="$LEAD_DEEP_MODEL";     EFFORT="$LEAD_DEEP_EFFORT" ;;
+esac
+if [[ "$ACTIVE_CONTROL" == "$FALLBACK_MODEL" ]]; then
+  MODEL="$FALLBACK_MODEL"
+  if [[ -n "$MODEL_OVERRIDE" && "$MODEL_OVERRIDE" != "$FALLBACK_MODEL" ]]; then
+    echo "cc-orch: ignoring --model $MODEL_OVERRIDE while Fable fallback is active; using $FALLBACK_MODEL" >&2
+  fi
+elif [[ "$ACTIVE_CONTROL" != "$PRIMARY_MODEL" ]]; then
+  # An explicit `orch-model-guard set <custom>` pin applies to every control profile.
+  MODEL="$ACTIVE_CONTROL"
+else
+  MODEL="${MODEL_OVERRIDE:-$MODEL}"
+fi
+EFFORT="${EFFORT_OVERRIDE:-$EFFORT}"
+case "$EFFORT" in low|medium|high|xhigh|max) ;; *) echo "cc-orch: invalid effort '$EFFORT'" >&2; exit 1 ;; esac
+
 export CC_ORCH_MODEL="$MODEL"
+export CC_ORCH_EFFORT="$EFFORT"
+export CC_ORCH_PROFILE="$PROFILE"
+export CC_ORCH_MODEL_OVERRIDE="$MODEL_OVERRIDE_SET"
+export CC_ORCH_EFFORT_OVERRIDE="$EFFORT_OVERRIDE_SET"
+CC_ORCH_POLICY_REV="$(sha256sum "$ORCH_HOME/model-policy.conf" "$ORCH_HOME/templates/lead.md.tpl" \
+  "$ORCH_HOME/templates/dev.md.tpl" "$ORCH_HOME/agents/orchestrator.md" \
+  "$ORCH_HOME/agents/verifier.md" "$ORCH_HOME/agents/verifier-normal.md" \
+  | sha256sum | cut -d' ' -f1)"
+export CC_ORCH_POLICY_REV
 
 args=(
   --agent orchestrator
   --model "$MODEL"
-  --effort xhigh
+  --effort "$EFFORT"
   --dangerously-skip-permissions
   --settings "$ORCH_HOME/guardrails.json"
   --name "orchestrator@${PROJECT_NAME}"

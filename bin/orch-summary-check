@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Validate task artifacts against the model/dispatch/context policy.
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=/dev/null
+. "$REPO_DIR/model-policy.conf"
+
+STRICT=0
+if [ "${1:-}" = "--strict" ]; then STRICT=1; shift; fi
+TASK_DIR="${1:-}"
+if [ -z "$TASK_DIR" ] || [ ! -d "$TASK_DIR" ]; then
+  echo "usage: orch-summary-check [--strict] <task-dir>" >&2
+  exit 2
+fi
+TASK_DIR="$(cd "$TASK_DIR" && pwd)"
+
+errors=0 warnings=0
+problem() { # problem error|warning <message>
+  if [ "$1" = "error" ] || [ "$STRICT" = "1" ]; then
+    echo "ERROR: $2"; errors=$((errors + 1))
+  else
+    echo "WARN:  $2"; warnings=$((warnings + 1))
+  fi
+}
+
+check_size() { # file limit
+  local file="$1" limit="$2" size
+  [ -f "$file" ] || return 0
+  size="$(wc -c < "$file")"
+  [ "$size" -le "$limit" ] || problem warning "$(basename "$file") is ${size}B (budget ${limit}B); move detail to evidence/ or rounds/"
+}
+
+BRIEF="$TASK_DIR/brief.md"; PLAN="$TASK_DIR/plan.md"; SUMMARY="$TASK_DIR/summary.md"
+check_size "$BRIEF" "$BRIEF_MAX_BYTES"
+check_size "$PLAN" "$PLAN_MAX_BYTES"
+check_size "$SUMMARY" "$SUMMARY_MAX_BYTES"
+
+[ -r "$BRIEF" ] || problem error "missing brief.md"
+[ -r "$PLAN" ] || problem error "missing plan.md"
+[ -r "$SUMMARY" ] || problem error "missing summary.md"
+
+risk=""
+if [ -r "$BRIEF" ]; then
+  parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"
+  [ -n "$parsed" ] && risk="$parsed"
+fi
+case "$risk" in low|normal|critical) ;; *) problem error "invalid or missing RISK (got '${risk:-empty}')"; risk="normal" ;; esac
+
+if [ -r "$SUMMARY" ]; then
+  grep -q '^CLAUDE PROFILE:' "$SUMMARY" || problem warning "summary lacks CLAUDE PROFILE"
+  grep -q '^PROMOTIONS:' "$SUMMARY" || problem warning "summary lacks PROMOTIONS"
+  grep -q '^DISPATCH: codex-\(first\|sparing\)' "$SUMMARY" || problem warning "DISPATCH must be codex-first or codex-sparing"
+  grep -q '^INVESTIGATION:' "$SUMMARY" || problem warning "summary lacks INVESTIGATION"
+  grep -q '^LANES:' "$SUMMARY" || problem warning "summary lacks LANES"
+
+  gates="$(grep '^GATES:' "$SUMMARY" | tail -1)"
+  if [ -z "$gates" ]; then
+    problem error "summary lacks GATES"
+  else
+    codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
+    printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1
+    printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+(CLEAR|NONBLOCKING)' && codex_review_ok=1
+    printf '%s' "$gates" | grep -qiE 'claude-verifier[[:space:]]+PASS' && claude_verify_ok=1
+
+    # A provider outage may fall back to the zero-context Claude verifier, but it must be
+    # visible in the same line; a bare missing/waived executable verdict is never PASS.
+    if [ "$codex_verify_ok" = "0" ]; then
+      if ! printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+unavailable' || \
+         [ "$claude_verify_ok" = "0" ]; then
+        problem error "executable verification did not PASS and has no explicit Claude fallback"
+      fi
+    fi
+    if [ "$codex_review_ok" = "0" ]; then
+      if [ "$risk" = "low" ] && printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+waived'; then
+        :
+      elif printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+unavailable' && \
+           [ "$claude_verify_ok" = "1" ]; then
+        :
+      else
+        problem error "adversarial review is not CLEAR/NONBLOCKING (only low risk may waive it)"
+      fi
+    fi
+    if [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
+      problem error "critical risk requires claude-verifier PASS"
+    fi
+  fi
+
+  lane_line="$(grep '^LANES:' "$SUMMARY" | tail -1)"
+  if printf '%s' "$lane_line" | grep -qE 'dev-(opus-)?[123]'; then
+    printf '%s' "$lane_line" | grep -qiE 'exception:[[:space:]]*(fallback|context|steering|gpu|fresh-eyes|sparing)' \
+      || problem error "Claude dev lane lacks an allowed exception tag"
+  fi
+
+  rounds="$(sed -n 's/^ROUNDS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SUMMARY" | tail -1)"
+  if [ -n "$rounds" ]; then
+    [ "$rounds" -ge 1 ] || problem error "ROUNDS must be at least 1"
+    cap="$NORMAL_GATE_ROUNDS"; [ "$risk" = "critical" ] && cap="$CRITICAL_GATE_ROUNDS"
+    if [ "$rounds" -gt "$cap" ] && ! grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved' "$BRIEF"; then
+      problem error "ROUNDS=$rounds exceeds $risk cap=$cap without EXTRA GATE ROUND: approved"
+    fi
+  else
+    problem warning "summary lacks numeric ROUNDS"
+  fi
+
+  profile="$(sed -n 's/^CLAUDE PROFILE:[[:space:]]*//p' "$SUMMARY" | tail -1)"
+  case "$risk" in
+    low)      printf '%s' "$profile" | grep -qi 'light\|sonnet\|fallback.*opus' || problem warning "low risk should use light/Sonnet or recorded Opus fallback" ;;
+    normal)   printf '%s' "$profile" | grep -qi 'normal\|opus\|fallback' || problem warning "normal risk should use the normal/Opus profile" ;;
+    critical) printf '%s' "$profile" | grep -qi 'critical\|fable\|fallback.*opus' || problem warning "critical risk should use Fable or recorded Opus fallback" ;;
+  esac
+
+  if grep -qi '^PROMOTIONS:.*fable' "$SUMMARY" && ! grep -qi '^PROMOTIONS:.*\(critical\|user\|failed\|security\|algorithm\)' "$SUMMARY"; then
+    problem warning "Fable promotion lacks a critical/user/failure reason"
+  fi
+fi
+
+if [ "$errors" -gt 0 ]; then
+  echo "CHECK: FAIL ($errors error(s), $warnings warning(s))"
+  exit 1
+fi
+if [ "$warnings" -gt 0 ]; then
+  echo "CHECK: WARN ($warnings warning(s))"
+else
+  echo "CHECK: PASS (risk=$risk)"
+fi

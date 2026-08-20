@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Independent zero-trust verifier (Tier 4). Given only a repo path and a spec path — no conversation context — it re-runs the stated verification from a clean slate and returns PASS / FAIL / INCONCLUSIVE with evidence. Read-only; it never modifies code. Use as the gate before any lead reports PASS.
+description: Critical-task independent zero-trust verifier (Tier 4, Opus max). Given only a repo path and a spec path, it re-runs verification from a clean slate. Mandatory for RISK critical; low/normal use codex-run verify and invoke verifier-normal only as fallback.
 model: opus[1m]
 effort: max
 tools: Bash, Read, Grep, Glob

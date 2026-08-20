@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Aggregate local Claude transcripts and codex-run logs without making a provider call.
+set -euo pipefail
+
+DAYS=7
+if [[ "${1:-}" == "--days" ]]; then
+  [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo "usage: orch-usage-report [--days N]" >&2; exit 2; }
+  DAYS="$2"
+fi
+
+CLAUDE_ROOT="${CC_ORCH_CLAUDE_PROJECTS:-$HOME/.claude/projects}"
+CODEX_LOG="${CC_ORCH_CODEX_LOG:-$HOME/.claude/orchestra-state/codex.log}"
+
+python3 - "$CLAUDE_ROOT" "$CODEX_LOG" "$DAYS" <<'PY'
+import json, sys, time
+from collections import defaultdict
+from pathlib import Path
+
+claude_root, codex_log, days = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
+cutoff = time.time() - days * 86400
+
+def family(model):
+    for name in ("fable", "opus", "sonnet", "haiku"):
+        if name in model.lower(): return name
+    return model or "unknown"
+
+totals = defaultdict(lambda: defaultdict(int))
+files = []
+orchestra_sessions = 0
+if claude_root.exists():
+    for main in claude_root.glob("*/*.jsonl"):
+        try:
+            if main.stat().st_mtime < cutoff: continue
+        except OSError:
+            continue
+        subdir = main.parent / main.stem / "subagents"
+        children = []
+        detected = False
+        for sub in subdir.glob("agent-*.jsonl"):
+            try:
+                meta = json.loads(sub.with_suffix(".meta.json").read_text())
+                kind = meta.get("agentType", "unknown")
+            except Exception:
+                kind = "unknown"
+            children.append((sub, kind))
+            if kind.startswith(("lead-", "dev-")) or kind in ("verifier", "verifier-normal"):
+                detected = True
+        # Do not label every ordinary Claude conversation as an orchestrator. A real orchestra
+        # delivery session is identified by at least one generated agent type beneath it.
+        if detected:
+            orchestra_sessions += 1
+            files.append((main, "orchestrator"))
+            files.extend(children)
+
+for path, kind in files:
+    requests = {}
+    try:
+        fh = path.open(errors="replace")
+    except OSError:
+        continue
+    with fh:
+        for line in fh:
+            try: obj = json.loads(line)
+            except Exception: continue
+            if obj.get("type") != "assistant" or not obj.get("requestId"): continue
+            msg = obj.get("message") or {}; usage = msg.get("usage") or {}
+            row = {
+                "output": int(usage.get("output_tokens") or 0),
+                "context": sum(int(usage.get(k) or 0) for k in
+                               ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
+                "model": family(msg.get("model", "")),
+                "effort": obj.get("effort") or "unknown",
+            }
+            old = requests.get(obj["requestId"])
+            if old is None or row["output"] >= old["output"]:
+                requests[obj["requestId"]] = row
+    for row in requests.values():
+        key = (row["model"], kind, row["effort"])
+        out = totals[key]; out["requests"] += 1
+        out["output"] += row["output"]; out["context"] += row["context"]
+
+print(f"LOCAL USAGE REPORT — last {days} day(s), {orchestra_sessions} detected orchestra session(s)")
+print("Claude (request snapshots; cache-inclusive context is workload, not cross-provider billing)")
+families = defaultdict(lambda: defaultdict(int))
+for (model, _kind, _effort), row in totals.items():
+    for key, value in row.items(): families[model][key] += value
+print("model\trequests\toutput_k\tcontext_M")
+for model, row in sorted(families.items(), key=lambda x: x[1]["context"], reverse=True):
+    print(f"{model}\t{row['requests']}\t{row['output']/1000:.1f}\t{row['context']/1e6:.2f}")
+print("\nClaude detail")
+print("model\tagent\teffort\trequests\toutput_k\tcontext_M")
+for (model, kind, effort), row in sorted(totals.items(), key=lambda x: x[1]["context"], reverse=True):
+    print(f"{model}\t{kind}\t{effort}\t{row['requests']}\t{row['output']/1000:.1f}\t{row['context']/1e6:.2f}")
+
+codex = defaultdict(int)
+if codex_log.exists():
+    cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
+    for line in codex_log.read_text(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[0][:10] < cutoff_day: continue
+        codex[(parts[1], parts[2])] += 1
+print("\nCodex wrapper runs")
+print("mode\tmodel@effort\truns")
+for (mode, spec), count in sorted(codex.items(), key=lambda x: x[1], reverse=True):
+    print(f"{mode}\t{spec}\t{count}")
+PY

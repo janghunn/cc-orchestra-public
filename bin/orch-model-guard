@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# orch-model-guard — keep Tier 1 / Tier 2 on a model that still has quota.
+# orch-model-guard — manage role profiles and provider pressure.
 #
-# Polls `claude -p /usage`, and when the Fable weekly bucket is spent it moves the orchestrator
-# and every lead-* slot to the fallback model; when the week rolls over it moves them back.
+# Polls `claude -p /usage`. When the Fable weekly bucket is spent it moves the orchestrator and
+# every lead profile to Opus; when the week rolls over it restores Sonnet/Opus/Fable by role.
 #
 # What the switch reaches, measured rather than assumed: nothing that is already running.
 # Agent definitions are read once at session start, and a session's own model is fixed when the
 # process starts — no settings file, no agent file changes either afterwards. New sessions pick
 # the model up from cc-orch, which reads `orch-model-guard active`; for sessions already running,
-# hooks/orch-model-notice.sh tells the user to restart or type /model.
+# hooks/orch-model-notice.sh tells the user to reload the named session.
 #
 # It also tracks the OTHER provider's weekly bucket (Codex), which costs nothing: codex-run's own
 # runs leave a `rate_limits` snapshot in ~/.codex/sessions/**/rollout-*.jsonl. That number is what
@@ -18,10 +18,7 @@
 #   orch-model-guard check              poll usage and switch if the thresholds say so
 #   orch-model-guard status             what is active, why, and what the roster actually says
 #   orch-model-guard active             print the active model (for scripts; always prints one)
-#   orch-model-guard lanes              Tier 3 dispatch hint for leads (4 lines):
-#                                       dispatch=codex-sparing|codex-first|balanced, from the
-#                                       Claude 5h session + weekly buckets and the Codex weekly
-#                                       bucket (thresholds in model-policy.conf)
+#   orch-model-guard lanes              dispatch=codex-first unless Codex is near its reserve
 #   orch-model-guard set <m>|primary|fallback|auto
 #                                       force a model and pin it (auto un-pins, resumes polling)
 #   orch-model-guard install            install the systemd timer + the in-session notice hook
@@ -29,15 +26,15 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-STATE_DIR="$HOME/.claude/orchestra-state"
+STATE_DIR="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
 STATE="$STATE_DIR/state"
 LOG="$STATE_DIR/guard.log"
 USAGE_SNAPSHOT="$STATE_DIR/last-usage.txt"
-AGENTS_DIR="$HOME/.claude/agents"
+AGENTS_DIR="${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}"
 CODEX_SESSIONS="${CODEX_HOME:-$HOME/.codex}/sessions"
 HOOK="$REPO_DIR/hooks/orch-model-notice.sh"
-SETTINGS="$HOME/.claude/settings.json"
-UNIT_DIR="$HOME/.config/systemd/user"
+SETTINGS="${CC_ORCH_SETTINGS:-$HOME/.claude/settings.json}"
+UNIT_DIR="${CC_ORCH_UNIT_DIR:-$HOME/.config/systemd/user}"
 
 # shellcheck source=/dev/null
 . "$REPO_DIR/model-policy.conf"
@@ -181,12 +178,30 @@ codex_resets_human() { # epoch -> local time, or the raw value if it is not an e
 }
 
 # --- applying ----------------------------------------------------------------------------
-apply_model() { # apply_model <model>
-  local model="$1" n=0 f
+set_file_model() { # set_file_model <file> <model>
+  local file="$1" model="$2"
+  [ -f "$file" ] || return 1
+  grep -q '^model: ' "$file" || { log "WARN: no model line in $file"; return 1; }
+  sed -i "s|^model: .*|model: ${model}|" "$file"
+}
+
+apply_profiles() { # apply_profiles primary|fallback|<custom-model>
+  local mode="$1" n=0 f model
   shopt -s nullglob
   for f in "$AGENTS_DIR"/lead-*.md; do
-    grep -q '^model: ' "$f" || { log "WARN: no model line in $f"; continue; }
-    sed -i "s|^model: .*|model: ${model}|" "$f" && n=$((n + 1))
+    if [ "$mode" = "fallback" ]; then
+      model="$FALLBACK_MODEL"
+    elif [ "$mode" = "primary" ]; then
+      case "$(basename "$f")" in
+        *-light.md)          model="$LEAD_LIGHT_MODEL" ;;
+        *-critical.md)       model="$LEAD_CRITICAL_MODEL" ;;
+        *-critical-xhigh.md) model="$LEAD_DEEP_MODEL" ;;
+        *)                   model="$LEAD_NORMAL_MODEL" ;;
+      esac
+    else
+      model="$mode"
+    fi
+    set_file_model "$f" "$model" && n=$((n + 1))
   done
   shopt -u nullglob
   printf '%s\n' "$n"
@@ -221,14 +236,14 @@ cmd_check() {
   }
   printf '%s\n' "$panel" > "$USAGE_SNAPSHOT"
 
-  fable="$(pct_for "$panel" "$USAGE_LABEL")"
+  fable="$(pct_for "$panel" "$FABLE_USAGE_LABEL")"
   all="$(pct_for "$panel" "all models")"
   session="$(pct_session "$panel")"
 
   if [ -z "$fable" ]; then
     # Either the panel changed shape or the bucket vanished. Do not guess — a wrong guess here
     # either strands the tier on a dead model or burns Opus for a week.
-    log "WARN: no '$USAGE_LABEL' weekly bucket in /usage output, keeping $cur (see $USAGE_SNAPSHOT)"
+    log "WARN: no '$FABLE_USAGE_LABEL' weekly bucket in /usage output, keeping $cur (see $USAGE_SNAPSHOT)"
     exit 0
   fi
 
@@ -237,27 +252,29 @@ cmd_check() {
     exit 0
   fi
 
-  target="$cur"
+  # Normalize state written by the pre-profile policy (for example active=fable[1m]). Only
+  # PRIMARY/FALLBACK are valid automatic states; arbitrary values remain available when pinned.
+  case "$cur" in
+    "$PRIMARY_MODEL"|"$FALLBACK_MODEL") target="$cur" ;;
+    *)                                  target="$PRIMARY_MODEL" ;;
+  esac
   if   [ "$fable" -ge "$SWITCH_AT_PCT" ];  then target="$FALLBACK_MODEL"
   elif [ "$fable" -le "$RESTORE_AT_PCT" ]; then target="$PRIMARY_MODEL"
   fi
 
   if [ "$target" = "$cur" ]; then
-    write_state "$cur" 0 "$fable" "${all:-?}" "${session:-?}" "$changed_at" "${USAGE_LABEL} ${fable}%"
+    write_state "$cur" 0 "$fable" "${all:-?}" "${session:-?}" "$changed_at" "${FABLE_USAGE_LABEL} ${fable}%"
     exit 0
   fi
 
-  n="$(apply_model "$target")"
-  write_state "$target" 0 "$fable" "${all:-?}" "${session:-?}" "$(date -Is)" "auto: ${USAGE_LABEL} ${fable}% (switch>=${SWITCH_AT_PCT}, restore<=${RESTORE_AT_PCT})"
-  log "SWITCH $cur -> $target  (${USAGE_LABEL} ${fable}%, all models ${all:-?}%) — rewrote $n lead file(s)"
+  if [ "$target" = "$FALLBACK_MODEL" ]; then n="$(apply_profiles fallback)"; else n="$(apply_profiles primary)"; fi
+  write_state "$target" 0 "$fable" "${all:-?}" "${session:-?}" "$(date -Is)" "auto: ${FABLE_USAGE_LABEL} ${fable}% (switch>=${SWITCH_AT_PCT}, restore<=${RESTORE_AT_PCT})"
+  log "SWITCH $cur -> $target  (${FABLE_USAGE_LABEL} ${fable}%, all models ${all:-?}%) — rewrote $n lead profile(s)"
 
   if [ "$target" = "$FALLBACK_MODEL" ]; then
-    notify "Fable weekly quota spent (${fable}%). lead-* moved to ${target}. Running orchestrator sessions still need: /model ${target}"
-    if [ -n "$all" ] && [ "$all" -ge 100 ] 2>/dev/null; then
-      log "WARN: the all-models weekly bucket is at ${all}% too — ${FALLBACK_MODEL} will not help until it resets"
-    fi
+    notify "Fable weekly quota spent (${fable}%). All lead profiles moved to ${target}. Running orchestrator sessions must restart."
   else
-    notify "Fable weekly quota reset (${fable}%). lead-* back on ${target}. Running orchestrator sessions: /model ${target}"
+    notify "Fable weekly quota reset (${fable}%). Role-specific Sonnet/Opus/Fable profiles restored. Running orchestrator sessions must reload."
   fi
   exit 0
 }
@@ -266,11 +283,7 @@ cmd_check() {
 #   codex-sparing  Codex's own week is nearly spent — keep what is left for the Tier 4 review
 #                  gate (mandatory per task): implement on dev-*, investigate yourself, review
 #                  with --fast. Checked first: it is the only state where Claude is the answer.
-#   codex-first    Claude pressure is real — serialize on codex rather than spill parallel
-#                  units to dev-*, and send investigation to `codex-run investigate`.
-#   balanced       both pools have room; spilling the 3rd+ parallel unit to dev-* is fine.
-# Codex is the default implement and investigate lane in every state except codex-sparing (see
-# templates/lead.md.tpl); this only decides how much Claude spill is acceptable.
+#   codex-first    the default — serialize a third unit rather than spill merely for speed.
 # Polls Claude live (~2s, zero tokens) and falls back to the last snapshot; the Codex reading is
 # a file read of the newest rollout, and unknown reads as headroom.
 cmd_lanes() {
@@ -283,36 +296,30 @@ cmd_lanes() {
   fi
   session="$(pct_session "$panel")"
   all="$(pct_for "$panel" "all models")"
-  fable="$(pct_for "$panel" "$USAGE_LABEL")"
+  fable="$(pct_for "$panel" "$FABLE_USAGE_LABEL")"
 
   local cx csrc="live"
   if refresh_codex_usage; then cx="$CODEX_PCT"; else cx="$(st codex_pct)"; csrc="state"; fi
   case "$cx" in ''|*[!0-9]*) cx=""; csrc="unknown" ;; esac
 
-  local hint="balanced" why
-  why="session ${session:-?}% < ${LANES_CODEX_FIRST_SESSION_PCT}, week(all) ${all:-?}% < ${LANES_CODEX_FIRST_WEEK_PCT}, codex ${cx:-?}% < ${LANES_CODEX_SPARE_PCT}"
+  local hint="codex-first" why
+  why="default policy — Codex owns heavy work; serialize instead of Claude spill"
   if [ -n "$cx" ] && [ "$cx" -ge "$LANES_CODEX_SPARE_PCT" ]; then
     hint="codex-sparing"; why="codex week at ${cx}% (>= ${LANES_CODEX_SPARE_PCT}) — reserve the rest for the Tier 4 gate"
-  elif [ -z "$session" ] && [ -z "$all" ]; then
-    hint="codex-first"; why="no claude usage data — assume pressure rather than burn a bucket blind"
-  elif [ -n "$session" ] && [ "$session" -ge "$LANES_CODEX_FIRST_SESSION_PCT" ]; then
-    hint="codex-first"; why="claude 5h session at ${session}% (>= ${LANES_CODEX_FIRST_SESSION_PCT})"
-  elif [ -n "$all" ] && [ "$all" -ge "$LANES_CODEX_FIRST_WEEK_PCT" ]; then
-    hint="codex-first"; why="claude week(all models) at ${all}% (>= ${LANES_CODEX_FIRST_WEEK_PCT})"
   fi
 
   echo "dispatch=$hint"
-  echo "claude: session=${session:-?}% week_all=${all:-?}% week_${USAGE_LABEL,,}=${fable:-?}%  ($src)"
+  echo "claude: session=${session:-?}% week_all=${all:-?}% week_fable=${fable:-?}%  ($src)"
   echo "codex:  week=${cx:-?}% resets=$(codex_resets_human "${CODEX_RESETS:-$(st codex_resets_at)}")  ($csrc${CODEX_ASOF:+, asof $CODEX_ASOF})"
   echo "reason: $why"
 }
 
 cmd_status() {
   local f
-  echo "policy      $PRIMARY_MODEL -> $FALLBACK_MODEL   (switch >= ${SWITCH_AT_PCT}%, restore <= ${RESTORE_AT_PCT}%)"
+  echo "policy      role profiles -> $FALLBACK_MODEL when Fable >= ${SWITCH_AT_PCT}% (restore <= ${RESTORE_AT_PCT}%)"
   echo "active      $(active_model)$([ "$(st pinned)" = "1" ] && echo "   [PINNED — auto switching is off]")"
   if [ -r "$STATE" ]; then
-    echo "claude      ${USAGE_LABEL} $(st fable_pct)% · all models $(st all_pct)% · 5h session $(st session_pct)%   (checked $(st checked_at))"
+    echo "claude      Fable $(st fable_pct)% · all models $(st all_pct)% · 5h session $(st session_pct)%   (checked $(st checked_at))"
     # The two numbers side by side are the whole point: this harness deliberately spends the
     # Codex bucket first, and this line is where you see whether it actually is.
     echo "codex       week $(st codex_pct)% · resets $(codex_resets_human "$(st codex_resets_at)")   (asof $(st codex_asof))"
@@ -323,8 +330,9 @@ cmd_status() {
   echo
   echo "roster on disk:"
   shopt -s nullglob
-  for f in "$AGENTS_DIR"/orchestrator.md "$AGENTS_DIR"/lead-*.md "$AGENTS_DIR"/dev-*.md "$AGENTS_DIR"/verifier.md; do
-    printf '  %-14s %s\n' "$(basename "$f" .md)" "$(sed -n 's/^model: //p' "$f" | head -1)"
+  for f in "$AGENTS_DIR"/orchestrator.md "$AGENTS_DIR"/lead-*.md "$AGENTS_DIR"/dev-*.md "$AGENTS_DIR"/verifier*.md; do
+    printf '  %-29s %s @ %s\n' "$(basename "$f" .md)" \
+      "$(sed -n 's/^model: //p' "$f" | head -1)" "$(sed -n 's/^effort: //p' "$f" | head -1)"
   done
   shopt -u nullglob
   echo "  (orchestrator.md is a symlink into the repo and keeps the primary model;"
@@ -350,11 +358,11 @@ cmd_set() {
     "")  echo "usage: orch-model-guard set <model>|primary|fallback|auto" >&2; return 1 ;;
     *)   model="$want" ;;
   esac
-  n="$(apply_model "$model")"
+  case "$want" in primary) n="$(apply_profiles primary)" ;; fallback) n="$(apply_profiles fallback)" ;; *) n="$(apply_profiles "$model")" ;; esac
   write_state "$model" 1 "$(st fable_pct)" "$(st all_pct)" "$(st session_pct)" "$(date -Is)" "manual pin"
   log "MANUAL $model — rewrote $n lead file(s), pinned"
   echo "active model is now $model (pinned; 'set auto' to resume polling) — $n lead file(s) rewritten"
-  echo "running orchestrator sessions still need:  /model $model"
+  echo "running orchestrator sessions still need: cc-orch --reload <project>"
 }
 
 cmd_install() {
@@ -364,7 +372,7 @@ cmd_install() {
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_DIR/orch-model-guard.service" <<EOF
 [Unit]
-Description=cc-orchestra model guard — move Tier 1/2 off Fable when its weekly quota is spent
+Description=cc-orchestra model guard — move all control profiles to Opus when Fable is spent
 
 [Service]
 Type=oneshot

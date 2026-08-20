@@ -1,46 +1,29 @@
 #!/usr/bin/env bash
-# UserPromptSubmit hook — the one gap orch-model-guard cannot close by itself.
-#
-# A running session is frozen at process start in two ways, both measured on 2.1.197 and 2.1.220
-# with a gated probe (swap a marker in an agent file, verify it on disk, then spawn again):
-#
-#   1. The session's own model cannot be changed from outside — no settings file, agent file or
-#      hook moves it. Only /model, typed by the user, or a restart.
-#   2. Agent definitions in ~/.claude/agents/ are cached at session start, NOT re-read per spawn.
-#      A lead-* spawned an hour after the guard rewrote its file still uses the model, prompt and
-#      effort that were on disk when the session started.
-#
-# (2) is why /model alone is not a fix: it moves Tier 1 only, and this session's lead-* keep
-# spawning on the model with no quota left. A restart is the only thing that moves both tiers.
-#
-# This hook is what tells them, in the session, at the moment they type. It stays silent in
-# every other session and while Tier 1 and the guard agree.
-#
-# Registered in two places on purpose. ~/.claude/settings.json is on Claude Code's watch list,
-# so a hook added there reaches sessions that are ALREADY RUNNING; guardrails.json is read at
-# startup only, but is guaranteed to load for every session cc-orch launches. Whichever channel
-# a given session honours, the notice arrives once — see the prompt_id stamp below.
-# Install/remove the settings.json half with: orch-model-guard install | uninstall
-STATE="$HOME/.claude/orchestra-state/state"
+# UserPromptSubmit hook: tell a running orchestra session when its cached policy is stale.
+# Claude Code caches the session model/effort and all agent definitions at process start, so a
+# restart is the only complete reload. /model changes Tier 1 only.
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+STATE="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/state"
 [ -r "$STATE" ] || exit 0
+# shellcheck source=/dev/null
+. "$REPO_DIR/model-policy.conf"
 
 active="$(sed -n 's/^active=//p' "$STATE" | head -1)"
-[ -n "$active" ] || exit 0
+[ -n "$active" ] || active="$PRIMARY_MODEL"
 
-family() { # fable[1m] / claude-opus-5 / opus -> fable|opus|sonnet|haiku
+family() {
   case "$1" in
-    *fable*)  echo fable ;;
-    *opus*)   echo opus ;;
-    *sonnet*) echo sonnet ;;
-    *haiku*)  echo haiku ;;
-    *)        echo "" ;;
+    *fable*) echo fable ;; *opus*) echo opus ;; *sonnet*) echo sonnet ;; *haiku*) echo haiku ;;
+    *) echo "" ;;
   esac
 }
 
-# --- is this an orchestrator session? ----------------------------------------------------
-# cc-orch exports CC_ORCH_MODEL; sessions launched before that existed are identified from the
-# claude process's own argv, walking up because the hook runs under a shell.
+# cc-orch exports these. Older sessions are recovered from the ancestor argv where possible.
 launch_model="${CC_ORCH_MODEL:-}"
+launch_effort="${CC_ORCH_EFFORT:-unknown}"
+launch_profile="${CC_ORCH_PROFILE:-normal}"
 if [ -z "$launch_model" ]; then
   pid="$PPID"
   for _ in 1 2 3 4 5 6; do
@@ -49,6 +32,7 @@ if [ -z "$launch_model" ]; then
     case "$args" in
       *"--agent orchestrator"*)
         launch_model="$(printf '%s' "$args" | sed -n 's/.*--model \([^ ]*\).*/\1/p')"
+        launch_effort="$(printf '%s' "$args" | sed -n 's/.*--effort \([^ ]*\).*/\1/p')"
         break ;;
     esac
     pid="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null)"
@@ -57,46 +41,69 @@ if [ -z "$launch_model" ]; then
 fi
 [ -n "$launch_model" ] || exit 0
 
-# --- what is this session actually running right now? -------------------------------------
-# argv is not enough: it still says fable[1m] after the user has run /model. The transcript's
-# last assistant message carries the model that was really used, so the notice self-silences
-# one turn after the switch instead of nagging forever.
+if [ "$active" = "$FALLBACK_MODEL" ]; then
+  desired_model="$FALLBACK_MODEL"
+elif [ "$active" != "$PRIMARY_MODEL" ]; then
+  desired_model="$active"
+else
+  case "$launch_profile" in
+    critical) desired_model="$LEAD_CRITICAL_MODEL" ;;
+    deep)     desired_model="$LEAD_DEEP_MODEL" ;;
+    *)        desired_model="$PRIMARY_MODEL" ;;
+  esac
+fi
+case "$launch_profile" in
+  critical) desired_effort="$LEAD_CRITICAL_EFFORT" ;;
+  deep)     desired_effort="$LEAD_DEEP_EFFORT" ;;
+  *)        desired_effort="$ORCH_EFFORT" ;;
+esac
+if [ "${CC_ORCH_MODEL_OVERRIDE:-0}" = "1" ] && [ "$active" != "$FALLBACK_MODEL" ]; then
+  desired_model="$launch_model"
+fi
+if [ "${CC_ORCH_EFFORT_OVERRIDE:-0}" = "1" ]; then
+  desired_effort="$launch_effort"
+fi
+
 payload="$(cat)"
 transcript="$(printf '%s' "$payload" | sed -n 's/.*"transcript_path":"\([^"]*\)".*/\1/p')"
-live=""
+live_model=""; live_effort=""
 if [ -n "$transcript" ] && [ -r "$transcript" ]; then
-  live="$(tail -c 400000 "$transcript" | grep -o '"model":"[^"]*"' | tail -1 | cut -d'"' -f4)"
+  tail_text="$(tail -c 400000 "$transcript")"
+  live_model="$(printf '%s' "$tail_text" | grep -o '"model":"[^"]*"' | tail -1 | cut -d'"' -f4)"
+  live_effort="$(printf '%s' "$tail_text" | grep -o '"effort":"[^"]*"' | tail -1 | cut -d'"' -f4)"
 fi
-[ -n "$live" ] || live="$launch_model"
+[ -n "$live_model" ] || live_model="$launch_model"
+[ -n "$live_effort" ] || live_effort="$launch_effort"
 
-want="$(family "$active")"
-have="$(family "$live")"
+current_rev="$(sha256sum "$REPO_DIR/model-policy.conf" "$REPO_DIR/templates/lead.md.tpl" \
+  "$REPO_DIR/templates/dev.md.tpl" "$REPO_DIR/agents/orchestrator.md" \
+  "$REPO_DIR/agents/verifier.md" "$REPO_DIR/agents/verifier-normal.md" \
+  | sha256sum | cut -d' ' -f1)"
+policy_stale=0
+[ "${CC_ORCH_POLICY_REV:-missing}" = "$current_rev" ] || policy_stale=1
+
+want="$(family "$desired_model")"; have="$(family "$live_model")"
 [ -n "$want" ] && [ -n "$have" ] || exit 0
-[ "$want" = "$have" ] && exit 0
+[ "$want" = "$have" ] && [ "$desired_effort" = "$live_effort" ] && \
+  [ "$policy_stale" = "0" ] && exit 0
 
-# Both registrations may be live at once. The prompt is the natural unit: whoever gets here
-# first for this prompt speaks, the other exits silently. mkdir is the atomic primitive.
-stamp_dir="$HOME/.claude/orchestra-state/notice"
+# The hook is registered in two settings sources. Speak once per prompt.
+stamp_dir="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/notice"
 prompt_id="$(printf '%s' "$payload" | sed -n 's/.*"prompt_id":"\([^"]*\)".*/\1/p')"
 if [ -n "$prompt_id" ]; then
   mkdir -p "$stamp_dir" 2>/dev/null
   mkdir "$stamp_dir/$prompt_id" 2>/dev/null || exit 0
-  # Keep the directory from growing forever; anything older than a day is long since answered.
   find "$stamp_dir" -mindepth 1 -maxdepth 1 -type d -mtime +1 -exec rmdir {} + 2>/dev/null
 fi
 
 reason="$(sed -n 's/^reason=//p' "$STATE" | head -1)"
+project="${CC_ORCH_PROJECT:-<project>}"
+cache_state="current"; [ "$policy_stale" = "1" ] && cache_state="stale"
+msg="⚠️  cc-orchestra 정책 변경: ${launch_profile} orchestrator는 ${desired_model}@${desired_effort} 이어야 합니다 (${reason}).\n"
+msg="${msg}    현재 세션은 ${live_model}@${live_effort}, policy-cache=${cache_state} 입니다.\n"
+msg="${msg}    agent 정의도 시작 시 캐시되므로 /model만으로는 lead 프로필이 갱신되지 않습니다.\n"
+msg="${msg}    → 진행 중 lead가 없다면: cc-orch --reload ${project}"
 
-msg="⚠️  모델 가드: Tier 1/2는 이제 ${active} 입니다 (${reason}).\\n"
-msg="${msg}    이 세션은 ${live} 로 고정돼 있고, 이 세션이 띄우는 lead-* 도 계속 ${live} 로 뜹니다\\n"
-msg="${msg}    — 에이전트 정의는 세션 시작 시점에 캐시되므로 파일을 바꿔도 안 바뀝니다.\\n"
-msg="${msg}    →  cc-orch <project>   로 재시작하세요. 두 계층을 다 옮기는 유일한 방법입니다.\\n"
-msg="${msg}       /model ${active} 는 이 세션만 옮기고 lead-* 는 ${live} 에 남습니다 (임시 조치)."
-
-ctx="시스템 상태 변경: 모델 가드가 Tier 1/2 모델을 ${active} 로 전환했다 (${reason}). "
-ctx="${ctx}단, 이 세션은 ${live} 로 실행 중이고 에이전트 정의는 세션 시작 시점에 캐시되므로, "
-ctx="${ctx}이 세션이 앞으로 띄우는 lead-* 도 ${live} 로 뜬다 — 파일이 바뀌어도 반영되지 않는다. "
-ctx="${ctx}답변 첫 줄에서 사용자에게 알릴 것: 두 계층을 모두 옮기려면 'cc-orch <project>' 재시작이 필요하고, "
-ctx="${ctx}'/model ${active}' 는 이 세션만 옮기는 임시 조치라는 점. 진행 중 작업이 있으면 그것을 마친 뒤 재시작을 권할 것."
-
+ctx="cc-orchestra의 현재 ${launch_profile} 프로필은 ${desired_model}@${desired_effort}이지만 이 세션은 ${live_model}@${live_effort}이고 policy cache가 ${cache_state}이다. "
+ctx="agent 정의는 시작 시 캐시되므로 /model만으로는 불충분하다. 답변 첫 줄에서 알리고, 진행 중 lead가 없을 때 'cc-orch --reload ${project}'로 대화를 이어 재시작하라고 안내할 것."
 printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"%s"}}\n' "$msg" "$ctx"

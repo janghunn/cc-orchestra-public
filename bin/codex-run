@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # codex-run — cc-orchestra's single entry point to the Codex CLI.
 #
-# Codex enters the hierarchy in exactly three places, all dispatched by a Tier 2 lead:
+# Codex owns the token-heavy paths; intake is dispatched by Tier 1 and the rest by Tier 2:
 #   Tier 3 lane   implement / resume  — gpt-5.6-sol (or luna for mechanical bulk) writes code;
 #                 implement is the DEFAULT lane for every unit (dev-* is the exception), and
 #                 --lane <name> allows a second concurrent unit per task
 #   Phase A aid   investigate — read-only root-cause / codebase analysis, so long evidence
 #                 hunts spend Codex quota instead of the lead's Claude 5h session bucket
-#   Tier 4 gate   review / plan-review — read-only cross-family check of a diff or a plan
+#   Tier 1 aid    intake — read-only scope/test map before a brief is finalized
+#   Tier 4 gate   verify / review / plan-review — executable verification and adversarial review
 #
 # Why a wrapper instead of raw `codex exec` in agent prompts:
 #   - gpt-5.6-sol's DEFAULT reasoning effort is "low" (measured from models_cache.json), so a
@@ -26,10 +27,12 @@
 #
 # usage:
 #   codex-run implement   <workdir> <task-dir> [--mech|--escalate] [--lane L] [--model M] [--effort E]
+#   codex-run intake      <workdir> <task-dir> "<goal>" [--fast] [--model M] [--effort E]
 #   codex-run investigate <workdir> <task-dir> "<question>" [--fast] [--model M] [--effort E]
 #   codex-run resume      <workdir> <task-dir> "<follow-up message>" [--escalate] [--lane L]
 #   codex-run review      <workdir> <task-dir> [--base <branch>] [--fast] [--model M] [--effort E]
 #   codex-run plan-review <workdir> <task-dir> [--fast] [--model M] [--effort E]
+#   codex-run verify      <workdir> <task-dir> [--critical] [--model M] [--effort E]
 #   codex-run status      <task-dir>
 #   (all model-calling modes also accept --dry-run: print the assembled command, run nothing)
 #
@@ -41,6 +44,7 @@
 # artifacts written into <task-dir>:
 #   implement/resume -> impl-report-codex[-<lane>].md    review -> codex-review.md
 #   plan-review      -> plan-review-codex.md             investigate -> codex-investigation.md
+#   intake           -> codex-intake.md                  verify -> codex-verdict.md
 #   all              -> codex-<mode>[-<lane>].jsonl, .stderr.log
 #   .codex-session   -> "<lane>=<thread-id>" lines; resume reads these to continue a thread
 #
@@ -48,7 +52,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-STATE_DIR="$HOME/.claude/orchestra-state"
+STATE_DIR="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
 GLOBAL_LOG="$STATE_DIR/codex.log"
 
 # shellcheck source=/dev/null
@@ -58,16 +62,19 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   codex-run implement   <workdir> <task-dir> [--mech|--escalate] [--lane L] [--model M] [--effort E]
+  codex-run intake      <workdir> <task-dir> "<goal>" [--fast] [--model M] [--effort E]
   codex-run investigate <workdir> <task-dir> "<question>" [--fast] [--model M] [--effort E]
   codex-run resume      <workdir> <task-dir> "<follow-up message>" [--escalate] [--lane L]
   codex-run review      <workdir> <task-dir> [--base <branch>] [--fast] [--model M] [--effort E]
   codex-run plan-review <workdir> <task-dir> [--fast] [--model M] [--effort E]
+  codex-run verify      <workdir> <task-dir> [--critical] [--model M] [--effort E]
   codex-run status      <task-dir>
   (model-calling modes also accept --dry-run: print the assembled command, run nothing)
 
   <workdir>   the checkout the code lives in (the lead's worktree in worktree mode)
   <task-dir>  the .orchestra/<NN>-<slug>/ artifact directory
   --lane L    second concurrent implement thread in the same task (own artifact + thread)
+  --critical  raise a review or verify run to the critical effort policy
   models: sol=gpt-5.6-sol  luna=gpt-5.6-luna  terra=gpt-5.6-terra (or any full slug)
   exit: 0 ok · 1 codex failed · 2 usage/setup · 3 quota · 4 auth · 5 timeout
 EOF
@@ -96,6 +103,7 @@ if [ "$MODE" = "status" ]; then
   echo "artifacts:"
   ls -la "$TASK_DIR"/impl-report-codex*.md "$TASK_DIR"/codex-review.md \
          "$TASK_DIR"/plan-review-codex.md "$TASK_DIR"/codex-investigation.md \
+         "$TASK_DIR"/codex-intake.md "$TASK_DIR"/codex-verdict.md \
          2>/dev/null | sed 's/^/  /' || echo "  (none)"
   echo "recent runs (global):"
   tail -5 "$GLOBAL_LOG" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
@@ -119,13 +127,19 @@ if [ "$MODE" = "investigate" ]; then
   QUESTION="${1:-}"; shift || true
   case "$QUESTION" in ""|--*) die 'investigate needs a question: codex-run investigate <workdir> <task-dir> "<question>" [flags]' ;; esac
 fi
+GOAL=""
+if [ "$MODE" = "intake" ]; then
+  GOAL="${1:-}"; shift || true
+  case "$GOAL" in ""|--*) die 'intake needs a goal: codex-run intake <workdir> <task-dir> "<goal>" [flags]' ;; esac
+fi
 
-MODEL="" EFFORT="" BASE="" LANE="implement" DRY=0
+MODEL="" EFFORT="" BASE="" LANE="implement" DRY=0 CRITICAL=0 FAST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --mech)     MODEL="$CODEX_MECH_MODEL";  EFFORT="$CODEX_MECH_EFFORT" ;;
-    --fast)     MODEL="$CODEX_FAST_MODEL";  EFFORT="$CODEX_FAST_EFFORT" ;;
+    --fast)     MODEL="$CODEX_FAST_MODEL";  EFFORT="$CODEX_FAST_EFFORT"; FAST=1 ;;
     --escalate) EFFORT="$CODEX_ESCALATE_EFFORT" ;;
+    --critical) CRITICAL=1 ;;
     --model)    shift; MODEL="$(slug "${1:-}")" ;;
     --effort)   shift; EFFORT="${1:-}" ;;
     --base)     shift; BASE="${1:-}" ;;
@@ -136,6 +150,11 @@ while [ $# -gt 0 ]; do
   shift || true
 done
 
+if [ "$CRITICAL" = "1" ]; then
+  case "$MODE" in review|plan-review|verify) ;; *) die "--critical is only valid for review, plan-review, or verify" ;; esac
+  [ "$FAST" = "0" ] || die "--fast and --critical cannot be combined"
+fi
+
 SESSION_FILE="$TASK_DIR/.codex-session"
 
 # Lane names key .codex-session entries and suffix artifacts — keep them shell- and path-safe,
@@ -143,14 +162,16 @@ SESSION_FILE="$TASK_DIR/.codex-session"
 if [ "$LANE" != "implement" ]; then
   printf '%s' "$LANE" | grep -qE '^[a-z0-9][a-z0-9_-]{0,31}$' || die "invalid lane name '$LANE'"
   if [ "$MODE" = "implement" ]; then
-    case "$LANE" in review|plan-review|investigate) die "lane '$LANE' is reserved" ;; esac
+    case "$LANE" in review|plan-review|investigate|intake|verify) die "lane '$LANE' is reserved" ;; esac
   fi
 fi
 
 case "$MODE" in
   implement)            MODEL="${MODEL:-$CODEX_IMPL_MODEL}"   EFFORT="${EFFORT:-$CODEX_IMPL_EFFORT}"
                         TIMEOUT="${CODEX_IMPL_TIMEOUT_SECS}" ;;
-  investigate)          MODEL="${MODEL:-$CODEX_IMPL_MODEL}"   EFFORT="${EFFORT:-$CODEX_IMPL_EFFORT}"
+  investigate)          MODEL="${MODEL:-$CODEX_INVESTIGATE_MODEL}" EFFORT="${EFFORT:-$CODEX_INVESTIGATE_EFFORT}"
+                        TIMEOUT="${CODEX_REVIEW_TIMEOUT_SECS}" ;;
+  intake)               MODEL="${MODEL:-$CODEX_INTAKE_MODEL}" EFFORT="${EFFORT:-$CODEX_INTAKE_EFFORT}"
                         TIMEOUT="${CODEX_REVIEW_TIMEOUT_SECS}" ;;
   resume)
     # A follow-up continues the lane it resumes: same thread, and by default the same
@@ -166,8 +187,12 @@ case "$MODE" in
     TIMEOUT="${CODEX_IMPL_TIMEOUT_SECS}" ;;
   review|plan-review)   MODEL="${MODEL:-$CODEX_REVIEW_MODEL}" EFFORT="${EFFORT:-$CODEX_REVIEW_EFFORT}"
                         TIMEOUT="${CODEX_REVIEW_TIMEOUT_SECS}" ;;
+  verify)               MODEL="${MODEL:-$CODEX_VERIFY_MODEL}" EFFORT="${EFFORT:-$CODEX_VERIFY_EFFORT}"
+                        TIMEOUT="${CODEX_IMPL_TIMEOUT_SECS}" ;;
   *) usage ;;
 esac
+
+[ "$CRITICAL" = "1" ] && EFFORT="$CODEX_CRITICAL_EFFORT"
 
 case "$EFFORT" in low|medium|high|xhigh|max|ultra) ;; *) die "invalid effort '$EFFORT'" ;; esac
 # luna tops out at max; and "ultra" auto-delegates inside Codex — Tier 2 owns decomposition,
@@ -225,6 +250,8 @@ CONCERNS: <risks the lead should re-check in review — or \"none\">" ;;
       review)      ARTIFACT="$TASK_DIR/codex-review.md" ;;
       plan-review) ARTIFACT="$TASK_DIR/plan-review-codex.md" ;;
       investigate) ARTIFACT="$TASK_DIR/codex-investigation.md" ;;
+      intake)      ARTIFACT="$TASK_DIR/codex-intake.md" ;;
+      verify)      ARTIFACT="$TASK_DIR/codex-verdict.md" ;;
       implement)   ARTIFACT="$TASK_DIR/impl-report-codex.md" ;;
       *)           ARTIFACT="$TASK_DIR/impl-report-codex-$LANE.md" ;;
     esac
@@ -232,6 +259,29 @@ CONCERNS: <risks the lead should re-check in review — or \"none\">" ;;
 
 After acting on it, end with a full updated report in the same mandatory format as your
 previous final message (updated to the current state of the tree, not a delta)." ;;
+
+  intake)
+    ARTIFACT="$TASK_DIR/codex-intake.md"
+    PROMPT="You are the read-only intake analyst for a multi-provider delivery system. The
+orchestrator has a user goal but must not spend its control-model context crawling the repo.
+
+User goal: $GOAL
+Repo (read-only): $WORKDIR
+
+Map evidence; do not design the solution. Find the likely owning files and symbols, existing
+tests and exact runnable verification commands, scope boundaries, compatibility constraints,
+and ambiguity that would materially change implementation. Cite file:line for every code claim.
+Do not edit files, run a mutating command, or invent an acceptance criterion whose observation
+you cannot name.
+
+Final message — exactly this shape:
+[codex] INTAKE
+GOAL: <one-line restatement>
+OWNERS: <file:line and symbol candidates, one per line>
+VERIFICATION: <existing exact commands, or 'lead determines' with why>
+BOUNDARIES: <in-scope/out-of-scope evidence and likely collisions>
+RISKS: <low|normal|critical candidates with evidence>
+AMBIGUITIES: <only choices that require user/orchestrator judgment, or 'none'>" ;;
 
   investigate)
     ARTIFACT="$TASK_DIR/codex-investigation.md"
@@ -258,6 +308,32 @@ QUESTION: <restated in one line>
 ANSWER: <the finding — or 'inconclusive'>
 EVIDENCE: <file:line — what it shows, one per line>
 NEXT: <discriminating checks or a fix direction for the lead — or 'none'>" ;;
+
+  verify)
+    [ -r "$SPEC" ] || die "no spec at $SPEC — verify runs off plan.md"
+    ARTIFACT="$TASK_DIR/codex-verdict.md"
+    PROMPT="You are the zero-context executable verifier (Tier 4) of a multi-provider delivery
+system. You did not write the code and you must not read author opinions. Determine what is true.
+
+Repo: $WORKDIR
+Contract: $SPEC and $BRIEF
+Forbidden inputs: review.md, codex-review.md, impl-report-*.md, summary.md, any old verdict.
+
+Rules:
+- Record git HEAD/status/diff before testing. Do not edit product code or configuration.
+- Extract the exact Verification commands and run them. Test-created caches/output are allowed;
+  product edits are not. Compare git status after testing and report newly created paths.
+- Grade every numbered Acceptance criterion separately using command output or file:line evidence.
+- A missing/unrunnable command or uncheckable criterion is INCONCLUSIVE, never PASS.
+- Probe one cheap boundary/error path when the change introduces one. Report scope violations.
+
+Final message — exactly this shape:
+CODEX-VERDICT: PASS | FAIL | INCONCLUSIVE
+HEAD: <sha>  DIRTY-BEFORE: <yes/no>  DIRTY-AFTER: <yes/no>
+COMMANDS: <exact command and decisive verbatim output, one per line>
+CRITERIA: <n met>/<n total; list failures/uncheckable>
+SCOPE: <violations or 'none'>
+CONCERNS: <non-failing concerns or 'none'>" ;;
 
   review)
     [ -r "$SPEC" ] || die "no spec at $SPEC — the review gate compares the diff against plan.md"
@@ -323,7 +399,7 @@ CMD=(codex exec -C "$WORKDIR" --skip-git-repo-check
      -m "$MODEL" -c "model_reasoning_effort=$EFFORT"
      --json -o "$ARTIFACT")
 case "$MODE" in
-  implement|resume) CMD+=(--sandbox workspace-write --add-dir "$TASK_DIR") ;;
+  implement|resume|verify) CMD+=(--sandbox workspace-write --add-dir "$TASK_DIR") ;;
   *)                CMD+=(--sandbox read-only) ;;
 esac
 # subcommand LAST: exec-level flags are not accepted after `resume`
@@ -354,8 +430,14 @@ case "$MODE" in implement|resume) LANE_KEY="$LANE" ;; esac
 TID_NEW="$(grep -m1 -oE '"thread_id":"[0-9a-f-]{36}"' "$EVENTS" | cut -d'"' -f4)"
 TID_NEW="${TID_NEW:-${TID:-}}"
 if [ -n "$TID_NEW" ]; then
+  # verify/review are intentionally launched in parallel. Serialize their session-index update
+  # and use a pid-specific temp file so one gate cannot clobber another gate's thread record.
+  exec 8>"$TASK_DIR/.codex-session.lock"
+  flock 8
+  session_tmp="$SESSION_FILE.$$.tmp"
   { sed "/^$LANE_KEY=/d" "$SESSION_FILE" 2>/dev/null; echo "$LANE_KEY=$TID_NEW|$MODEL|$EFFORT"; } \
-    > "$SESSION_FILE.tmp" && mv -f "$SESSION_FILE.tmp" "$SESSION_FILE"
+    > "$session_tmp" && mv -f "$session_tmp" "$SESSION_FILE"
+  flock -u 8
 fi
 
 printf '%s  %-11s  %s@%s  exit=%s  %s\n' "$START" "$MODE" "$MODEL" "$EFFORT" "$RC" "$WORKDIR" >> "$GLOBAL_LOG"
@@ -385,6 +467,6 @@ fi
 
 echo "codex-run: $MODE done ($MODEL@$EFFORT) -> $ARTIFACT"
 case "$MODE" in
-  review|plan-review) head -1 "$ARTIFACT" ;;
+  review|plan-review|verify) head -1 "$ARTIFACT" ;;
   *) [ -n "${TID_NEW:-}" ] && echo "thread: $TID_NEW (follow-up: codex-run resume ...)" ;;
 esac

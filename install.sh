@@ -35,8 +35,12 @@ check() {
     "$CLAUDE_DIR/orchestra:$REPO_DIR" \
     "$CLAUDE_DIR/agents/orchestrator.md:$REPO_DIR/agents/orchestrator.md" \
     "$CLAUDE_DIR/agents/verifier.md:$REPO_DIR/agents/verifier.md" \
+    "$CLAUDE_DIR/agents/verifier-normal.md:$REPO_DIR/agents/verifier-normal.md" \
     "$BIN_DIR/cc-orch:$REPO_DIR/bin/cc-orch" \
-    "$BIN_DIR/codex-run:$REPO_DIR/bin/codex-run"
+    "$BIN_DIR/codex-run:$REPO_DIR/bin/codex-run" \
+    "$BIN_DIR/orch-model-guard:$REPO_DIR/bin/orch-model-guard" \
+    "$BIN_DIR/orch-summary-check:$REPO_DIR/bin/orch-summary-check" \
+    "$BIN_DIR/orch-usage-report:$REPO_DIR/bin/orch-usage-report"
   do
     local dest="${pair%%:*}" src="${pair#*:}"
     if [[ -L "$dest" && "$(readlink -f "$dest")" == "$(readlink -f "$src")" ]]; then
@@ -45,9 +49,10 @@ check() {
       echo "  MISSING  $dest"; ok=1
     fi
   done
-  local n; n=$(ls "$CLAUDE_DIR"/agents/lead-*.md "$CLAUDE_DIR"/agents/dev-*.md 2>/dev/null | wc -l)
-  echo "  roster   $n generated agent files (expect 7)"
-  [[ "$n" -eq 7 ]] || ok=1
+  local n; n="$(find "$CLAUDE_DIR/agents" -maxdepth 1 -type f \
+    \( -name 'lead-*.md' -o -name 'dev-*.md' \) 2>/dev/null | wc -l)"
+  echo "  roster   $n generated agent profiles (expect 22)"
+  [[ "$n" -eq 22 ]] || ok=1
 
   if systemctl --user is-enabled orch-model-guard.timer >/dev/null 2>&1; then
     echo "  ok       model guard timer ($(systemctl --user is-active orch-model-guard.timer))"
@@ -59,7 +64,7 @@ check() {
   else
     echo "  MISSING  model notice hook in settings.json"; ok=1
   fi
-  echo "  model    $("$REPO_DIR/bin/orch-model-guard" active) active for orchestrator + lead-*"
+  echo "  model    $("$REPO_DIR/bin/orch-model-guard" active) active normal orchestrator profile"
 
   # Codex is the second provider (Tier 3 lane / Tier 4 gate) but an optional one: its absence
   # degrades the harness to Claude-only rather than breaking it, so WARN instead of failing.
@@ -88,12 +93,17 @@ mkdir -p "$CLAUDE_DIR/agents" "$BIN_DIR"
 link "$REPO_DIR"                        "$CLAUDE_DIR/orchestra"
 link "$REPO_DIR/agents/orchestrator.md" "$CLAUDE_DIR/agents/orchestrator.md"
 link "$REPO_DIR/agents/verifier.md"     "$CLAUDE_DIR/agents/verifier.md"
+link "$REPO_DIR/agents/verifier-normal.md" "$CLAUDE_DIR/agents/verifier-normal.md"
 link "$REPO_DIR/bin/cc-orch"            "$BIN_DIR/cc-orch"
 link "$REPO_DIR/bin/codex-run"          "$BIN_DIR/codex-run"
+link "$REPO_DIR/bin/orch-model-guard"   "$BIN_DIR/orch-model-guard"
+link "$REPO_DIR/bin/orch-summary-check" "$BIN_DIR/orch-summary-check"
+link "$REPO_DIR/bin/orch-usage-report"  "$BIN_DIR/orch-usage-report"
 
 chmod +x "$REPO_DIR"/*.sh "$REPO_DIR/bin/"* "$REPO_DIR/hooks/"*.sh
 
 echo
+"$REPO_DIR/bin/orch-model-guard" check
 "$REPO_DIR/build-roster.sh"
 
 echo

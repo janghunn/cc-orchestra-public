@@ -1,49 +1,82 @@
 #!/usr/bin/env bash
-# Generate the named agent roster into ~/.claude/agents from the shared templates.
+# Generate the named model/effort profiles into ~/.claude/agents.
 #
-# Why a generator: each lead and dev needs its own agent definition so it has a stable slot
-# identity, but the four leads are otherwise identical. Rather than hand-maintaining four
-# near-identical prompts, edit templates/lead.md.tpl and re-run this.
-#
-# Generated files are NOT tracked in git — the templates are the source of truth.
+# Human-facing slots stay lead-alpha/dev-1. Profile-suffixed agent type names select the model
+# and effort without changing the registry/addressing contract.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENTS_DIR="$HOME/.claude/agents"
+AGENTS_DIR="${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}"
 LEAD_SLOTS=(alpha bravo charlie delta)
 DEV_SLOTS=(1 2 3)
 
-# Leads render with whatever model the guard has settled on, so re-running this while the
-# fallback is active does not quietly put the tier back on a model with no quota left.
-LEAD_MODEL="$("$REPO_DIR/bin/orch-model-guard" active 2>/dev/null || true)"
-LEAD_MODEL="${LEAD_MODEL:-fable[1m]}"
+# shellcheck source=/dev/null
+. "$REPO_DIR/model-policy.conf"
 
-render() { # render <template> <slot> <outfile>
-  local tpl="$1" slot="$2" out="$3" upper
+ACTIVE_CONTROL="$("$REPO_DIR/bin/orch-model-guard" active 2>/dev/null || true)"
+ACTIVE_CONTROL="${ACTIVE_CONTROL:-$PRIMARY_MODEL}"
+
+# When the Fable bucket is exhausted, the guard moves every control profile to Opus. Otherwise
+# each profile retains its distinct Sonnet/Opus/Fable model.
+LIGHT_MODEL="$LEAD_LIGHT_MODEL"
+NORMAL_MODEL="$LEAD_NORMAL_MODEL"
+if [[ "$ACTIVE_CONTROL" == "$FALLBACK_MODEL" ]]; then
+  LIGHT_MODEL="$FALLBACK_MODEL"
+  NORMAL_MODEL="$FALLBACK_MODEL"
+elif [[ "$ACTIVE_CONTROL" != "$PRIMARY_MODEL" ]]; then
+  # A manually pinned custom model is intentionally global until `set auto`/`set primary`.
+  LIGHT_MODEL="$ACTIVE_CONTROL"
+  NORMAL_MODEL="$ACTIVE_CONTROL"
+fi
+
+render() { # render <template> <slot> <agent-name> <profile> <model> <effort> <outfile>
+  local tpl="$1" slot="$2" agent_name="$3" profile="$4" model="$5" effort="$6" out="$7" upper
   upper="$(printf '%s' "$slot" | tr '[:lower:]' '[:upper:]')"
-  sed -e "s/__SLOTUP__/${upper}/g" -e "s/__SLOT__/${slot}/g" -e "s|__MODEL__|${LEAD_MODEL}|g" "$tpl" > "$out"
-  printf '  %s\n' "$(basename "$out")"
+  sed -e "s/__SLOTUP__/${upper}/g" \
+      -e "s/__SLOT__/${slot}/g" \
+      -e "s/__AGENT_NAME__/${agent_name}/g" \
+      -e "s/__PROFILE__/${profile}/g" \
+      -e "s|__MODEL__|${model}|g" \
+      -e "s/__EFFORT__/${effort}/g" \
+      "$tpl" > "$out"
+  printf '  %-34s %s @ %s\n' "$(basename "$out")" "$model" "$effort"
 }
 
 mkdir -p "$AGENTS_DIR"
 
-echo "leads:  (model: $LEAD_MODEL)"
+echo "leads:"
 for slot in "${LEAD_SLOTS[@]}"; do
-  render "$REPO_DIR/templates/lead.md.tpl" "$slot" "$AGENTS_DIR/lead-${slot}.md"
+  render "$REPO_DIR/templates/lead.md.tpl" "$slot" "lead-$slot-light" "light" \
+    "$LIGHT_MODEL" "$LEAD_LIGHT_EFFORT" "$AGENTS_DIR/lead-$slot-light.md"
+  render "$REPO_DIR/templates/lead.md.tpl" "$slot" "lead-$slot" "normal" \
+    "$NORMAL_MODEL" "$LEAD_NORMAL_EFFORT" "$AGENTS_DIR/lead-$slot.md"
+  critical_model="$LEAD_CRITICAL_MODEL"; deep_model="$LEAD_DEEP_MODEL"
+  if [[ "$ACTIVE_CONTROL" == "$FALLBACK_MODEL" ]]; then
+    critical_model="$FALLBACK_MODEL"; deep_model="$FALLBACK_MODEL"
+  elif [[ "$ACTIVE_CONTROL" != "$PRIMARY_MODEL" ]]; then
+    critical_model="$ACTIVE_CONTROL"; deep_model="$ACTIVE_CONTROL"
+  fi
+  render "$REPO_DIR/templates/lead.md.tpl" "$slot" "lead-$slot-critical" "critical" \
+    "$critical_model" "$LEAD_CRITICAL_EFFORT" "$AGENTS_DIR/lead-$slot-critical.md"
+  render "$REPO_DIR/templates/lead.md.tpl" "$slot" "lead-$slot-critical-xhigh" "critical-xhigh" \
+    "$deep_model" "$LEAD_DEEP_EFFORT" "$AGENTS_DIR/lead-$slot-critical-xhigh.md"
 done
 
 echo "devs:"
 for slot in "${DEV_SLOTS[@]}"; do
-  render "$REPO_DIR/templates/dev.md.tpl" "$slot" "$AGENTS_DIR/dev-${slot}.md"
+  render "$REPO_DIR/templates/dev.md.tpl" "$slot" "dev-$slot" "sonnet-fallback" \
+    "$DEV_MODEL" "$DEV_EFFORT" "$AGENTS_DIR/dev-$slot.md"
+  render "$REPO_DIR/templates/dev.md.tpl" "$slot" "dev-opus-$slot" "opus-fresh-eyes" \
+    "$DEV_FRESH_MODEL" "$DEV_FRESH_EFFORT" "$AGENTS_DIR/dev-opus-$slot.md"
 done
 
-# Fail loudly if a placeholder survived — a stray __SLOT__ would ship a broken agent name, and
-# a stray __MODEL__ an agent Claude Code cannot start.
-if grep -rlE '__(SLOT|MODEL)' "$AGENTS_DIR" 2>/dev/null | grep -q .; then
-  echo "ERROR: unsubstituted placeholder left in:" >&2
-  grep -rlE '__(SLOT|MODEL)' "$AGENTS_DIR" >&2
+if grep -rlE '__(SLOT|MODEL|EFFORT|PROFILE|AGENT_NAME)' "$AGENTS_DIR"/lead-*.md \
+     "$AGENTS_DIR"/dev-*.md 2>/dev/null | grep -q .; then
+  echo "ERROR: unsubstituted placeholder left in generated roster:" >&2
+  grep -rlE '__(SLOT|MODEL|EFFORT|PROFILE|AGENT_NAME)' "$AGENTS_DIR"/lead-*.md \
+    "$AGENTS_DIR"/dev-*.md >&2
   exit 1
 fi
 
 echo
-echo "roster written to $AGENTS_DIR"
+echo "roster written to $AGENTS_DIR (22 generated profiles)"
