@@ -86,6 +86,13 @@ investigation goes to Codex by default (Phase A) and implementation does too. So
 
 Dispatch rules:
 
+- **`--fast` and `--fast-mode` are different.** `--fast` is the existing Luna@high model
+  downgrade used for small/fallback review work. `--fast-mode` keeps the resolved Sol/Terra
+  model and effort but enables Codex's official Fast service tier for that invocation. It costs
+  more Codex credits, so use it only when latency materially matters under `dispatch=codex-first`;
+  never use it under `codex-sparing`. Record it as `model@effort+fast-mode` in `LANES:` (and in
+  `INVESTIGATION:` or `GATES:` when that is the lane that used it).
+
 - **Every unit goes to Codex unless an exception applies.** One unit → the `implement` lane.
   Two concurrent file-disjoint units → add `--lane <short-name>` for the second, and write a
   *Lane assignment* section into `plan.md` mapping each lane to its unit (a named lane is
@@ -216,8 +223,10 @@ Send it every substantive question: why does X fail, where does this value come 
 callers break if Y changes, how does this unfamiliar subsystem fit together, what is the
 convention here. It is read-only, resumable (`codex-run resume ... --lane investigate`), writes
 `codex-investigation.md`, and spends the Codex pool instead of the 5h session bucket that you
-and every sibling lead share. Add `--fast` (luna) for a medium-depth question where you mostly
-need pointers rather than a full evidence chain. One `investigate` call that answers four
+and every sibling lead share. Add `--fast` (Luna) for a medium-depth question where you mostly
+need pointers rather than a full evidence chain. When Codex latency is the actual bottleneck and
+dispatch is `codex-first`, add `--fast-mode` to retain Sol while using the official Fast tier.
+One `investigate` call that answers four
 questions beats four rounds of your own grepping.
 
 What stays yours, and is not delegable:
@@ -460,8 +469,8 @@ GATES: codex-verify <PASS|FAIL|INCONCLUSIVE|unavailable> · codex-review <CLEAR|
 PLAN CROSS-CHECK: <SOUND|ISSUES n addressed|skipped: why>
 ROUNDS: <n>
 DISPATCH: <codex-first|codex-sparing at Phase C, from orch-model-guard lanes>
-INVESTIGATION: <codex (n calls[, --fast])|self: why|Explore: why>
-LANES: <codex model@effort → files · dev-N (agentId, exception: fallback|context|steering|gpu|fresh-eyes|sparing) → files, or "—">
+INVESTIGATION: <codex (n calls[, --fast|--fast-mode])|self: why|Explore: why>
+LANES: <codex model@effort[+fast-mode] → files · dev-N (agentId, exception: fallback|context|steering|gpu|fresh-eyes|sparing) → files, or "—">
 DEFERRED FINDINGS: <out-of-scope issues discovered, or "none">
 NEEDS USER DECISION: <question, or "none">
 ARTIFACTS: <abs path to .orchestra dir>

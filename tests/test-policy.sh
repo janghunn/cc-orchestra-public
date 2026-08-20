@@ -95,6 +95,15 @@ out="$(run_dry investigate "$WORK" "$TASK" "find the owner")"
 assert_has "$out" "gpt-5.6-sol" "investigate model"
 assert_has "$out" "model_reasoning_effort=high" "investigate effort"
 
+out="$(run_dry investigate "$WORK" "$TASK" "find the owner" --fast-mode)"
+assert_has "$out" "gpt-5.6-sol" "Fast mode preserves investigate model"
+assert_has "$out" "service_tier=" "Fast mode service tier"
+assert_has "$out" "features.fast_mode=true" "Fast mode feature"
+
+out="$(run_dry investigate "$WORK" "$TASK" "find the owner" --fast)"
+assert_has "$out" "gpt-5.6-luna" "legacy fast switches model"
+assert_has "$out" "model_reasoning_effort=high" "legacy fast effort"
+
 out="$(run_dry implement "$WORK" "$TASK")"
 assert_has "$out" "gpt-5.6-sol" "implement model"
 assert_has "$out" "model_reasoning_effort=xhigh" "implement effort"
@@ -108,8 +117,19 @@ out="$(run_dry review "$WORK" "$TASK" --base main --critical)"
 assert_has "$out" "gpt-5.6-sol" "critical review model"
 assert_has "$out" "model_reasoning_effort=xhigh" "critical review effort"
 
+out="$(run_dry verify "$WORK" "$TASK" --critical --fast-mode)"
+assert_has "$out" "gpt-5.6-terra" "critical Fast mode preserves verify model"
+assert_has "$out" "model_reasoning_effort=xhigh" "critical Fast mode effort"
+assert_has "$out" "service_tier=" "critical Fast mode service tier"
+
 if run_dry review "$WORK" "$TASK" --base main --fast --critical >/dev/null 2>&1; then
   fail "--fast --critical should be rejected"
+fi
+if run_dry investigate "$WORK" "$TASK" "find the owner" --fast --fast-mode >/dev/null 2>&1; then
+  fail "--fast --fast-mode should be rejected"
+fi
+if run_dry investigate "$WORK" "$TASK" "find the owner" --model luna --fast-mode >/dev/null 2>&1; then
+  fail "--fast-mode with Luna should be rejected"
 fi
 ok "Codex mode model, effort, sandbox, and flag policy"
 

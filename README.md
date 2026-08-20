@@ -63,6 +63,12 @@ Codex 정책:
 | review/verify `--critical` | 해당 기본 모델 | xhigh |
 | failed implementation `--escalate` | 해당 모델 | max |
 
+`--fast-mode`는 선택된 Sol/Terra와 effort를 그대로 유지하면서 해당 호출만 공식 Fast service
+tier로 실행한다. 공식 안내 기준으로 지원 모델의 처리 속도는 약 1.5배지만 크레딧은 Standard의
+2.5배이므로 지연 시간이 중요한 `codex-first` 호출에만 명시적으로 사용하고,
+`codex-sparing`에서는 사용하지 않는다. 기존 `--fast`는 공식 Fast mode가 아니라 Luna@high로
+모델을 낮추는 호환 옵션이다. ([OpenAI Fast mode 문서](https://learn.chatgpt.com/docs/agent-configuration/speed))
+
 이 배분에서 Fable은 기본 세션이나 일반 lead에 쓰지 않는다. 일반 lead는 사용자가 요청한 대로
 Opus를 유지하고, Fable은 critical/deep profile에서만 쓴다. 조사·일반 리뷰는 xhigh에서 high로
 낮춰 Claude와 Codex 양쪽의 불필요한 추론 소비를 줄였다.
@@ -213,6 +219,7 @@ orch-summary-check --strict <task-dir>
 ```bash
 codex-run intake      <workdir> <task-dir> "<goal>"
 codex-run investigate <workdir> <task-dir> "<question>"
+codex-run investigate <workdir> <task-dir> "<question>" --fast-mode
 codex-run implement   <workdir> <task-dir>
 codex-run implement   <workdir> <task-dir> --lane b
 codex-run implement   <workdir> <task-dir> --mech
@@ -223,8 +230,10 @@ codex-run review      <workdir> <task-dir> --base <branch> [--critical]
 codex-run status      <task-dir>
 ```
 
-모델 호출 모드는 `--model`, `--effort`, `--fast`, `--dry-run`을 지원한다. `--critical`은
-review/plan-review/verify에만 유효하고 `--fast`와 동시에 쓸 수 없다. 구현은
+모델 호출 모드는 `--model`, `--effort`, `--fast`, `--fast-mode`, `--dry-run`을 지원한다.
+`--fast-mode`는 Sol/Terra를 유지하며 호출별로 공식 Fast tier를 켜고 `--critical`과 함께 쓸 수
+있다. Luna로 낮추는 `--fast`/`--mech` 또는 `--model luna`와는 함께 쓸 수 없다. `--critical`은
+review/plan-review/verify에만 유효하고 기존 `--fast`와 동시에 쓸 수 없다. 구현은
 workspace-write, intake/investigate/review/plan-review는 read-only sandbox다. verify는 테스트가
 만드는 파일을 허용하기 위해 workspace-write지만 prompt가 product code 수정 전후 상태를 검사한다.
 
