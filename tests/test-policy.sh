@@ -160,7 +160,7 @@ reason=test
 EOF
 (
   cd "$WORK"
-  HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" "$ROOT/bin/cc-orch" --no-rc --profile deep dsv "$WORK"
+  HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" "$ROOT/bin/cc-orch" --no-rc --profile deep policytest "$WORK"
 )
 args="$(cat "$TMP/claude-args")"
 assert_has "$args" "--model fable[1m]" "deep launch model"
@@ -168,7 +168,7 @@ assert_has "$args" "--effort xhigh" "deep launch effort"
 
 (
   cd "$TMP"
-  HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" "$ROOT/bin/cc-orch" --no-rc --reload dsv
+  HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" "$ROOT/bin/cc-orch" --no-rc --reload policytest
 )
 args="$(cat "$TMP/claude-args")"
 assert_has "$args" "--model fable[1m]" "reload preserved profile"
