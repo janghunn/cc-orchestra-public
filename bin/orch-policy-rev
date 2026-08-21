@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Print a revision for the policy files whose value is independent of the path used to reach
+# the repository. --legacy reproduces the old pathname-sensitive value so already-running
+# sessions can transition without a forced restart.
+set -euo pipefail
+
+legacy=0
+if [[ "${1:-}" == "--legacy" ]]; then
+  legacy=1
+  shift
+fi
+root="${1:-}"
+[[ -n "$root" ]] || { echo "usage: orch-policy-rev [--legacy] <repo-root>" >&2; exit 2; }
+
+files=(
+  "$root/model-policy.conf"
+  "$root/templates/lead.md.tpl"
+  "$root/templates/dev.md.tpl"
+  "$root/agents/orchestrator.md"
+  "$root/agents/verifier.md"
+  "$root/agents/verifier-normal.md"
+)
+
+if [[ $legacy -eq 1 ]]; then
+  sha256sum "${files[@]}" | sha256sum | awk '{print $1}'
+else
+  sha256sum "${files[@]}" | awk '{print $1}' | sha256sum | awk '{print $1}'
+fi

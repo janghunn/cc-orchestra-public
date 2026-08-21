@@ -219,10 +219,7 @@ export CC_ORCH_EFFORT="$EFFORT"
 export CC_ORCH_PROFILE="$PROFILE"
 export CC_ORCH_MODEL_OVERRIDE="$MODEL_OVERRIDE_SET"
 export CC_ORCH_EFFORT_OVERRIDE="$EFFORT_OVERRIDE_SET"
-CC_ORCH_POLICY_REV="$(sha256sum "$ORCH_HOME/model-policy.conf" "$ORCH_HOME/templates/lead.md.tpl" \
-  "$ORCH_HOME/templates/dev.md.tpl" "$ORCH_HOME/agents/orchestrator.md" \
-  "$ORCH_HOME/agents/verifier.md" "$ORCH_HOME/agents/verifier-normal.md" \
-  | sha256sum | cut -d' ' -f1)"
+CC_ORCH_POLICY_REV="$("$ORCH_HOME/bin/orch-policy-rev" "$ORCH_HOME")"
 export CC_ORCH_POLICY_REV
 
 args=(

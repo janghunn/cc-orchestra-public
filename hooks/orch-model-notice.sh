@@ -75,12 +75,18 @@ fi
 [ -n "$live_model" ] || live_model="$launch_model"
 [ -n "$live_effort" ] || live_effort="$launch_effort"
 
-current_rev="$(sha256sum "$REPO_DIR/model-policy.conf" "$REPO_DIR/templates/lead.md.tpl" \
-  "$REPO_DIR/templates/dev.md.tpl" "$REPO_DIR/agents/orchestrator.md" \
-  "$REPO_DIR/agents/verifier.md" "$REPO_DIR/agents/verifier-normal.md" \
-  | sha256sum | cut -d' ' -f1)"
+current_rev="$("$REPO_DIR/bin/orch-policy-rev" "$REPO_DIR")"
 policy_stale=0
-[ "${CC_ORCH_POLICY_REV:-missing}" = "$current_rev" ] || policy_stale=1
+launch_rev="${CC_ORCH_POLICY_REV:-missing}"
+if [ "$launch_rev" != "$current_rev" ]; then
+  policy_stale=1
+  # Before the path-independent revision was introduced, cc-orch hashed sha256sum's complete
+  # output. That output embeds ~/.claude/orchestra pathnames, while this hook runs through the
+  # real repository path. Accept the installed-path legacy value so live sessions do not need
+  # a disruptive one-time restart merely to adopt the bug fix.
+  legacy_rev="$("$REPO_DIR/bin/orch-policy-rev" --legacy "$HOME/.claude/orchestra" 2>/dev/null)"
+  [ -n "$legacy_rev" ] && [ "$launch_rev" = "$legacy_rev" ] && policy_stale=0
+fi
 
 want="$(family "$desired_model")"; have="$(family "$live_model")"
 [ -n "$want" ] && [ -n "$have" ] || exit 0

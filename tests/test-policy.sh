@@ -12,7 +12,7 @@ field() { sed -n "s/^$2: //p" "$1" | head -1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
 assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
 
-for script in "$ROOT/build-roster.sh" "$ROOT/install.sh" "$ROOT/bin/cc-orch" "$ROOT/bin/codex-run" "$ROOT/bin/orch-model-guard" "$ROOT/bin/orch-summary-check" "$ROOT/bin/orch-usage-report" "$ROOT/hooks/orch-model-notice.sh"
+for script in "$ROOT/build-roster.sh" "$ROOT/install.sh" "$ROOT/bin/cc-orch" "$ROOT/bin/codex-run" "$ROOT/bin/orch-model-guard" "$ROOT/bin/orch-policy-rev" "$ROOT/bin/orch-summary-check" "$ROOT/bin/orch-usage-report" "$ROOT/hooks/orch-model-notice.sh"
 do
   bash -n "$script"
 done
@@ -170,6 +170,7 @@ ln -s "$ROOT/agents/orchestrator.md" "$HOME_DIR/.claude/agents/orchestrator.md"
 cat > "$FAKEBIN/claude" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" > "$TMP/claude-args"
+printf '%s\n' "\${CC_ORCH_POLICY_REV:-}" > "$TMP/claude-policy-rev"
 EOF
 chmod +x "$FAKEBIN/claude"
 
@@ -185,6 +186,9 @@ EOF
 args="$(cat "$TMP/claude-args")"
 assert_has "$args" "--model fable[1m]" "deep launch model"
 assert_has "$args" "--effort xhigh" "deep launch effort"
+rev="$("$ROOT/bin/orch-policy-rev" "$ROOT")"
+assert_eq "$(cat "$TMP/claude-policy-rev")" "$rev" "launcher policy revision"
+assert_eq "$("$ROOT/bin/orch-policy-rev" "$HOME_DIR/.claude/orchestra")" "$rev" "symlink-independent policy revision"
 
 (
   cd "$TMP"
@@ -217,7 +221,6 @@ assert_has "$args" "--model opus[1m]" "critical fallback model"
 assert_has "$args" "--effort high" "critical fallback effort"
 ok "launcher profile preservation and global Opus fallback"
 
-rev="$(sha256sum "$ROOT/model-policy.conf" "$ROOT/templates/lead.md.tpl" "$ROOT/templates/dev.md.tpl" "$ROOT/agents/orchestrator.md" "$ROOT/agents/verifier.md" "$ROOT/agents/verifier-normal.md" | sha256sum | cut -d' ' -f1)"
 cat > "$STATE/state" <<'EOF'
 active=sonnet[1m]
 pinned=0
@@ -225,6 +228,9 @@ reason=test
 EOF
 quiet="$(printf '{}' | HOME="$HOME_DIR" CC_ORCH_STATE_DIR="$STATE" CC_ORCH_MODEL='sonnet[1m]' CC_ORCH_EFFORT=high CC_ORCH_PROFILE=normal CC_ORCH_POLICY_REV="$rev" "$ROOT/hooks/orch-model-notice.sh")"
 assert_eq "$quiet" "" "current-policy hook silence"
+legacy_rev="$("$ROOT/bin/orch-policy-rev" --legacy "$HOME_DIR/.claude/orchestra")"
+quiet="$(printf '{}' | HOME="$HOME_DIR" CC_ORCH_STATE_DIR="$STATE" CC_ORCH_MODEL='sonnet[1m]' CC_ORCH_EFFORT=high CC_ORCH_PROFILE=normal CC_ORCH_POLICY_REV="$legacy_rev" "$ROOT/hooks/orch-model-notice.sh")"
+assert_eq "$quiet" "" "live legacy-policy hook silence"
 quiet="$(printf '{}' | HOME="$HOME_DIR" CC_ORCH_STATE_DIR="$STATE" CC_ORCH_MODEL='opus[1m]' CC_ORCH_EFFORT=medium CC_ORCH_PROFILE=normal CC_ORCH_MODEL_OVERRIDE=1 CC_ORCH_EFFORT_OVERRIDE=1 CC_ORCH_POLICY_REV="$rev" "$ROOT/hooks/orch-model-notice.sh")"
 assert_eq "$quiet" "" "explicit override hook silence"
 
