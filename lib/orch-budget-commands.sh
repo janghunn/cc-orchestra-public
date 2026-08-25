@@ -90,15 +90,16 @@ cmd_lanes() {
   ensure_budget; load_metrics
   local hint=codex-first why="Codex owns heavy work; Claude already pays for orchestration"
   local c_ratio="$CLAUDE_RATIO" x_ratio="$CODEX_RATIO"
-  if [ "$CODEX_RANK" -ge 2 ] && [ "$CODEX_RANK" -gt "$CLAUDE_RANK" ]; then
+  local sparing_rank="${BUDGET_CODEX_SPARING_MIN_RANK:-3}"
+  if [ "$CODEX_RANK" -ge "$sparing_rank" ] && [ "$CODEX_RANK" -gt "$CLAUDE_RANK" ]; then
     hint=codex-sparing
-    why="Codex pressure ($CODEX_STATE) is worse than Claude ($CLAUDE_STATE); reserve Codex for gates"
-  elif [ "$CODEX_RANK" -ge 1 ] && [ "$CODEX_RANK" -eq "$CLAUDE_RANK" ] && \
+    why="Codex pressure ($CODEX_STATE) reached the provider reserve boundary; reserve it for gates"
+  elif [ "$CODEX_RANK" -ge "$sparing_rank" ] && [ "$CODEX_RANK" -eq "$CLAUDE_RANK" ] && \
        is_numeric "$x_ratio" && is_numeric "$c_ratio"; then
     if awk -v x="$x_ratio" -v c="$c_ratio" -v m="$BUDGET_PROVIDER_SWITCH_MARGIN" \
        'BEGIN { exit !(x + m < c) }'; then
       hint=codex-sparing
-      why="Codex has materially less reset-time headroom than Claude"
+      why="Codex has materially less reset-time headroom than Claude at the reserve boundary"
     fi
   fi
   if [ "$CLAUDE_RANK" -ge 3 ] && [ "$CODEX_RANK" -lt 3 ]; then
