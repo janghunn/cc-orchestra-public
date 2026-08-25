@@ -27,6 +27,7 @@ cp "$ROOT/bin/cc-orch-runtime" "$ROOT/bin/cc-orch-session" "$ROOT/bin/codex-run-
 cp "$ROOT/hooks/orch-runtime-context.sh" "$ROOT/hooks/orch-statusline.sh" "$HARNESS/hooks/"
 cp "$ROOT/budget-policy.conf" "$ROOT/build-roster-runtime.sh" "$HARNESS/"
 cp "$ROOT/lib/"*.sh "$HARNESS/lib/"
+chmod +x "$HARNESS/build-roster-runtime.sh" "$HARNESS/bin/"* "$HARNESS/hooks/"*
 mkdir -p "$HARNESS/templates"
 cat > "$HARNESS/build-roster.sh" <<'CORE'
 #!/usr/bin/env bash
