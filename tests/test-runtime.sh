@@ -93,7 +93,7 @@ printf '%s' "$claude_json" | HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" "$HARNESS/bin/orch-model-guard-runtime" ingest-claude
 budget="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   "$HARNESS/bin/orch-model-guard-runtime" budget)"
-assert_has "$budget" "claude  critical" "weekly pace pressure"
+assert_has "$budget" "claude  tight" "aggressive weekly pace pressure"
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   "$HARNESS/bin/orch-model-guard-runtime" route lead critical alpha)"
 assert_has "$route" "agent_type=route-lead-alpha-normal" "exact immutable agent type"
@@ -113,13 +113,14 @@ printf '%s' "$claude_json" | HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" "$HARNESS/bin/orch-model-guard-runtime" ingest-claude
 lanes="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" lanes)"
-assert_has "$lanes" "dispatch=codex-sparing" "relative provider pressure"
+assert_has "$lanes" "dispatch=codex-first" "Codex stays first through tight pressure"
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex implement)"
-assert_has "$route" "allow=0" "Codex implementation reserve"
+assert_has "$route" "allow=1" "tight Codex implementation remains available"
+assert_has "$route" "model=gpt-5.6-terra" "tight implementation model"
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex review)"
-assert_has "$route" "model=gpt-5.6-luna" "Codex gate reserve model"
+assert_has "$route" "model=gpt-5.6-terra" "tight gate model"
 ok "Codex weekly reset-aware provider and model routing"
 
 cat > "$HARNESS/bin/codex-run" <<'CORE'
@@ -127,21 +128,44 @@ cat > "$HARNESS/bin/codex-run" <<'CORE'
 printf '%s\n' "$*" > "${TEST_ARGS:?}"
 CORE
 chmod +x "$HARNESS/bin/codex-run"
-set +e
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" CODEX_HOME="$CODEX_HOME_DIR" \
-  "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --dry-run >/dev/null 2>&1
-rc=$?
-set -e
-assert_eq "$rc" 3 "auto policy withholds non-gate Codex call"
+  "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --dry-run
+args_out="$(cat "$TMP/codex-args")"
+assert_has "$args_out" "--model gpt-5.6-terra --effort high" "auto-routed tight implementation"
+assert_has "$args_out" "--fast-mode" "Fast mode default on auto implementation"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" CODEX_HOME="$CODEX_HOME_DIR" \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --dry-run
-assert_has "$(cat "$TMP/codex-args")" "--model gpt-5.6-luna --effort high" "auto-routed Codex wrapper args"
+args_out="$(cat "$TMP/codex-args")"
+assert_has "$args_out" "--model gpt-5.6-terra --effort high" "auto-routed Codex review args"
+assert_has "$args_out" "--fast-mode" "Fast mode default on auto review"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --model sol --dry-run
-assert_has "$(cat "$TMP/codex-args")" "--model sol" "explicit Codex model wins"
-ok "codex-run facade applies and respects runtime policy"
+args_out="$(cat "$TMP/codex-args")"
+assert_has "$args_out" "--model sol" "explicit Codex model wins"
+assert_has "$args_out" "--fast-mode" "Fast mode layers onto explicit Sol"
+TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+  "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --mech --dry-run
+args_out="$(cat "$TMP/codex-args")"
+assert_has "$args_out" "--mech" "explicit Luna-compatible mechanical path preserved"
+if printf '%s' "$args_out" | grep -q -- '--fast-mode'; then fail "--mech must not receive incompatible Fast mode"; fi
+ok "codex-run facade keeps Fast mode on compatible calls"
+
+# At the actual critical boundary provider-level sparing and non-gate withholding still protect
+# the final independent review/verify reserve.
+NOW2=$((NOW+120))
+cat > "$CODEX_HOME_DIR/sessions/$DAY/rollout-test.jsonl" <<EOF2
+{"event":{"rate_limits":{"primary":{"used_percent":95,"window_minutes":10080,"resets_at":$((NOW+518400))}}}}
+EOF2
+touch -d "@$NOW2" "$CODEX_HOME_DIR/sessions/$DAY/rollout-test.jsonl"
+lanes="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW2" \
+  CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" lanes)"
+assert_has "$lanes" "dispatch=codex-sparing" "critical Codex pressure activates reserve"
+route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW2" \
+  CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex implement)"
+assert_has "$route" "allow=0" "critical implementation withheld"
+ok "critical Codex reserve remains intact"
 
 cat > "$HARNESS/bin/cc-orch" <<'CORE'
 #!/usr/bin/env bash
