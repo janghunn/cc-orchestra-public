@@ -1,0 +1,19 @@
+name: cc-orchestra runtime tests
+
+on:
+  push:
+    branches: [feat/ops-session-layer]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Existing policy suite
+        run: bash tests/test-policy.sh
+      - name: Runtime routing and session suite
+        run: bash tests/test-runtime.sh
