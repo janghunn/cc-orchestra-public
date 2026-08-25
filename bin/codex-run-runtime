@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Reset-aware facade for the existing codex-run. Explicit model/effort/fast/critical choices are
+# never changed; otherwise the next invocation is routed from the live weekly budget snapshot.
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CORE="$REPO_DIR/bin/codex-run"
+GUARD="$REPO_DIR/bin/orch-model-guard-runtime"
+
+[ -x "$CORE" ] || { echo "codex-run: missing $CORE" >&2; exit 2; }
+MODE="${1:-}"
+
+case "$MODE" in
+  ""|status|resume) exec "$CORE" "$@" ;;
+  implement|investigate|intake|review|plan-review|verify) ;;
+  *) exec "$CORE" "$@" ;;
+esac
+
+[ "${CC_ORCH_AUTO_ROUTE:-1}" != 0 ] || exec "$CORE" "$@"
+
+# These flags express an intentional lead/user decision. In particular, critical and Fast mode
+# keep the fixed strong policy from model-policy.conf rather than being silently downgraded.
+explicit=0
+for arg in "$@"; do
+  case "$arg" in
+    --model|--effort|--mech|--fast|--fast-mode|--escalate|--critical)
+      explicit=1; break ;;
+  esac
+done
+[ "$explicit" = 0 ] || exec "$CORE" "$@"
+
+route="$("$GUARD" route codex "$MODE" 2>/dev/null)" || exec "$CORE" "$@"
+model=""; effort=""; allow=1; pressure="unknown"; reason=""
+while IFS= read -r line; do
+  key="${line%%=*}"; value="${line#*=}"
+  case "$key" in
+    model) model="$value" ;;
+    effort) effort="$value" ;;
+    allow) allow="$value" ;;
+    pressure) pressure="$value" ;;
+    reason) reason="$value" ;;
+  esac
+done <<< "$route"
+
+if [ "$allow" = 0 ]; then
+  echo "CODEX-RUN: AUTO_POLICY_SPARE — $MODE withheld (pressure=$pressure)." >&2
+  echo "           $reason" >&2
+  echo "           Use the Claude fallback lane, or pass an explicit --model/--effort to override." >&2
+  exit 3
+fi
+
+[ -n "$model" ] && [ -n "$effort" ] || exec "$CORE" "$@"
+export CC_ORCH_CODEX_ROUTE="$pressure:$model@$effort"
+exec "$CORE" "$@" --model "$model" --effort "$effort"
