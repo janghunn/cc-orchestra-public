@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Print a revision for the policy files whose value is independent of the path used to reach
-# the repository. --legacy reproduces the old pathname-sensitive value so already-running
-# sessions can transition without a forced restart.
+# Print a revision for structural policy files. Runtime budget-policy.conf is intentionally not
+# included: usage/reset movement and threshold tuning apply at the next dispatch without restart.
+# Roster-generation changes are included because Claude caches agent definitions.
 set -euo pipefail
 
 legacy=0
@@ -19,6 +19,8 @@ files=(
   "$root/agents/orchestrator.md"
   "$root/agents/verifier.md"
   "$root/agents/verifier-normal.md"
+  "$root/build-roster.sh"
+  "$root/build-roster-runtime.sh"
 )
 
 if [[ $legacy -eq 1 ]]; then
