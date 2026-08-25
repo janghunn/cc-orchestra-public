@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Runtime-aware facade for the existing cc-orchestra quota guard.
+#
+# The original implementation remains unchanged at bin/orch-model-guard. This facade keeps its
+# Fable fallback, timer, hooks, and compatibility commands, while adding reset-time-aware
+# provider/model routing that is read on every invocation.
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CORE="$REPO_DIR/bin/orch-model-guard"
+STATE_DIR="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
+LEGACY_STATE="$STATE_DIR/state"
+BUDGET_STATE="$STATE_DIR/budget-state"
+BUDGET_LOCK="$STATE_DIR/.budget.lock"
+CODEX_SESSIONS="${CODEX_HOME:-$HOME/.codex}/sessions"
+SETTINGS="${CC_ORCH_SETTINGS:-$HOME/.claude/settings.json}"
+STATUSLINE_HOOK="$REPO_DIR/hooks/orch-statusline.sh"
+STATUSLINE_PREVIOUS="$STATE_DIR/statusline.previous.json"
+
+# shellcheck source=/dev/null
+. "$REPO_DIR/model-policy.conf"
+# shellcheck source=/dev/null
+[ ! -r "$REPO_DIR/budget-policy.conf" ] || . "$REPO_DIR/budget-policy.conf"
+
+: "${BUDGET_CLAUDE_STALE_MINUTES:=30}"
+: "${BUDGET_CODEX_STALE_HOURS:=24}"
+: "${BUDGET_CODEX_REFRESH_SECONDS:=60}"
+: "${BUDGET_METRICS_MAX_AGE_SECONDS:=90}"
+: "${BUDGET_STATUSLINE_REFRESH_SECONDS:=60}"
+: "${BUDGET_WATCH_RATIO:=0.85}"
+: "${BUDGET_TIGHT_RATIO:=0.55}"
+: "${BUDGET_CRITICAL_RATIO:=0.25}"
+: "${BUDGET_NEAR_RESET_MINUTES:=10}"
+: "${BUDGET_UNKNOWN_WATCH_PCT:=75}"
+: "${BUDGET_UNKNOWN_TIGHT_PCT:=90}"
+: "${BUDGET_UNKNOWN_CRITICAL_PCT:=98}"
+: "${BUDGET_PROVIDER_SWITCH_MARGIN:=0.15}"
+: "${BUDGET_FABLE_RESERVE_PCT:=85}"
+
+mkdir -p "$STATE_DIR"
+
+# shellcheck source=/dev/null
+. "$REPO_DIR/lib/orch-budget-state.sh"
+# shellcheck source=/dev/null
+. "$REPO_DIR/lib/orch-budget-metrics.sh"
+# shellcheck source=/dev/null
+. "$REPO_DIR/lib/orch-budget-commands.sh"
+
+case "${1:-check}" in
+  check) cmd_check ;;
+  status) cmd_status ;;
+  active) "$CORE" active ;;
+  lanes) cmd_lanes ;;
+  budget) shift; cmd_budget "${1:-}" ;;
+  route) shift; cmd_route "$@" ;;
+  ingest-claude) cmd_ingest_claude ;;
+  set) shift; "$CORE" set "${1:-}" ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  -h|--help)
+    cat <<'HELP'
+usage: orch-model-guard <command>
+  check                         refresh legacy + reset-time budget snapshots
+  status                        legacy status plus reset-aware budget status
+  budget [--compact]            show time-normalized provider pressure
+  lanes                         choose codex-first or codex-sparing dynamically
+  route lead <risk> [deep] [slot]
+                                select an immutable cached lead type for the next task
+  route orchestrator <profile>  report the stable Tier-1 launch profile
+  route codex <mode>            select model/effort for the next codex-run call
+  ingest-claude                 read Claude status-line JSON from stdin
+  active | set ...              compatibility commands from the original guard
+  install | uninstall           timer, prompt hook, and status-line usage tap
+HELP
+    ;;
+  *) echo "unknown command: ${1:-} (try --help)" >&2; exit 1 ;;
+esac
