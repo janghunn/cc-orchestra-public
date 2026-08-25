@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Reset-aware facade for the existing codex-run. Explicit model/effort/fast/critical choices are
-# never changed; otherwise the next invocation is routed from the live weekly budget snapshot.
+# Reset-aware facade for the existing codex-run. Model/effort routing is dynamic, while Fast
+# mode is an independent runtime default: every compatible Sol/Terra call gets --fast-mode unless
+# the caller deliberately selects a Luna path (--fast/--mech/--model luna) or disables it with
+# CC_ORCH_ALWAYS_FAST_MODE=0.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -8,28 +10,85 @@ CORE="$REPO_DIR/bin/codex-run"
 GUARD="$REPO_DIR/bin/orch-model-guard-runtime"
 
 [ -x "$CORE" ] || { echo "codex-run: missing $CORE" >&2; exit 2; }
+# shellcheck source=/dev/null
+. "$REPO_DIR/budget-policy.conf"
 MODE="${1:-}"
+ALWAYS_FAST="${CC_ORCH_ALWAYS_FAST_MODE:-${CODEX_ALWAYS_FAST_MODE:-0}}"
+
+fast_compatible_model() {
+  case "$1" in
+    sol|terra|gpt-5.6-sol|gpt-5.6-terra) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Inspect flags once. --fast-mode is not a model-routing override anymore; it is the default.
+explicit_route=0
+has_fast_mode=0
+fast_incompatible=0
+explicit_model=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  arg="${args[i]}"
+  case "$arg" in
+    --model)
+      explicit_route=1
+      if (( i + 1 < ${#args[@]} )); then explicit_model="${args[i+1]}"; fi
+      ;;
+    --effort|--escalate|--critical) explicit_route=1 ;;
+    --mech|--fast) explicit_route=1; fast_incompatible=1 ;;
+    --fast-mode) has_fast_mode=1 ;;
+  esac
+done
+if [ -n "$explicit_model" ] && ! fast_compatible_model "$explicit_model"; then
+  fast_incompatible=1
+fi
+
+append_fast_if_compatible() {
+  # Usage: append_fast_if_compatible <model-or-empty> <original argv...>
+  local model="$1"; shift
+  if [ "$ALWAYS_FAST" = 1 ] && [ "$has_fast_mode" = 0 ] && [ "$fast_incompatible" = 0 ]; then
+    if [ -z "$model" ] || fast_compatible_model "$model"; then
+      exec "$CORE" "$@" --fast-mode
+    fi
+  fi
+  exec "$CORE" "$@"
+}
 
 case "$MODE" in
-  ""|status|resume) exec "$CORE" "$@" ;;
+  ""|status) exec "$CORE" "$@" ;;
+  resume)
+    # Resume keeps the recorded thread model. Enable Fast mode only when the session index proves
+    # that model is compatible; old session records without model metadata are left unchanged.
+    if [ "$ALWAYS_FAST" = 1 ] && [ "$has_fast_mode" = 0 ] && [ "$fast_incompatible" = 0 ]; then
+      task_dir="${3:-}"; lane="implement"
+      for ((i=0; i<${#args[@]}; i++)); do
+        if [ "${args[i]}" = --lane ] && (( i + 1 < ${#args[@]} )); then lane="${args[i+1]}"; fi
+      done
+      rec="$(sed -n "s/^$lane=//p" "$task_dir/.codex-session" 2>/dev/null | head -1)"
+      rec_model="$(printf '%s' "$rec" | cut -s -d'|' -f2)"
+      if [ -n "$rec_model" ] && fast_compatible_model "$rec_model"; then
+        exec "$CORE" "$@" --fast-mode
+      fi
+    fi
+    exec "$CORE" "$@"
+    ;;
   implement|investigate|intake|review|plan-review|verify) ;;
   *) exec "$CORE" "$@" ;;
 esac
 
-[ "${CC_ORCH_AUTO_ROUTE:-1}" != 0 ] || exec "$CORE" "$@"
+# Disabling model auto-routing does not disable the user's global Fast preference.
+if [ "${CC_ORCH_AUTO_ROUTE:-1}" = 0 ]; then
+  append_fast_if_compatible "$explicit_model" "$@"
+fi
 
-# These flags express an intentional lead/user decision. In particular, critical and Fast mode
-# keep the fixed strong policy from model-policy.conf rather than being silently downgraded.
-explicit=0
-for arg in "$@"; do
-  case "$arg" in
-    --model|--effort|--mech|--fast|--fast-mode|--escalate|--critical)
-      explicit=1; break ;;
-  esac
-done
-[ "$explicit" = 0 ] || exec "$CORE" "$@"
+# Explicit model/effort/critical decisions remain authoritative, but Fast mode is layered on top
+# when compatible. A lone --fast-mode no longer disables reset-aware model routing.
+if [ "$explicit_route" = 1 ]; then
+  append_fast_if_compatible "$explicit_model" "$@"
+fi
 
-route="$("$GUARD" route codex "$MODE" 2>/dev/null)" || exec "$CORE" "$@"
+route="$("$GUARD" route codex "$MODE" 2>/dev/null)" || append_fast_if_compatible "" "$@"
 model=""; effort=""; allow=1; pressure="unknown"; reason=""
 while IFS= read -r line; do
   key="${line%%=*}"; value="${line#*=}"
@@ -49,6 +108,14 @@ if [ "$allow" = 0 ]; then
   exit 3
 fi
 
-[ -n "$model" ] && [ -n "$effort" ] || exec "$CORE" "$@"
+[ -n "$model" ] && [ -n "$effort" ] || append_fast_if_compatible "" "$@"
 export CC_ORCH_CODEX_ROUTE="$pressure:$model@$effort"
+if [ "$ALWAYS_FAST" = 1 ] && fast_compatible_model "$model"; then
+  export CC_ORCH_CODEX_ROUTE="$CC_ORCH_CODEX_ROUTE+fast-mode"
+  if [ "$has_fast_mode" = 1 ]; then
+    exec "$CORE" "$@" --model "$model" --effort "$effort"
+  else
+    exec "$CORE" "$@" --model "$model" --effort "$effort" --fast-mode
+  fi
+fi
 exec "$CORE" "$@" --model "$model" --effort "$effort"
