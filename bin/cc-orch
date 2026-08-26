@@ -18,7 +18,7 @@ RELOAD=0
 FORCE_RELOAD=0
 
 usage() {
-  cat >&2 <<'EOF'
+  cat >&2 <<'HELP'
 usage: cc-orch [options] <project-name> [project-dir] [extra claude args...]
 
   <project-name>   REQUIRED. Labels the session, the Remote Control bridge ("orch-<name>"),
@@ -38,7 +38,7 @@ examples:
   cc-orch priorsplat ~/projects/priorsplat -c      # resume last conversation
   cc-orch --no-rc halfres-gshead
   cc-orch --reload dsv                             # apply new policy to the running dsv session
-EOF
+HELP
   exit "${1:-1}"
 }
 
@@ -61,8 +61,6 @@ done
 PROJECT_NAME="$1"
 shift
 
-# Catch the easy mistake of passing the directory first — the name would silently become a path
-# and every Remote Control session would be called "orch-/home/janghun/...".
 if [[ -d "$PROJECT_NAME" ]]; then
   echo "cc-orch: '$PROJECT_NAME' is a directory — the project NAME comes first." >&2
   echo "         try: cc-orch $(basename "$PROJECT_NAME") $PROJECT_NAME" >&2
@@ -149,8 +147,6 @@ if [[ $RELOAD -eq 1 ]]; then
     exit 1
   fi
 
-  # Keep the session's explicit profile unless the reload command supplies a replacement.
-  # Old sessions may have no project state yet; those safely fall back to normal.
   if [[ $PROFILE_SET -eq 0 && -r "$PROJECT_STATE" ]]; then
     saved_profile="$(sed -n 's/^profile=//p' "$PROJECT_STATE" | head -1)"
     [[ -n "$saved_profile" ]] && PROFILE="$saved_profile"
@@ -164,8 +160,6 @@ if [[ $RELOAD -eq 1 ]]; then
     [[ -n "$EFFORT_OVERRIDE" ]] && EFFORT_OVERRIDE_SET=1
   fi
 
-  # Continue the last conversation in the resolved project directory. A new process is required
-  # so Claude Code re-reads every generated agent definition.
   set -- -c "$@"
 fi
 
@@ -191,8 +185,9 @@ mv -f "$PROJECT_STATE.tmp" "$PROJECT_STATE"
 # shellcheck source=/dev/null
 . "$ORCH_HOME/model-policy.conf"
 
-# The normal orchestrator is Sonnet. Fable is selected only for an explicit critical/deep
-# session. Fable exhaustion overrides every control profile, including critical/deep, to Opus.
+# Runtime routing deliberately keeps a normal Tier-1 orchestrator on the cheap primary model.
+# The legacy guard's active=opus fallback still protects explicit critical/deep launches when
+# Fable is exhausted. Direct bin/cc-orch callers retain the historical global fallback behavior.
 ACTIVE_CONTROL="$("$ORCH_HOME/bin/orch-model-guard" active 2>/dev/null)"
 ACTIVE_CONTROL="${ACTIVE_CONTROL:-$PRIMARY_MODEL}"
 case "$PROFILE" in
@@ -200,13 +195,14 @@ case "$PROFILE" in
   critical) MODEL="$LEAD_CRITICAL_MODEL"; EFFORT="$LEAD_CRITICAL_EFFORT" ;;
   deep)     MODEL="$LEAD_DEEP_MODEL";     EFFORT="$LEAD_DEEP_EFFORT" ;;
 esac
-if [[ "$ACTIVE_CONTROL" == "$FALLBACK_MODEL" ]]; then
+if [[ "${CC_ORCH_RUNTIME_ROUTING:-0}" == 1 && "$PROFILE" == normal ]]; then
+  MODEL="${MODEL_OVERRIDE:-$PRIMARY_MODEL}"
+elif [[ "$ACTIVE_CONTROL" == "$FALLBACK_MODEL" ]]; then
   MODEL="$FALLBACK_MODEL"
   if [[ -n "$MODEL_OVERRIDE" && "$MODEL_OVERRIDE" != "$FALLBACK_MODEL" ]]; then
     echo "cc-orch: ignoring --model $MODEL_OVERRIDE while Fable fallback is active; using $FALLBACK_MODEL" >&2
   fi
 elif [[ "$ACTIVE_CONTROL" != "$PRIMARY_MODEL" ]]; then
-  # An explicit `orch-model-guard set <custom>` pin applies to every control profile.
   MODEL="$ACTIVE_CONTROL"
 else
   MODEL="${MODEL_OVERRIDE:-$MODEL}"
@@ -231,8 +227,6 @@ args=(
   --name "orchestrator@${PROJECT_NAME}"
 )
 
-# Remote Control publishes this session to claude.ai/code so it can be driven from a phone or
-# another machine. Requires a claude.ai subscription login.
 if [[ $USE_RC -eq 1 ]]; then
   args+=(--remote-control "orch-${PROJECT_NAME}")
 fi

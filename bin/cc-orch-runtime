@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# cc-orch facade: preserve the existing launcher and add persistent session/worktree commands.
+# Runtime quota routing happens at lead/Codex dispatch boundaries; the already-running Tier-1
+# orchestrator keeps its launch profile and context.
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CORE="$REPO_DIR/bin/cc-orch"
+SESSION="$REPO_DIR/bin/cc-orch-session"
+
+[ -x "$CORE" ] || { echo "cc-orch: missing $CORE" >&2; exit 2; }
+
+case "${1:-}" in
+  session|sessions)
+    shift
+    exec "$SESSION" "$@"
+    ;;
+  *)
+    # The reset-aware runtime owns new-task routing. Keep a normal Tier-1 on PRIMARY_MODEL even
+    # if the legacy Fable guard is in its global Opus fallback state; critical/deep still retain
+    # the legacy Fable-exhaustion protection inside the core launcher.
+    export CC_ORCH_RUNTIME_ROUTING=1
+    exec "$CORE" "$@"
+    ;;
+esac
