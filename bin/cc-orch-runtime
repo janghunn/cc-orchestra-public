@@ -16,6 +16,10 @@ case "${1:-}" in
     exec "$SESSION" "$@"
     ;;
   *)
+    # The reset-aware runtime owns new-task routing. Keep a normal Tier-1 on PRIMARY_MODEL even
+    # if the legacy Fable guard is in its global Opus fallback state; critical/deep still retain
+    # the legacy Fable-exhaustion protection inside the core launcher.
+    export CC_ORCH_RUNTIME_ROUTING=1
     exec "$CORE" "$@"
     ;;
 esac
