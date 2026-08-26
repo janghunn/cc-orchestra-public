@@ -41,7 +41,14 @@ if [ -z "$launch_model" ]; then
 fi
 [ -n "$launch_model" ] || exit 0
 
-if [ "$active" = "$FALLBACK_MODEL" ]; then
+# Mirror the launcher exactly. Runtime-managed normal Tier-1 sessions stay on PRIMARY_MODEL even
+# when the legacy Fable guard is globally on Opus. That legacy fallback still protects explicit
+# critical/deep sessions. A normal runtime session may still use an explicit --model override.
+runtime_normal=0
+if [ "${CC_ORCH_RUNTIME_ROUTING:-0}" = "1" ] && [ "$launch_profile" = "normal" ]; then
+  runtime_normal=1
+  desired_model="$PRIMARY_MODEL"
+elif [ "$active" = "$FALLBACK_MODEL" ]; then
   desired_model="$FALLBACK_MODEL"
 elif [ "$active" != "$PRIMARY_MODEL" ]; then
   desired_model="$active"
@@ -57,7 +64,8 @@ case "$launch_profile" in
   deep)     desired_effort="$LEAD_DEEP_EFFORT" ;;
   *)        desired_effort="$ORCH_EFFORT" ;;
 esac
-if [ "${CC_ORCH_MODEL_OVERRIDE:-0}" = "1" ] && [ "$active" != "$FALLBACK_MODEL" ]; then
+if [ "${CC_ORCH_MODEL_OVERRIDE:-0}" = "1" ] && \
+   { [ "$runtime_normal" = "1" ] || [ "$active" != "$FALLBACK_MODEL" ]; }; then
   desired_model="$launch_model"
 fi
 if [ "${CC_ORCH_EFFORT_OVERRIDE:-0}" = "1" ]; then
@@ -110,6 +118,5 @@ msg="${msg}    현재 세션은 ${live_model}@${live_effort}, policy-cache=${cac
 msg="${msg}    agent 정의도 시작 시 캐시되므로 /model만으로는 lead 프로필이 갱신되지 않습니다.\n"
 msg="${msg}    → 진행 중 lead가 없다면: cc-orch --reload ${project}"
 
-ctx="cc-orchestra의 현재 ${launch_profile} 프로필은 ${desired_model}@${desired_effort}이지만 이 세션은 ${live_model}@${live_effort}이고 policy cache가 ${cache_state}이다. "
-ctx="agent 정의는 시작 시 캐시되므로 /model만으로는 불충분하다. 답변 첫 줄에서 알리고, 진행 중 lead가 없을 때 'cc-orch --reload ${project}'로 대화를 이어 재시작하라고 안내할 것."
+ctx="cc-orchestra의 현재 ${launch_profile} 프로필은 ${desired_model}@${desired_effort}이지만 이 세션은 ${live_model}@${live_effort}이고 policy cache가 ${cache_state}이다. agent 정의는 시작 시 캐시되므로 /model만으로는 불충분하다. 답변 첫 줄에서 알리고, 진행 중 lead가 없을 때 'cc-orch --reload ${project}'로 대화를 이어 재시작하라고 안내할 것."
 printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"%s"}}\n' "$msg" "$ctx"
