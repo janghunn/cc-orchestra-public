@@ -2,7 +2,7 @@ name: cc-orchestra runtime tests
 
 on:
   push:
-    branches: [feat/ops-session-layer]
+    branches: [main, feat/ops-session-layer]
   pull_request:
 
 permissions:
@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Installer syntax and help
+        run: bash -n install.sh && bash install.sh --help >/dev/null
       - name: Existing policy suite
         run: bash tests/test-policy.sh
       - name: Runtime routing and session suite
