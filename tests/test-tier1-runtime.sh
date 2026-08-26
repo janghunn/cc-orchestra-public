@@ -8,6 +8,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
 
 bash -n "$ROOT/bin/cc-orch" "$ROOT/bin/cc-orch-runtime"
+# install.sh normalizes executable bits for bin/*; mirror that installed environment in CI.
+chmod +x "$ROOT/bin/cc-orch" "$ROOT/bin/cc-orch-runtime"
 
 HOME_DIR="$TMP/home"
 STATE="$TMP/state"
