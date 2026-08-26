@@ -1,0 +1,325 @@
+# cc-orchestra 런타임 운영 및 예산 라우팅 가이드
+
+> 영문 원본: `OPERATIONS.md`
+
+이 런타임 계층은 기존 cc-orchestra 오케스트레이션 엔진은 그대로 유지하면서, 그 위에 다음 두 가지 기능을 추가합니다.
+
+1. `tmux`와 선택적 Git worktree를 이용한 **지속형 작업 세션**
+2. Claude Max 구독과 ChatGPT Pro Codex 구독의 **리셋 시각을 고려한 동적 라우팅**
+
+기존 저장소의 실행 파일은 원래 위치에 그대로 유지되며, 직접 덮어쓰지 않습니다. `~/.local/bin`에 설치되는 공개 명령은 다음과 같이 런타임 facade를 거쳐 기존 실행 파일을 호출합니다.
+
+```text
+cc-orch          -> bin/cc-orch-runtime          -> 기존 bin/cc-orch
+codex-run         -> bin/codex-run-runtime       -> 기존 bin/codex-run
+orch-model-guard -> bin/orch-model-guard-runtime -> 기존 bin/orch-model-guard
+```
+
+이 구조 덕분에 기존 harness의 동작을 쉽게 검토할 수 있고, 특정 Codex 호출에서 자동 라우팅을 끄고 싶을 때는 `CC_ORCH_AUTO_ROUTE=0`으로 우회할 수 있습니다.
+
+## 설치 또는 업그레이드
+
+```bash
+git pull
+./install.sh
+./install.sh --check
+
+bash tests/test-policy.sh
+bash tests/test-runtime.sh
+```
+
+설치 과정에서는 기존 model guard를 설정하고, Claude 사용량을 읽기 위한 status-line tap도 추가합니다. 이 tap은 Claude Code가 제공하는 구조화된 `rate_limits.five_hour` 및 `rate_limits.seven_day` 값을 받아 사용률과 리셋 시각(epoch)을 저장한 뒤, 기존에 사용하던 status-line 명령도 계속 호출합니다. Guard를 제거하면 설치 전의 status-line 설정으로 복구됩니다.
+
+이 런타임 기능을 처음 설치한 뒤 이미 실행 중이던 cc-orch 세션이 있다면, 새로 생성된 16개의 `route-lead-*` agent type을 Claude Code가 캐시하도록 **한 번만 reload**하는 것이 좋습니다. 그 이후에는 일반적인 사용량 변화나 리셋 시각 변화 때문에 다시 reload할 필요가 없습니다.
+
+## 지속형 세션과 worktree
+
+작업별로 별도 브랜치, worktree, detached tmux 세션을 한 번에 만들 수 있습니다.
+
+```bash
+cc-orch session new auth-refactor ~/projects/api
+```
+
+자주 사용하는 변형은 다음과 같습니다.
+
+```bash
+cc-orch session new payment-fix ~/projects/api --profile critical
+cc-orch session new docs ~/projects/site --inplace
+cc-orch session new cache ~/projects/api --branch orch/cache-v2 --base develop
+cc-orch session new batch ~/projects/worker --no-attach
+```
+
+같은 서버라면 어느 SSH 접속에서든 세션을 관리할 수 있습니다.
+
+```bash
+cc-orch session list
+cc-orch session status auth-refactor
+cc-orch session attach auth-refactor
+cc-orch session shell auth-refactor
+cc-orch session stop auth-refactor
+cc-orch session restart auth-refactor
+cc-orch session remove auth-refactor
+```
+
+`restart`는 Claude에 `-c`를 넘겨 **마지막 대화를 이어서 재시작**합니다.
+
+`remove`는 정지되어 있고 변경 사항이 없는(clean) worktree와 로컬 세션 등록 정보만 삭제하며, **작업 브랜치는 의도적으로 남겨둡니다.** 실행 중이거나 dirty 상태인 worktree를 제거하려면 명시적으로 `--force`를 사용해야 합니다.
+
+세션 상태는 기본적으로 다음 경로에 저장됩니다.
+
+```text
+~/.claude/orchestra-state/sessions/
+~/.claude/orchestra-state/worktrees/
+```
+
+worktree 저장 루트를 바꾸고 싶다면 `CC_ORCH_WORKTREE_ROOT`를 설정합니다.
+
+### `--inplace`와 기본 worktree 모드 선택
+
+Git 저장소에서는 별도 옵션이 없으면 작업별 worktree를 만드는 것이 기본입니다. 기존 프로젝트 디렉터리 자체에서 그대로 작업하고 싶다면 `--inplace`를 사용합니다.
+
+```bash
+cc-orch session new main ~/projects/api --project-name api --inplace
+```
+
+일반적으로 다음처럼 선택하면 편합니다.
+
+- 하나의 프로젝트를 계속 이어서 작업: `--inplace`
+- 여러 기능을 병렬로 개발: 기본 worktree 모드
+- SSH 연결이 끊겨도 작업을 계속 유지: `cc-orch session ...` 사용
+
+## 런타임 예산 모델
+
+Guard는 단순 사용률만 보는 대신 **리셋까지 남은 시간에 비해 quota가 얼마나 남았는지**를 정규화합니다.
+
+```text
+headroom ratio = 남은 quota 비율 / 리셋까지 남은 시간 비율
+```
+
+여기서 headroom ratio는 앞으로 얼마나 여유 있게 사용할 수 있는지를 나타내는 지표입니다.
+
+- `1.0`: 현재 소비 속도가 리셋 시점까지 정확히 맞는 수준
+- `1.0`보다 큼: 현재 속도로 사용해도 상대적으로 여유가 있음
+- `1.0`보다 작음: 리셋 전에 quota를 소진하지 않으려면 앞으로 사용 속도를 줄여야 함
+
+따라서 **리셋 5분 전의 90% 사용량**과 **리셋 6일 전의 90% 사용량**은 같은 위험도로 취급되지 않습니다.
+
+현재 상태는 다음 명령으로 확인합니다.
+
+```bash
+orch-model-guard budget
+orch-model-guard lanes
+```
+
+예시:
+
+```text
+claude  healthy
+  5h    used=90% headroom=6.000 reset=... in 5m
+  7d    used=80% headroom=1.400 reset=... in 1d
+codex   critical
+  7d    used=90% headroom=0.117 reset=... in 6d
+
+dispatch=codex-sparing
+```
+
+Claude 사용량은 status-line tap에서 가져옵니다. Codex 사용량은 `~/.codex/sessions/**/rollout-*.jsonl` 중 가장 최신 파일에 있는 `rate_limits.primary` 객체에서 읽습니다. **사용량 확인을 위해 별도의 모델 호출을 추가로 수행하지 않습니다.**
+
+## 압박 상태: healthy / watch / tight / critical
+
+각 quota window는 headroom ratio에 따라 다음 네 단계로 분류됩니다.
+
+```text
+healthy   여유 있음
+watch     사용 속도를 관찰할 단계
+tight     사용량 절약이 필요한 단계
+critical  남은 quota를 핵심 작업에만 보존할 단계
+```
+
+기본 경계값은 `budget-policy.conf`의 다음 항목으로 제어합니다.
+
+```text
+BUDGET_WATCH_RATIO
+BUDGET_TIGHT_RATIO
+BUDGET_CRITICAL_RATIO
+```
+
+Claude는 5시간 window와 7일 window를 각각 평가한 뒤 **더 압박이 큰 쪽**을 전체 Claude 상태로 사용합니다.
+
+## 동적 라우팅
+
+### Claude lead 선택
+
+새 작업을 시작할 때마다 lead profile을 다시 결정합니다.
+
+```bash
+orch-model-guard route lead low alpha
+orch-model-guard route lead normal bravo
+orch-model-guard route lead critical charlie
+orch-model-guard route lead critical deep delta
+```
+
+이 명령은 `route-lead-bravo-normal` 같은 **고정된(immutable) agent type**과 해당 모델 및 effort를 반환합니다.
+
+`build-roster-runtime.sh`는 4개 slot × 4개 profile 조합, 총 16개의 `route-lead-*` agent를 미리 생성합니다. 기존 legacy quota guard는 이 `route-lead-*` namespace를 다시 쓰지 않습니다.
+
+즉 사용량 상태가 바뀔 때 agent 정의 파일 자체를 수정하는 것이 아니라, **이미 Claude Code가 캐시한 여러 agent type 중 다음 작업에 맞는 것을 선택**합니다.
+
+### Tier-1 orchestrator
+
+일반적인 `normal` cc-orch 세션의 Tier-1 orchestrator는 **Sonnet @ high**로 유지합니다. Tier-1은 사용자 의도 파악, 작업 분해, 상태 추적과 라우팅에 집중하고, 무거운 설계·구현·검토는 아래 단계의 Claude lead와 Codex lane에 분배합니다.
+
+이미 실행 중인 Tier-1 모델은 quota 상태가 변해도 실행 도중 hot-swap하지 않습니다.
+
+### Codex 모델과 effort 선택
+
+새 `codex-run` 호출마다 모델과 effort를 자동으로 다시 결정합니다.
+
+대표적인 구현(implement) 정책은 다음과 같습니다.
+
+```text
+healthy   implement -> Sol xhigh
+watch     implement -> Sol high
+tight     implement -> Terra high
+critical  implement -> 보류(withheld); Claude fallback 사용
+```
+
+리뷰(review)는 독립적인 cross-family gate를 보존하기 위해 critical에서도 완전히 끄지 않습니다.
+
+```text
+healthy   review -> Sol high
+watch     review -> Sol medium
+tight     review -> Terra high
+critical  review -> Luna high (gate reserve)
+```
+
+전체 라우팅 표는 `budget-policy.conf`에 있습니다.
+
+명시적으로 전달한 옵션은 자동 라우팅보다 항상 우선합니다.
+
+```bash
+codex-run ... --model sol --effort xhigh
+codex-run ... --critical
+codex-run ... --fast-mode
+codex-run ... --mech
+```
+
+특정 명령 한 번만 자동 Codex 라우팅을 끄려면:
+
+```bash
+CC_ORCH_AUTO_ROUTE=0 codex-run ...
+```
+
+현재 shell 전체에서 끄려면:
+
+```bash
+export CC_ORCH_AUTO_ROUTE=0
+```
+
+## provider 간 dispatch 결정
+
+`orch-model-guard lanes`는 Claude와 Codex의 현재 quota 압박을 비교해 다음 중 하나를 선택합니다.
+
+```text
+dispatch=codex-first
+dispatch=codex-sparing
+```
+
+- `codex-first`: 기본 정책. 무거운 조사·구현·검증을 Codex 쪽에 적극적으로 배분
+- `codex-sparing`: Codex quota 압박이 Claude보다 더 큰 경우 Codex를 절약하고, 남은 quota를 독립적인 review/verify gate에 우선 보존
+
+이 판단도 단순 사용률이 아니라 리셋까지 남은 시간을 포함한 headroom을 사용합니다.
+
+## reload 없이 즉시 반영되는 항목
+
+다음 값은 각 dispatch 또는 호출 시점마다 다시 읽으므로 바로 반영됩니다.
+
+- Claude/Codex 사용률과 리셋 시각
+- `budget-policy.conf`의 임계값과 모델 테이블
+- `orch-model-guard lanes`의 provider 선택 결과
+- 다음 작업에 사용할 `route-lead-*` profile
+- 다음 Codex 호출의 model/effort
+
+반면 이미 실행 중인 모델 프로세스를 turn 도중 교체하지는 않습니다.
+
+- Tier-1 orchestrator는 실행할 때 선택된 모델을 계속 사용
+- 이미 실행 중인 lead는 현재 모델과 context를 유지
+- 새 정책은 **다음 lead 생성 또는 다음 Codex 호출 경계**부터 적용
+
+`cc-orch --reload`는 prompt, template, agent 정의처럼 **구조적인 설정이 바뀐 경우**에 사용합니다. UserPromptSubmit hook은 이런 구조 변경과 단순 quota 변화를 구분합니다.
+
+## 설정 튜닝
+
+라우팅 정책을 조정하려면 `budget-policy.conf`를 수정합니다.
+
+이 파일은 `orch-policy-rev` 계산에서 제외되어 있으므로, quota threshold나 모델 배분표를 조정하는 것만으로 prompt cache가 무효화되지는 않습니다.
+
+주요 설정값은 다음과 같습니다.
+
+```text
+BUDGET_WATCH_RATIO
+BUDGET_TIGHT_RATIO
+BUDGET_CRITICAL_RATIO
+BUDGET_NEAR_RESET_MINUTES
+BUDGET_PROVIDER_SWITCH_MARGIN
+BUDGET_FABLE_RESERVE_PCT
+CLAUDE_ROUTE_*_PROFILE
+CODEX_AUTO_<MODE>_<PRESSURE>_{MODEL,EFFORT,ALLOW}
+```
+
+큰 작업을 시작하기 전에 정책을 바꿨다면 다음 명령으로 실제 pressure와 routing 결과를 확인하는 것이 좋습니다.
+
+```bash
+orch-model-guard budget
+orch-model-guard lanes
+```
+
+## 자주 쓰는 운영 명령 요약
+
+현재 quota와 라우팅 상태 확인:
+
+```bash
+orch-model-guard budget
+orch-model-guard lanes
+orch-model-guard status
+```
+
+managed session 확인 및 접속:
+
+```bash
+cc-orch session list
+cc-orch session status main
+cc-orch session attach main
+```
+
+Claude Code는 종료하지 않고 tmux에서만 빠져나오기:
+
+```text
+Ctrl-b, d
+```
+
+Claude Code 자체를 정상 종료:
+
+```text
+/exit
+```
+
+종료된 managed session의 이전 대화를 이어서 실행:
+
+```bash
+cc-orch session restart main
+```
+
+설치 상태 점검:
+
+```bash
+./install.sh --check
+```
+
+실제로 실행 중인 Tier-1 모델 확인:
+
+```bash
+ps -eo pid,args | grep '[c]laude.*--agent orchestrator'
+```
+
+일반적인 normal 세션이라면 `--model sonnet[1m] --effort high`가 표시되는 것이 정상입니다.
