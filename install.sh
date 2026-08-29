@@ -392,7 +392,8 @@ run_regression_tests() {
     tests/test-policy.sh \
     tests/test-runtime.sh \
     tests/test-tier1-runtime.sh \
-    tests/test-notice-runtime.sh
+    tests/test-notice-runtime.sh \
+    tests/test-poll-guard.sh
   do
     [[ -f "$REPO_DIR/$test" ]] || continue
     info "running $test"

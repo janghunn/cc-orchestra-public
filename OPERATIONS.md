@@ -179,6 +179,67 @@ An already-running model process is not hot-swapped mid-turn:
 `cc-orch --reload` remains appropriate after structural prompt/template/agent-definition changes.
 The prompt hook distinguishes that case from ordinary budget movement.
 
+## PreToolUse poll guard (opt-in)
+
+Running sessions can retain stale cached agent definitions and therefore keep issuing manual
+`sleep` loops that poll background gate result files even after their prompt templates are fixed.
+The opt-in `hooks/orch-poll-guard.sh` defense intercepts those Bash calls. Hook scripts are read
+from disk for each call, so script updates do not depend on the agent-definition cache.
+
+An isolated scope test confirmed that a project- or user-settings `PreToolUse` hook applies both
+to top-level Bash calls and to Bash calls made by Task/Agent-spawned subagents. Subagent payloads
+include `agent_id` and `agent_type`; the guard itself needs only the exact `tool_name: "Bash"`
+check. Consequently, registration can protect leads spawned by the currently running
+orchestrator even when their agent definitions are stale. Claude Code normally watches settings
+changes, but hot reload is still a runtime behavior: if an existing session does not observe the
+new registration, restart that session. Once registered, edits to the referenced script are read
+on subsequent calls.
+
+This task does not register the hook automatically. To opt in, merge this entry into Claude
+settings without replacing existing hooks (replace the repository path if this checkout moves):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/mnt/c/janghun/Moaga/cc-orch/hooks/orch-poll-guard.sh' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `|| true` is mandatory. Denials are emitted as JSON with exit status 0, so the normalizer does
+not hide them; it only keeps a damaged or syntactically broken hook script from blocking every
+Bash call.
+
+The detector is intentionally narrow. It denies only a real `while` or `until` loop that combines
+all of: `sleep`, an `.orchestra/` or `codex-*.md`/`codex-*.jsonl` target, and a file-watch primitive
+such as `[`, `test`, `grep`, `cat`, `stat`, or `find`. Quoted prose and heredoc bodies are ignored,
+except that a shell `-c` payload is treated as executable code. Ordinary one-shot sleeps, direct
+artifact reads, and loops over unrelated paths remain allowed. Known accepted false negatives are
+`for` loops, loops split across multiple Bash calls, and polling of non-orchestra paths; prompt
+guidance remains the first line of defense. The remaining false-positive risk is a legitimate
+maintenance loop that happens to match all three structural signals.
+
+If the guard causes a false positive, disable it immediately for all sessions:
+
+```bash
+mkdir -p ~/.claude/orchestra-state
+touch ~/.claude/orchestra-state/poll-guard.off
+```
+
+Remove the file to re-enable the guard. To roll back permanently, remove this `PreToolUse` entry
+from settings; the script can remain on disk.
+
 ## Tuning
 
 Edit `budget-policy.conf`. It is excluded from `orch-policy-rev`, so tuning does not invalidate
