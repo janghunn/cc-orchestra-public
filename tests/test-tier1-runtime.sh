@@ -34,6 +34,8 @@ chmod +x "$FAKEBIN/claude"
 
 run_capture() {
   local outfile="$1"; shift
+  # Prevent ambient state inherited from a nested cc-orch-runtime session from leaking into the test.
+  unset CC_ORCH_RUNTIME_ROUTING CC_ORCH_MODEL CC_ORCH_EFFORT CC_ORCH_PROFILE CC_ORCH_MODEL_OVERRIDE CC_ORCH_EFFORT_OVERRIDE CC_ORCH_POLICY_REV CC_ORCH_PROJECT
   HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" TEST_ARGS="$outfile" "$@"
   cat "$outfile"
 }
