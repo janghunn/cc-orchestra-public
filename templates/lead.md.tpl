@@ -351,8 +351,21 @@ exception.**
 - It reads `plan.md`/`brief.md` itself and works agentically in `<workdir>`; the report lands
   in `<task-dir>/impl-report-codex[-<lane>].md`. Treat that report exactly like a dev report:
   claims, not evidence — your Phase D review is identical for both lanes.
-- Runs can exceed the shell timeout: launch with `run_in_background: true`, then read the
-  report when it exits; live progress is `tail <task-dir>/codex-implement[-<lane>].jsonl`.
+- Runs can exceed the shell timeout: launch with `run_in_background: true`. The harness sends
+  an automatic completion notification when the call finishes; wait for it, then read the
+  report. While waiting, do not manually re-read the report/event file or launch another
+  `sleep`/bash/polling shell.
+- If active progress visibility is needed, arm exactly one bounded `Monitor` call instead of
+  polling manually, for example:
+
+  ```
+  Monitor({command: "until grep -q '\"type\":\"result\"' <task-dir>/codex-implement[-<lane>].jsonl; do sleep 2; done", description: "wait for Codex implementation result", timeout_ms: 3600000})
+  ```
+
+  The command must exit on the terminal event; never use an unbounded `tail -f` or `while true`.
+  Saying "I'll wait for the notification" and then manually re-checking on the next turn is
+  itself the bug: it creates repeated re-check loops and accumulated abandoned sleep processes.
+  Use only one outstanding wait mechanism per call.
 - Running two units at once? Give the second `--lane <short-name>` and put a *Lane assignment*
   section in `plan.md` (lane → unit → exact files). Without it a named lane stops and reports
   instead of guessing. Cap: 2 concurrent codex threads; each keeps its own resumable thread id.
@@ -418,6 +431,12 @@ Do not let any gate read `review.md`, another verdict, an implementation report,
 ~/.claude/orchestra/bin/codex-run review <workdir> <task-dir> --base <base-branch>
 ```
 
+Launch each command with `run_in_background: true`. The harness sends an automatic completion
+notification for each; wait for it rather than manually re-reading its report/event file or
+launching a new `sleep`/bash/polling shell. If active progress visibility is needed, use exactly
+one bounded `Monitor` call following the Phase C pattern against `<task-dir>/codex-verify.jsonl`
+or `<task-dir>/codex-review.jsonl`; do not arm a second wait mechanism for the same call.
+
 `verify` is Terra@high and executes the contract from zero context; `review` is Sol@high and
 hunts semantic defects. Your own Opus/Sonnet diff review is the cross-provider opinion when Codex
 wrote the code. PASS requires `codex-verdict.md = PASS` and review CLEAR/NONBLOCKING-only.
@@ -428,6 +447,9 @@ wrote the code. PASS requires `codex-verdict.md = PASS` and review CLEAR/NONBLOC
 codex-run verify <workdir> <task-dir> --critical
 codex-run review <workdir> <task-dir> --base <base-branch> --critical
 ```
+
+Launch these critical forms with `run_in_background: true` too; the same automatic-notification,
+no-manual-repoll, and single bounded-`Monitor` discipline above applies.
 
 In parallel spawn `verifier` with only: repo, plan path, verdict path. Critical PASS requires all
 three green. Fable exhaustion changes the lead to Opus but never weakens this gate set.

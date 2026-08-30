@@ -721,6 +721,8 @@ git status --short
 
 을 설치한다.
 
+선택형 `PreToolUse` 수동 폴링 방지 hook은 `hooks/orch-poll-guard.sh`에 있으며 등록 방법은 `OPERATIONS.md`를 참고한다.
+
 ---
 
 # 실행 예시

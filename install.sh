@@ -391,6 +391,7 @@ run_regression_tests() {
   for test in \
     tests/test-policy.sh \
     tests/test-runtime.sh \
+    tests/test-poll-guard.sh \
     tests/test-tier1-runtime.sh \
     tests/test-notice-runtime.sh
   do

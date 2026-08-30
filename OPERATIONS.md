@@ -179,6 +179,74 @@ An already-running model process is not hot-swapped mid-turn:
 `cc-orch --reload` remains appropriate after structural prompt/template/agent-definition changes.
 The prompt hook distinguishes that case from ordinary budget movement.
 
+## PreToolUse poll guard (opt-in)
+
+Running sessions can retain stale cached agent definitions and therefore keep issuing manual
+`sleep` loops that poll background gate result files even after their prompt templates are fixed.
+The opt-in `hooks/orch-poll-guard.sh` defense intercepts those Bash calls. Hook scripts are read
+from disk for each call, so script updates do not depend on the agent-definition cache.
+
+An isolated scope test using project-local settings confirmed that `PreToolUse` applies both to
+top-level Bash calls and to Bash calls made by Task/Agent-spawned subagents. Application from
+user/global settings was not directly measured; it is inferred from the shared hook engine.
+Subagent payloads include `agent_id` and `agent_type`; the guard itself needs only the exact
+`tool_name: "Bash"` check. On that inference, registration can protect leads spawned by the
+currently running orchestrator even when their agent definitions are stale. Claude Code normally
+watches settings changes, but hot reload is still a runtime behavior: if an existing session does
+not observe the new registration, restart that session. Once registered, edits to the referenced
+script are read on subsequent calls.
+
+This task does not register the hook automatically. To opt in, merge this entry into Claude
+settings without replacing existing hooks (replace the repository path if this checkout moves):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/absolute/path/to/cc-orch/hooks/orch-poll-guard.sh' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `|| true` is mandatory. Denials are emitted as JSON with exit status 0, so the normalizer does
+not hide them; it only keeps a damaged or syntactically broken hook script from blocking every
+Bash call.
+
+The detector is intentionally narrow. A `while` or `until` keyword must be at command position,
+and its live command text must combine `sleep` with a file-watch primitive such as `[`, `test`,
+`grep`, `cat`, `stat`, or `find`. Comments and heredoc bodies are inert and can never contribute
+to a denial. Ordinary quoted data is also excluded from loop, sleep, and primitive matching; it
+may only satisfy the `.orchestra/` or `codex-*.md`/`codex-*.jsonl` TARGET signal inside an otherwise
+live loop. Executable quoted payloads (command substitution inside double quotes and the first
+quoted payload after standalone shell `-c`) remain code. Heredoc delimiters support word, dot,
+and hyphen characters; quoted/commented heredoc-like text and here-strings (`<<<`) are not openers.
+Combined short options such as `-lc` remain a known false negative. Other accepted false negatives
+are `for` loops, loops split across multiple Bash calls, `eval`/`$'…'`/process-substitution payloads,
+and polling of non-orchestra paths; prompt guidance remains the first line of defense. The residual
+false-positive risk is a legitimate live loop whose unquoted text carries all required signals.
+
+Measured Python inspection latency is approximately 28–65 ms per matched Bash tool call.
+
+If the guard causes a false positive, disable it immediately for all sessions:
+
+```bash
+mkdir -p ~/.claude/orchestra-state
+touch ~/.claude/orchestra-state/poll-guard.off
+```
+
+Remove the file to re-enable the guard. To roll back permanently, remove this `PreToolUse` entry
+from settings; the script can remain on disk.
+
 ## Tuning
 
 Edit `budget-policy.conf`. It is excluded from `orch-policy-rev`, so tuning does not invalidate

@@ -248,6 +248,73 @@ dispatch=codex-sparing
 
 `cc-orch --reload`는 prompt, template, agent 정의처럼 **구조적인 설정이 바뀐 경우**에 사용합니다. UserPromptSubmit hook은 이런 구조 변경과 단순 quota 변화를 구분합니다.
 
+## PreToolUse 수동 폴링 방지 hook (선택 사항)
+
+이미 실행 중인 세션은 오래된 agent 정의를 캐시하고 있을 수 있습니다. 따라서 prompt template을
+고친 뒤에도 background gate 결과 파일을 `sleep` 루프로 수동 확인하는 명령이 계속 발생할 수
+있습니다. 선택형 방어선인 `hooks/orch-poll-guard.sh`는 이런 Bash 호출을 가로챕니다. Hook
+스크립트는 호출할 때마다 디스크에서 다시 읽으므로 agent 정의 cache와 무관하게 갱신됩니다.
+
+Project-local settings를 사용한 격리 범위 실증 테스트에서 `PreToolUse` hook은 최상위 Bash
+호출뿐 아니라 Task/Agent로 생성된 subagent의 Bash 호출에도 적용되었습니다. User/global
+settings에서의 적용은 직접 측정하지 않았으며, 동일한 hook engine을 공유한다는 점에서 추론한
+것입니다. Subagent payload에는 `agent_id`와 `agent_type`이 포함되지만, 이 guard는 정확한
+`tool_name: "Bash"` 여부만 검사합니다. 이 추론에 따르면 agent 정의가 오래된 현재 orchestrator가
+새로 만드는 lead도 등록 즉시 보호할 수 있습니다. Claude Code는 일반적으로 settings 변경을
+감시하지만 hot reload는 실행 환경의 동작이므로, 기존 세션이 새 등록을 인식하지 않으면 그 세션을
+재시작하십시오. 등록 이후에는 참조된 스크립트의 수정이 다음 호출부터 읽힙니다.
+
+이 작업은 hook을 자동 등록하지 않습니다. 사용하려면 아래 항목을 기존 hook을 덮어쓰지 않도록
+Claude settings에 병합하십시오. Checkout 위치가 바뀌면 repository 경로도 바꾸어야 합니다.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/absolute/path/to/cc-orch/hooks/orch-poll-guard.sh' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`|| true`는 필수입니다. 차단은 종료 코드 0과 JSON으로 전달되므로 이 normalizer가 차단을
+숨기지 않습니다. 대신 hook 파일이 손상되거나 shell 문법 오류가 생겼을 때 모든 Bash 호출이
+막히는 것을 방지합니다.
+
+탐지 범위는 의도적으로 좁습니다. `while` 또는 `until` keyword가 command 위치에 있어야 하며,
+그 live command text 안에 `sleep`과 `[`, `test`, `grep`, `cat`, `stat`, `find` 같은 파일 감시
+primitive가 함께 있어야 합니다. Comment와 heredoc 본문은 inert text이므로 차단 신호에 절대
+기여하지 않습니다. 일반적인 quoted data도 loop, sleep, primitive 탐지에서는 제외되며, live
+loop 안에서 `.orchestra/` 또는 `codex-*.md`/`codex-*.jsonl` TARGET 신호만 충족할 수 있습니다.
+Double quote 안의 command substitution과 독립된 shell `-c` 다음의 첫 번째 quoted payload는
+실행 코드로 취급합니다. Heredoc delimiter는 word, 점, hyphen 문자를 지원하며, quote/comment 안의
+heredoc 형태 텍스트와 here-string(`<<<`)은 opener가 아닙니다. `-lc` 같은 결합형 short option은
+알려진 false negative입니다. 그 밖의 허용된 false negative는 `for` loop, 여러 Bash 호출로
+나뉜 loop, `eval`/`$'…'`/process-substitution payload, orchestra 외 경로 polling입니다. Prompt
+지침이 여전히 첫 번째 방어선입니다. 필요한 신호를 unquoted text로 모두 가진 정상 live loop가
+남아 있는 false positive 위험입니다.
+
+측정된 Python 검사 지연은 matcher에 걸린 Bash tool 호출마다 약 28–65 ms입니다.
+
+오탐이 발생하면 모든 세션에서 즉시 끌 수 있습니다.
+
+```bash
+mkdir -p ~/.claude/orchestra-state
+touch ~/.claude/orchestra-state/poll-guard.off
+```
+
+다시 켜려면 위 파일을 삭제합니다. 영구 rollback은 settings에서 이 `PreToolUse` 항목을
+삭제하면 되며, hook 스크립트 파일은 디스크에 남아 있어도 됩니다.
+
 ## 설정 튜닝
 
 라우팅 정책을 조정하려면 `budget-policy.conf`를 수정합니다.
