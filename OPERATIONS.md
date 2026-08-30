@@ -223,12 +223,18 @@ Bash call.
 
 The detector is intentionally narrow. It denies only a real `while` or `until` loop that combines
 all of: `sleep`, an `.orchestra/` or `codex-*.md`/`codex-*.jsonl` target, and a file-watch primitive
-such as `[`, `test`, `grep`, `cat`, `stat`, or `find`. Quoted prose and heredoc bodies are ignored,
-except that a shell `-c` payload is treated as executable code. Ordinary one-shot sleeps, direct
-artifact reads, and loops over unrelated paths remain allowed. Known accepted false negatives are
-`for` loops, loops split across multiple Bash calls, and polling of non-orchestra paths; prompt
-guidance remains the first line of defense. The remaining false-positive risk is a legitimate
-maintenance loop that happens to match all three structural signals.
+such as `[`, `test`, `grep`, `cat`, `stat`, or `find`; `sleep` may occur in the loop condition or
+body. Quoted prose, command-position comments, and heredoc bodies are ignored. Heredoc-like text
+inside quotes/comments and here-strings (`<<<`) are not treated as heredoc openers. Because command
+substitution executes inside double quotes, a double-quoted span containing `$(` or a backtick is
+treated as code. The first quoted payload after a standalone shell `-c` is also treated as code;
+combined short options such as `-lc` remain a known false negative. Ordinary one-shot sleeps,
+direct artifact reads, and loops over unrelated paths remain allowed. Other accepted false
+negatives are `for` loops, loops split across multiple Bash calls, and polling of non-orchestra
+paths; prompt guidance remains the first line of defense. The remaining false-positive risk is a
+legitimate maintenance loop that happens to match all three structural signals.
+
+The Python-based inspection adds approximately 65 ms of latency to each matched Bash tool call.
 
 If the guard causes a false positive, disable it immediately for all sessions:
 

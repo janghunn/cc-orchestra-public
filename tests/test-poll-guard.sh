@@ -138,4 +138,25 @@ assert_allow_command \
   'echo "while do sleep done .orchestra/"' \
   "T15 quoted loop-shaped prose allowed"
 
+pseudo_heredoc_command="$(printf '%s\n' 'echo "<<DOC"' "$t1_command")"
+assert_deny "$pseudo_heredoc_command" "T16 quoted pseudo-heredoc does not suppress real code"
+assert_deny \
+  'echo "$(until [ -f /w/.orchestra/t/x.md ]; do sleep 5; done)"' \
+  "T17 command substitution inside double quotes denied"
+assert_allow_command \
+  '# until [ -f /w/.orchestra/t/x.md ]; do sleep 5; done' \
+  "T18 comment-only polling prose allowed"
+assert_allow_command \
+  'echo ok # until [ -f /w/.orchestra/t/x.md ]; do sleep 5; done' \
+  "T19 trailing-comment polling prose allowed"
+assert_allow_command \
+  'echo "until [ -f /w/.orchestra/t/x.md ]; do sleep 5; done"; bash -c "echo ok"' \
+  "T20 sh -c un-suppresses only its payload quote"
+assert_deny \
+  'until sleep 5 && [ -f /w/.orchestra/t/x.md ]; do :; done' \
+  "T21 sleep in loop condition denied"
+assert_allow_command \
+  'grep -q x /tmp/f <<< "until do sleep done .orchestra/"' \
+  "T22 here-string with quoted polling prose allowed"
+
 echo "PASS: $pass poll-guard cases"

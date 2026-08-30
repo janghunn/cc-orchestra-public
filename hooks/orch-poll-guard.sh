@@ -30,50 +30,87 @@ def quoted_spans(command):
 
         start = index
         index += 1
+        closed = False
         while index < length:
             if quote == "\"" and command[index] == "\\":
                 index += min(2, length - index)
                 continue
             if command[index] == quote:
                 index += 1
+                closed = True
                 break
             index += 1
-        spans.append((start, index))
+        content_end = index - 1 if closed else index
+        content = command[start + 1:content_end]
+        spans.append({
+            "start": start,
+            "end": index,
+            "suppressive": quote == "\x27" or ("$(" not in content and "`" not in content),
+        })
     return spans
 
 
-def heredoc_spans(command):
-    spans = []
-    lines = command.splitlines(keepends=True)
-    offsets = []
-    offset = 0
-    for line in lines:
-        offsets.append(offset)
-        offset += len(line)
+def inside(position, spans):
+    return any(start <= position < end for start, end in spans)
 
-    line_index = 0
-    opener = re.compile(r"<<(-?)\s*([\"\x27]?)(\w+)\2")
-    while line_index < len(lines):
-        match = opener.search(lines[line_index])
-        if not match:
-            line_index += 1
+
+def comment_spans(command, quotes):
+    spans = []
+    quote_ranges = [(quote["start"], quote["end"]) for quote in quotes]
+    index = 0
+    while index < len(command):
+        if (
+            command[index] == "#"
+            and not inside(index, quote_ranges)
+            and (
+                index == 0
+                or command[index - 1].isspace()
+                or command[index - 1] in ";|&("
+            )
+        ):
+            end = command.find("\n", index)
+            if end < 0:
+                end = len(command)
+            spans.append((index, end))
+            index = end
+        else:
+            index += 1
+    return spans
+
+
+def heredoc_spans(command, quotes, comments):
+    spans = []
+    quote_ranges = [(quote["start"], quote["end"]) for quote in quotes]
+    protected = quote_ranges + comments
+    opener = re.compile(r"(?<!<)<<(?!<)(-?)\s*([\"\x27]?)(\w+)\2")
+    for match in opener.finditer(command):
+        if inside(match.start(), protected + spans):
             continue
 
         delimiter = match.group(3)
         strip_tabs = match.group(1) == "-"
-        body_start = offsets[line_index] + len(lines[line_index])
+        opener_line_end = command.find("\n", match.end())
+        if opener_line_end < 0:
+            spans.append((len(command), len(command)))
+            continue
+
+        body_start = opener_line_end + 1
         end = len(command)
-        scan = line_index + 1
-        while scan < len(lines):
-            candidate = lines[scan].rstrip("\r\n")
+        cursor = body_start
+        while cursor < len(command):
+            line_end = command.find("\n", cursor)
+            if line_end < 0:
+                line_end = len(command)
+            candidate = command[cursor:line_end].rstrip("\r")
             if strip_tabs:
                 candidate = candidate.lstrip("\t")
             if candidate == delimiter:
-                end = offsets[scan]
+                end = cursor
                 break
-            scan += 1
+            if line_end == len(command):
+                break
+            cursor = line_end + 1
         spans.append((body_start, end))
-        line_index = scan + 1 if scan < len(lines) else len(lines)
     return spans
 
 
@@ -88,10 +125,21 @@ try:
     if not isinstance(command, str):
         raise SystemExit(0)
 
-    spans = heredoc_spans(command)
-    shell_c = re.search(r"\b(?:bash|sh|zsh|dash|ksh)\b[^|&;]*\s-c\b", command)
-    if not shell_c:
-        spans.extend(quoted_spans(command))
+    quotes = quoted_spans(command)
+    comments = comment_spans(command, quotes)
+    heredocs = heredoc_spans(command, quotes, comments)
+    shell_c_pattern = re.compile(r"\b(?:bash|sh|zsh|dash|ksh)\b[^|&;]*\s-c\b")
+    for shell_c in shell_c_pattern.finditer(command):
+        for quote in quotes:
+            if quote["start"] > shell_c.end():
+                quote["suppressive"] = False
+                break
+
+    spans = comments + heredocs + [
+        (quote["start"], quote["end"])
+        for quote in quotes
+        if quote["suppressive"]
+    ]
 
     loop_pattern = re.compile(
         r"\b(?:while|until)\b(?P<cond>.*?)\bdo\b(?P<body>.*?)(?:\bdone\b|$)",
@@ -107,11 +155,10 @@ try:
         if any(span_start <= start and end <= span_end for span_start, span_end in spans):
             continue
 
-        body = loop.group("body")
-        watched_text = loop.group("cond") + body
+        watched_text = loop.group("cond") + loop.group("body")
         has_target = ".orchestra/" in watched_text or target_pattern.search(watched_text)
         if (
-            re.search(r"\bsleep\b", body)
+            re.search(r"\bsleep\b", watched_text)
             and has_target
             and primitive_pattern.search(watched_text)
         ):

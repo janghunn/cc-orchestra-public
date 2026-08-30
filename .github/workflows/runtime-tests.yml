@@ -19,9 +19,9 @@ jobs:
         run: bash tests/test-policy.sh
       - name: Runtime routing and session suite
         run: bash tests/test-runtime.sh
+      - name: Poll guard hook suite
+        run: bash tests/test-poll-guard.sh
       - name: Tier-1 runtime regression suite
         run: bash tests/test-tier1-runtime.sh
       - name: Runtime policy notice suite
         run: bash tests/test-notice-runtime.sh
-      - name: Poll guard hook suite
-        run: bash tests/test-poll-guard.sh

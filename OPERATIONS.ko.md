@@ -291,11 +291,17 @@ Claude settings에 병합하십시오. Checkout 위치가 바뀌면 repository �
 
 탐지 범위는 의도적으로 좁습니다. `while` 또는 `until` 실제 loop 안에 `sleep`, `.orchestra/`
 또는 `codex-*.md`/`codex-*.jsonl` 대상, 그리고 `[`, `test`, `grep`, `cat`, `stat`, `find` 같은
-파일 감시 primitive가 모두 있을 때만 차단합니다. 인용된 설명문과 heredoc 본문은 무시하되,
-shell `-c` payload는 실행 코드로 취급합니다. 단발성 sleep, 직접 artifact 읽기, 관련 없는
-경로의 loop는 허용됩니다. 허용된 false negative는 `for` loop, 여러 Bash 호출로 나뉜 loop,
-orchestra 외 경로 polling입니다. Prompt 지침이 여전히 첫 번째 방어선입니다. 세 가지 구조
-신호를 모두 가진 정상적인 maintenance loop가 남아 있는 false positive 위험입니다.
+파일 감시 primitive가 모두 있을 때만 차단하며, `sleep`은 loop 조건이나 본문 어느 쪽에 있어도
+탐지합니다. 인용된 설명문, command 위치의 comment, heredoc 본문은 무시합니다. Quote/comment
+안의 heredoc 형태 텍스트와 here-string(`<<<`)은 heredoc opener로 취급하지 않습니다. Double
+quote 안에서도 `$(` 또는 backtick이 있으면 command substitution이 실행되므로 코드로 취급합니다.
+독립된 shell `-c` 다음의 첫 번째 인용 payload 역시 실행 코드로 취급하지만, `-lc` 같은 결합형
+short option은 알려진 false negative입니다. 단발성 sleep, 직접 artifact 읽기, 관련 없는 경로의
+loop는 허용됩니다. 그 밖의 허용된 false negative는 `for` loop, 여러 Bash 호출로 나뉜 loop,
+orchestra 외 경로 polling입니다. Prompt 지침이 여전히 첫 번째 방어선입니다. 세 가지 구조 신호를
+모두 가진 정상적인 maintenance loop가 남아 있는 false positive 위험입니다.
+
+Python 기반 검사는 matcher에 걸린 Bash tool 호출마다 약 65 ms의 지연을 추가합니다.
 
 오탐이 발생하면 모든 세션에서 즉시 끌 수 있습니다.
 
