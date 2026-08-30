@@ -159,4 +159,29 @@ assert_allow_command \
   'grep -q x /tmp/f <<< "until do sleep done .orchestra/"' \
   "T22 here-string with quoted polling prose allowed"
 
+assert_deny \
+  'until [ -f /w/.orchestra/t/x.md ]; do echo "not done"; sleep 5; done' \
+  "T23 quoted done does not terminate loop scan"
+assert_allow_command \
+  'echo while do sleep .orchestra/ grep done' \
+  "T24 unquoted loop-shaped prose allowed"
+comment_apostrophe_command="$(printf '%s\n' "# don't poll manually" "$t1_command")"
+assert_deny "$comment_apostrophe_command" "T25 comment apostrophe does not suppress real loop"
+hyphen_heredoc_command="$(printf '%s\n' \
+  'cat <<DOC-END' \
+  'prose' \
+  'DOC-END' \
+  "$t1_command")"
+assert_deny "$hyphen_heredoc_command" "T26 hyphenated heredoc closes before real loop"
+comment_signal_command="$(printf '%s\n' \
+  'while true; do # sleep 5; grep .orchestra/' \
+  '  break; done')"
+assert_allow_command "$comment_signal_command" "T27 comment text supplies no deny signals"
+assert_allow_command \
+  'echo "bash -c"; echo "until [ -f /w/.orchestra/t/x.md ]; do sleep 5; done"' \
+  "T28 quoted sh -c does not un-suppress later prose"
+assert_allow_command \
+  'until [ -f /w/.orchestra/t/x.md ]; do echo "sleep 5"; done' \
+  "T29 quoted sleep is data"
+
 echo "PASS: $pass poll-guard cases"

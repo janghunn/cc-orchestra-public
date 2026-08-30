@@ -186,14 +186,15 @@ Running sessions can retain stale cached agent definitions and therefore keep is
 The opt-in `hooks/orch-poll-guard.sh` defense intercepts those Bash calls. Hook scripts are read
 from disk for each call, so script updates do not depend on the agent-definition cache.
 
-An isolated scope test confirmed that a project- or user-settings `PreToolUse` hook applies both
-to top-level Bash calls and to Bash calls made by Task/Agent-spawned subagents. Subagent payloads
-include `agent_id` and `agent_type`; the guard itself needs only the exact `tool_name: "Bash"`
-check. Consequently, registration can protect leads spawned by the currently running
-orchestrator even when their agent definitions are stale. Claude Code normally watches settings
-changes, but hot reload is still a runtime behavior: if an existing session does not observe the
-new registration, restart that session. Once registered, edits to the referenced script are read
-on subsequent calls.
+An isolated scope test using project-local settings confirmed that `PreToolUse` applies both to
+top-level Bash calls and to Bash calls made by Task/Agent-spawned subagents. Application from
+user/global settings was not directly measured; it is inferred from the shared hook engine.
+Subagent payloads include `agent_id` and `agent_type`; the guard itself needs only the exact
+`tool_name: "Bash"` check. On that inference, registration can protect leads spawned by the
+currently running orchestrator even when their agent definitions are stale. Claude Code normally
+watches settings changes, but hot reload is still a runtime behavior: if an existing session does
+not observe the new registration, restart that session. Once registered, edits to the referenced
+script are read on subsequent calls.
 
 This task does not register the hook automatically. To opt in, merge this entry into Claude
 settings without replacing existing hooks (replace the repository path if this checkout moves):
@@ -207,7 +208,7 @@ settings without replacing existing hooks (replace the repository path if this c
         "hooks": [
           {
             "type": "command",
-            "command": "bash '/mnt/c/janghun/Moaga/cc-orch/hooks/orch-poll-guard.sh' || true",
+            "command": "bash '/absolute/path/to/cc-orch/hooks/orch-poll-guard.sh' || true",
             "timeout": 10
           }
         ]
@@ -221,20 +222,20 @@ The `|| true` is mandatory. Denials are emitted as JSON with exit status 0, so t
 not hide them; it only keeps a damaged or syntactically broken hook script from blocking every
 Bash call.
 
-The detector is intentionally narrow. It denies only a real `while` or `until` loop that combines
-all of: `sleep`, an `.orchestra/` or `codex-*.md`/`codex-*.jsonl` target, and a file-watch primitive
-such as `[`, `test`, `grep`, `cat`, `stat`, or `find`; `sleep` may occur in the loop condition or
-body. Quoted prose, command-position comments, and heredoc bodies are ignored. Heredoc-like text
-inside quotes/comments and here-strings (`<<<`) are not treated as heredoc openers. Because command
-substitution executes inside double quotes, a double-quoted span containing `$(` or a backtick is
-treated as code. The first quoted payload after a standalone shell `-c` is also treated as code;
-combined short options such as `-lc` remain a known false negative. Ordinary one-shot sleeps,
-direct artifact reads, and loops over unrelated paths remain allowed. Other accepted false
-negatives are `for` loops, loops split across multiple Bash calls, and polling of non-orchestra
-paths; prompt guidance remains the first line of defense. The remaining false-positive risk is a
-legitimate maintenance loop that happens to match all three structural signals.
+The detector is intentionally narrow. A `while` or `until` keyword must be at command position,
+and its live command text must combine `sleep` with a file-watch primitive such as `[`, `test`,
+`grep`, `cat`, `stat`, or `find`. Comments and heredoc bodies are inert and can never contribute
+to a denial. Ordinary quoted data is also excluded from loop, sleep, and primitive matching; it
+may only satisfy the `.orchestra/` or `codex-*.md`/`codex-*.jsonl` TARGET signal inside an otherwise
+live loop. Executable quoted payloads (command substitution inside double quotes and the first
+quoted payload after standalone shell `-c`) remain code. Heredoc delimiters support word, dot,
+and hyphen characters; quoted/commented heredoc-like text and here-strings (`<<<`) are not openers.
+Combined short options such as `-lc` remain a known false negative. Other accepted false negatives
+are `for` loops, loops split across multiple Bash calls, `eval`/`$'…'`/process-substitution payloads,
+and polling of non-orchestra paths; prompt guidance remains the first line of defense. The residual
+false-positive risk is a legitimate live loop whose unquoted text carries all required signals.
 
-The Python-based inspection adds approximately 65 ms of latency to each matched Bash tool call.
+Measured Python inspection latency is approximately 28–65 ms per matched Bash tool call.
 
 If the guard causes a false positive, disable it immediately for all sessions:
 

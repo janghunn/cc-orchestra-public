@@ -18,50 +18,79 @@ import re
 import sys
 
 
-def quoted_spans(command):
-    spans = []
+def lex(command):
+    quotes = []
+    inert = []
+    pending_heredocs = []
+    heredoc_opener = re.compile(r"(?<!<)<<(?!<)(-?)\s*([\"\x27]?)([\w.-]+)\2")
     index = 0
     length = len(command)
     while index < length:
-        quote = command[index]
-        if quote not in ("\"", "\x27"):
-            index += 1
+        if command[index] == "\n" and pending_heredocs:
+            cursor = index + 1
+            for delimiter, strip_tabs in pending_heredocs:
+                body_start = cursor
+                body_end = length
+                found_delimiter = False
+                while cursor < length:
+                    line_end = command.find("\n", cursor)
+                    if line_end < 0:
+                        line_end = length
+                    candidate = command[cursor:line_end].rstrip("\r")
+                    if strip_tabs:
+                        candidate = candidate.lstrip("\t")
+                    if candidate == delimiter:
+                        body_end = cursor
+                        cursor = line_end + 1 if line_end < length else length
+                        found_delimiter = True
+                        break
+                    if line_end == length:
+                        cursor = length
+                        break
+                    cursor = line_end + 1
+                inert.append((body_start, body_end))
+                if not found_delimiter:
+                    break
+            pending_heredocs = []
+            index = cursor
             continue
 
-        start = index
-        index += 1
-        closed = False
-        while index < length:
-            if quote == "\"" and command[index] == "\\":
-                index += min(2, length - index)
-                continue
-            if command[index] == quote:
-                index += 1
-                closed = True
-                break
+        if command[index] == "\\":
+            index += min(2, length - index)
+            continue
+
+        if command[index] in ("\"", "\x27"):
+            quote = command[index]
+            start = index
             index += 1
-        content_end = index - 1 if closed else index
-        content = command[start + 1:content_end]
-        spans.append({
-            "start": start,
-            "end": index,
-            "suppressive": quote == "\x27" or ("$(" not in content and "`" not in content),
-        })
-    return spans
+            closed = False
+            while index < length:
+                if (
+                    quote == "\""
+                    and command[index] == "\\"
+                    and index + 1 < length
+                    and command[index + 1] == "\""
+                ):
+                    index += 2
+                    continue
+                if command[index] == quote:
+                    index += 1
+                    closed = True
+                    break
+                index += 1
+            content_end = index - 1 if closed else index
+            content = command[start + 1:content_end]
+            quotes.append({
+                "start": start,
+                "end": index,
+                "suppressive": (
+                    quote == "\x27" or ("$(" not in content and "`" not in content)
+                ),
+            })
+            continue
 
-
-def inside(position, spans):
-    return any(start <= position < end for start, end in spans)
-
-
-def comment_spans(command, quotes):
-    spans = []
-    quote_ranges = [(quote["start"], quote["end"]) for quote in quotes]
-    index = 0
-    while index < len(command):
         if (
             command[index] == "#"
-            and not inside(index, quote_ranges)
             and (
                 index == 0
                 or command[index - 1].isspace()
@@ -70,48 +99,39 @@ def comment_spans(command, quotes):
         ):
             end = command.find("\n", index)
             if end < 0:
-                end = len(command)
-            spans.append((index, end))
+                end = length
+            inert.append((index, end))
             index = end
-        else:
-            index += 1
-    return spans
-
-
-def heredoc_spans(command, quotes, comments):
-    spans = []
-    quote_ranges = [(quote["start"], quote["end"]) for quote in quotes]
-    protected = quote_ranges + comments
-    opener = re.compile(r"(?<!<)<<(?!<)(-?)\s*([\"\x27]?)(\w+)\2")
-    for match in opener.finditer(command):
-        if inside(match.start(), protected + spans):
             continue
 
-        delimiter = match.group(3)
-        strip_tabs = match.group(1) == "-"
-        opener_line_end = command.find("\n", match.end())
-        if opener_line_end < 0:
-            spans.append((len(command), len(command)))
+        opener = heredoc_opener.match(command, index)
+        if opener:
+            pending_heredocs.append((opener.group(3), opener.group(1) == "-"))
+            index = opener.end()
             continue
 
-        body_start = opener_line_end + 1
-        end = len(command)
-        cursor = body_start
-        while cursor < len(command):
-            line_end = command.find("\n", cursor)
-            if line_end < 0:
-                line_end = len(command)
-            candidate = command[cursor:line_end].rstrip("\r")
-            if strip_tabs:
-                candidate = candidate.lstrip("\t")
-            if candidate == delimiter:
-                end = cursor
-                break
-            if line_end == len(command):
-                break
-            cursor = line_end + 1
-        spans.append((body_start, end))
-    return spans
+        index += 1
+    return quotes, inert
+
+
+def blank_spans(command, spans):
+    chars = list(command)
+    for start, end in spans:
+        chars[start:end] = " " * (end - start)
+    return "".join(chars)
+
+
+def at_command_position(text, start):
+    index = start - 1
+    while index >= 0 and text[index] in " \t":
+        index -= 1
+    if index < 0 or text[index] in "\n;&|({`\x27\"":
+        return True
+
+    word_end = index + 1
+    while index >= 0 and (text[index].isalnum() or text[index] == "_"):
+        index -= 1
+    return text[index + 1:word_end] in ("do", "then", "else", "elif")
 
 
 try:
@@ -125,21 +145,28 @@ try:
     if not isinstance(command, str):
         raise SystemExit(0)
 
-    quotes = quoted_spans(command)
-    comments = comment_spans(command, quotes)
-    heredocs = heredoc_spans(command, quotes, comments)
-    shell_c_pattern = re.compile(r"\b(?:bash|sh|zsh|dash|ksh)\b[^|&;]*\s-c\b")
-    for shell_c in shell_c_pattern.finditer(command):
-        for quote in quotes:
-            if quote["start"] > shell_c.end():
-                quote["suppressive"] = False
-                break
-
-    spans = comments + heredocs + [
+    quotes, inert = lex(command)
+    suppressive_quotes = [
         (quote["start"], quote["end"])
         for quote in quotes
         if quote["suppressive"]
     ]
+    syntax_text = blank_spans(command, inert + suppressive_quotes)
+    signal_text = blank_spans(command, inert)
+
+    shell_c_pattern = re.compile(r"\b(?:bash|sh|zsh|dash|ksh)\b[^|&;]*\s-c\b")
+    for shell_c in shell_c_pattern.finditer(syntax_text):
+        for quote in quotes:
+            if quote["start"] >= shell_c.end():
+                quote["suppressive"] = False
+                break
+
+    suppressive_quotes = [
+        (quote["start"], quote["end"])
+        for quote in quotes
+        if quote["suppressive"]
+    ]
+    syntax_text = blank_spans(command, inert + suppressive_quotes)
 
     loop_pattern = re.compile(
         r"\b(?:while|until)\b(?P<cond>.*?)\bdo\b(?P<body>.*?)(?:\bdone\b|$)",
@@ -150,17 +177,19 @@ try:
         r"(?:\[|\btest\b|\bgrep\b|\bcat\b|\bls\b|\bstat\b|\bfind\b|\btail\b|\bwc\b)"
     )
 
-    for loop in loop_pattern.finditer(command):
-        start, end = loop.span()
-        if any(span_start <= start and end <= span_end for span_start, span_end in spans):
+    for loop in loop_pattern.finditer(syntax_text):
+        if not at_command_position(syntax_text, loop.start()):
             continue
 
-        watched_text = loop.group("cond") + loop.group("body")
-        has_target = ".orchestra/" in watched_text or target_pattern.search(watched_text)
+        region_start = loop.start("cond")
+        region_end = loop.end("body")
+        syntax_region = syntax_text[region_start:region_end]
+        signal_region = signal_text[region_start:region_end]
+        has_target = ".orchestra/" in signal_region or target_pattern.search(signal_region)
         if (
-            re.search(r"\bsleep\b", watched_text)
+            re.search(r"\bsleep\b", syntax_region)
             and has_target
-            and primitive_pattern.search(watched_text)
+            and primitive_pattern.search(syntax_region)
         ):
             reason = (
                 "Manual polling of background gate artifacts (.orchestra/ or codex-*.md/jsonl) "
