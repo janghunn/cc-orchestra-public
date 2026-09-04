@@ -507,9 +507,13 @@ run_once() {
 }
 run_once
 
-# Observed on codex-cli 0.153.2 for a model the account cannot use: HTTP 400 invalid_request_error.
-# The "Model metadata ... not found" warning alone is NOT decisive and must not be matched.
-model_unavailable_signature() { printf '%s' "$1" | grep -qE "The '[^']+' model is not supported"; }
+# Observed on codex-cli 0.153.2 for a model the account cannot use: HTTP 400 invalid_request_error
+# with "The '<model>' model is not supported". Also accept documented "This model is not supported",
+# "does not exist or you do not have access", and model_not_found variants. The "Model metadata ...
+# not found" warning alone is NOT decisive and must not be matched.
+model_unavailable_signature() {
+  printf '%s' "$1" | grep -qiE "The '[^']+' model is not supported|This model is not supported|The model .{1,80} does not exist or you do not have access to it|\"code\":[[:space:]]*\"model_not_found\"|model_not_found"
+}
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$MODEL" = "gpt-6-astra" ] \
    && model_unavailable_signature "$(tail -c 4000 "$STDERR"; tail -c 4000 "$EVENTS")" \
    && use_astra_fallback "was rejected by Codex as unavailable on this account/CLI (exit $RC)"; then

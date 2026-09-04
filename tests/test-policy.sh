@@ -289,7 +289,20 @@ while [ $# -gt 0 ]; do
 done
 if [ "$model" = "gpt-6-astra" ]; then
   printf '%s\n' 'warning: Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; ...' >&2
-  printf '%s\n' 'ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The '\''gpt-6-astra'\'' model is not supported when using Codex with a ChatGPT account."}}' >&2
+  case "${FAKE_CODEX_ERROR_STYLE:-not-supported}" in
+    this-model)
+      printf '%s\n' 'ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"This model is not supported when using Codex with a ChatGPT account."}}' >&2
+      ;;
+    not-exist)
+      printf '%s\n' 'ERROR: {"type":"error","status":404,"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model `gpt-6-astra` does not exist or you do not have access to it."}}' >&2
+      ;;
+    warning-only)
+      printf '%s\n' 'ERROR: stream disconnected' >&2
+      ;;
+    not-supported|*)
+      printf '%s\n' 'ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The '\''gpt-6-astra'\'' model is not supported when using Codex with a ChatGPT account."}}' >&2
+      ;;
+  esac
   exit 1
 fi
 printf '%s\n' '{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}'
@@ -323,6 +336,45 @@ set -e
 assert_eq "$rc" "6" "live explicit unavailable Astra exit"
 assert_has "$out" "MODEL_UNAVAILABLE" "live explicit unavailable Astra classification"
 assert_not_has "$out" "CODEX-RUN: FAILED" "live explicit unavailable Astra is specific"
+
+for style in this-model not-exist; do
+  style_state="$TMP/state-live-$style-auto"
+  out="$(FAKE_CODEX_ERROR_STYLE="$style" PATH="$FAKEBIN_LIVE:$PATH" HOME="$HOME_E2E" \
+    CC_ORCH_STATE_DIR="$style_state" CODEX_HOME="$TMP/no-codex-home" CC_ORCH_CODEX_ROUTE= \
+    "$ROOT/bin/codex-run-runtime" implement "$WORK" "$TASK" 2>&1)"
+  assert_has "$out" "MODEL_FALLBACK" "$style auto rejection triggers fallback"
+  second_log="$(sed -n '2p' "$style_state/codex.log")"
+  assert_has "$second_log" "exit=0" "$style fallback second attempt succeeds"
+
+  set +e
+  out="$(FAKE_CODEX_ERROR_STYLE="$style" PATH="$FAKEBIN_LIVE:$PATH" \
+    CC_ORCH_STATE_DIR="$TMP/state-live-$style-explicit" CODEX_HOME="$TMP/no-codex-home" \
+    CC_ORCH_CODEX_ROUTE= "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model astra 2>&1)"
+  rc=$?
+  set -e
+  assert_eq "$rc" "6" "$style explicit unavailable Astra exit"
+  assert_has "$out" "MODEL_UNAVAILABLE" "$style explicit unavailable classification"
+  assert_not_has "$out" "CODEX-RUN: FAILED" "$style explicit failure is specific"
+done
+
+set +e
+out="$(FAKE_CODEX_ERROR_STYLE=warning-only PATH="$FAKEBIN_LIVE:$PATH" \
+  CC_ORCH_STATE_DIR="$TMP/state-live-warning-explicit" CODEX_HOME="$TMP/no-codex-home" \
+  CC_ORCH_CODEX_ROUTE= "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model astra 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "1" "metadata warning alone is not model unavailable"
+assert_has "$out" "CODEX-RUN: FAILED" "warning-only explicit failure stays generic"
+assert_not_has "$out" "MODEL_UNAVAILABLE" "warning-only explicit failure is not exit 6"
+
+set +e
+out="$(FAKE_CODEX_ERROR_STYLE=warning-only PATH="$FAKEBIN_LIVE:$PATH" HOME="$HOME_E2E" \
+  CC_ORCH_STATE_DIR="$TMP/state-live-warning-auto" CODEX_HOME="$TMP/no-codex-home" \
+  CC_ORCH_CODEX_ROUTE= "$ROOT/bin/codex-run-runtime" implement "$WORK" "$TASK" 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "1" "warning-only auto failure is not retried"
+assert_not_has "$out" "MODEL_FALLBACK" "metadata warning alone cannot trigger fallback"
 out="$(PATH="$FAKEBIN_LIVE:$PATH" CC_ORCH_STATE_DIR="$TMP/state-live-sol" \
   CODEX_HOME="$TMP/no-codex-home" CC_ORCH_CODEX_ROUTE= \
   "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model sol 2>&1)"
