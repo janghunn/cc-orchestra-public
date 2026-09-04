@@ -133,21 +133,25 @@ cached agent types rather than rewriting definitions.
 Codex model and effort are resolved automatically on each new `codex-run` invocation:
 
 ```text
-healthy   implement -> Sol xhigh
+healthy   implement -> Astra xhigh (Fast; Sol xhigh when Astra is unavailable)
 watch     implement -> Sol high
 tight     implement -> Terra high
 critical  implement -> withheld; Claude fallback
 
-healthy   review -> Sol high
+healthy   review -> Astra high (Fast; Sol high when Astra is unavailable)
 watch     review -> Sol medium
 tight     review -> Terra high
-critical  review -> Luna high (gate reserve)
+critical  review -> Terra medium (gate reserve)
 ```
 
-The complete table is in `budget-policy.conf`. Explicit flags always win:
+The complete table is in `budget-policy.conf`. Auto-routed healthy calls emit
+`CODEX-RUN: MODEL_FALLBACK` and use the lane's plain Sol/Terra default when Astra is unavailable;
+explicit Astra requests instead exit 6 with `MODEL_UNAVAILABLE`. Set
+`CC_ORCH_CODEX_CATALOG_CHECK=0` to disable the live/cached catalog pre-flight. Explicit flags always win:
 
 ```bash
 codex-run ... --model sol --effort xhigh
+codex-run ... --model astra
 codex-run ... --critical
 codex-run ... --fast-mode
 codex-run ... --mech

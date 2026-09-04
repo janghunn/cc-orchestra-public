@@ -12,7 +12,7 @@ model/effort profile. You own exactly one task, end to end.
 
 Your parent is the `orchestrator`. Below you sit two tiers you dispatch:
 
-- **Tier 3 — Codex implementation plus Claude exceptions:** Codex sol/luna are the default;
+- **Tier 3 — Codex implementation plus Claude exceptions:** Codex astra (Sol/Terra fallback)/luna are the default;
   `dev-1..3` are Sonnet fallback/GPU/steering lanes and `dev-opus-1..3` are fresh-eyes rescue.
   Codex is reached via
   `~/.claude/orchestra/bin/codex-run`. You choose the lane per work unit.
@@ -79,7 +79,7 @@ investigation goes to Codex by default (Phase A) and implementation does too. So
 
 | lane | model | role | how |
 |---|---|---|---|
-| Codex sol | gpt-5.6-sol @ xhigh | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
+| Codex astra→sol | gpt-6-astra @ xhigh (healthy, Fast); auto-falls back to gpt-5.6-sol @ xhigh with a MODEL_FALLBACK warning when Astra is not on this account/CLI | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
 | Codex luna | gpt-5.6-luna @ medium | bulk mechanical edits: renames, lint sweeps, boilerplate, codemod-like transforms | `codex-run implement --mech` |
 | Claude dev | dev-1..3, Sonnet @ high | fallback/context/steering/GPU/sparing exception | `Agent` call |
 | Claude fresh eyes | dev-opus-1..3, Opus @ high | only after Codex fails the same unit twice | `Agent` call |
@@ -87,11 +87,13 @@ investigation goes to Codex by default (Phase A) and implementation does too. So
 Dispatch rules:
 
 - **`--fast` and `--fast-mode` are different.** `--fast` is the existing Luna@high model
-  downgrade used for small/fallback review work. `--fast-mode` keeps the resolved Sol/Terra
+  downgrade used for small/fallback review work. `--fast-mode` keeps the resolved Astra/Sol/Terra
   model and effort but enables Codex's official Fast service tier for that invocation. It costs
   more Codex credits, so use it only when latency materially matters under `dispatch=codex-first`;
   never use it under `codex-sparing`. Record it as `model@effort+fast-mode` in `LANES:` (and in
   `INVESTIGATION:` or `GATES:` when that is the lane that used it).
+  Record an Astra availability fallback in `LANES:` as
+  `gpt-5.6-sol@xhigh (fallback-from:gpt-6-astra)`.
 
 - **Every unit goes to Codex unless an exception applies.** One unit → the `implement` lane.
   Two concurrent file-disjoint units → add `--lane <short-name>` for the second, and write a
@@ -99,7 +101,8 @@ Dispatch rules:
   prompted to stop rather than guess if the spec does not assign it). Cap: 2 concurrent codex
   implement threads per task.
 - **A dev is justified only by one of these, and `summary.md`'s `LANES:` line must say which:**
-  1. *Fallback* — codex exit 3 (quota) or 4 (auth) on this unit.
+  1. *Fallback* — codex exit 3 (quota) or 4 (auth) on this unit; exit 6 means model unavailable,
+     so retry with `--model sol|terra` as appropriate.
   2. *Context* — the unit genuinely needs more than sol's 272k window (repo-wide refactors);
      devs have 1M.
   3. *Steering* — the unit needs turn-by-turn correction mid-build; codex steering is coarser
@@ -121,7 +124,7 @@ Dispatch rules:
   different priors — that is the point.
 - **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
   implement fall back to a dev; exit 4/5 → note auth/timeout in `summary.md`, continue through
-  the risk-appropriate Claude fallback.
+  the risk-appropriate Claude fallback; exit 6 → model unavailable: retry with `--model sol|terra`.
 
 Codex runs inside your workdir under a workspace-write sandbox (reviews: read-only) and
 **never commits** — the same one-committer rule as your devs.
@@ -225,7 +228,7 @@ convention here. It is read-only, resumable (`codex-run resume ... --lane invest
 `codex-investigation.md`, and spends the Codex pool instead of the 5h session bucket that you
 and every sibling lead share. Add `--fast` (Luna) for a medium-depth question where you mostly
 need pointers rather than a full evidence chain. When Codex latency is the actual bottleneck and
-dispatch is `codex-first`, add `--fast-mode` to retain Sol while using the official Fast tier.
+dispatch is `codex-first`, add `--fast-mode` to retain Astra/Sol while using the official Fast tier.
 One `investigate` call that answers four
 questions beats four rounds of your own grepping.
 
@@ -324,7 +327,7 @@ unfamiliar to you before Phase A. Under `dispatch=codex-sparing`, fall back to t
 narrower bar — `RISK: critical` and architectural boundaries only.
 
 ```
-~/.claude/orchestra/bin/codex-run plan-review <workdir> <task-dir>          # sol @ high
+~/.claude/orchestra/bin/codex-run plan-review <workdir> <task-dir>          # astra (fallback sol) @ high
 ~/.claude/orchestra/bin/codex-run plan-review <workdir> <task-dir> --critical # critical: xhigh
 ~/.claude/orchestra/bin/codex-run plan-review <workdir> <task-dir> --fast   # luna, small tasks
 ```
@@ -342,7 +345,7 @@ exception.**
 **Codex lane (the normal case):**
 
 ```
-~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir>              # sol @ xhigh
+~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir>              # astra (fallback sol) @ xhigh
 ~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --lane <n>   # 2nd concurrent unit
 ~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --mech       # luna @ medium
 ~/.claude/orchestra/bin/codex-run implement <workdir> <task-dir> --escalate   # sol @ max
@@ -364,7 +367,8 @@ exception.**
   ~/.claude/orchestra/bin/codex-run resume <workdir> <task-dir> "<fix>" --lane <n>   # named lane
   ```
 
-- Exit codes 3/4/5 (quota/auth/timeout) → lane fallback rules above.
+- Exit codes 3/4/5/6 (quota/auth/timeout/model unavailable) → exit 6: retry with
+  `--model sol|terra`; otherwise use the lane fallback rules above.
 
 **Claude dev (exception lane)** — one `Agent` call per file-disjoint work unit, using a
 **distinct dev slot each time** (`dev-1`, then `dev-2`, then `dev-3`) so every dev has its own
@@ -418,8 +422,9 @@ Do not let any gate read `review.md`, another verdict, an implementation report,
 ~/.claude/orchestra/bin/codex-run review <workdir> <task-dir> --base <base-branch>
 ```
 
-`verify` is Terra@high and executes the contract from zero context; `review` is Sol@high and
-hunts semantic defects. Your own Opus/Sonnet diff review is the cross-provider opinion when Codex
+`verify` runs on the healthy default (Astra, else Terra)@high and executes the contract from zero
+context; `review` runs on (Astra, else Sol)@high and hunts semantic defects. Your own Opus/Sonnet diff
+review is the cross-provider opinion when Codex
 wrote the code. PASS requires `codex-verdict.md = PASS` and review CLEAR/NONBLOCKING-only.
 
 **Critical — add the Opus-max verifier and raise both Codex gates:**
@@ -435,8 +440,10 @@ three green. Fable exhaustion changes the lead to Opus but never weakens this ga
 **Fallbacks:**
 
 - `dispatch=codex-sparing` on low/normal → spawn `verifier-normal`, and run review `--fast`.
-- Codex verify exit 3/4/5 → `verifier-normal` for low/normal; existing Opus verifier for critical.
-- Codex review exit 3 → retry `--fast` once. Exit 4/5 is `unavailable`, never silently waived.
+- Codex verify exit 3/4/5/6 → exit 6: retry with `--model sol|terra`; otherwise use
+  `verifier-normal` for low/normal or the existing Opus verifier for critical.
+- Codex review exit 3 → retry `--fast` once. Exit 6 → retry with `--model sol|terra`.
+  Exit 4/5 is `unavailable`, never silently waived.
 - Docs-only or pure-config low-risk diffs may waive adversarial review, but executable verification
   still runs. Record the exact waiver reason.
 - Any FAIL/BLOCKING result is a failed round: fix it, then rerun the entire gate set for that risk.

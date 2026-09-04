@@ -2,7 +2,8 @@
 # codex-run — cc-orchestra's single entry point to the Codex CLI.
 #
 # Codex owns the token-heavy paths; intake is dispatched by Tier 1 and the rest by Tier 2:
-#   Tier 3 lane   implement / resume  — gpt-5.6-sol (or luna for mechanical bulk) writes code;
+#   Tier 3 lane   implement / resume  — healthy gpt-6-astra (Sol/Terra fallback when the account
+#                 lacks it; or luna for mechanical bulk) writes code;
 #                 implement is the DEFAULT lane for every unit (dev-* is the exception), and
 #                 --lane <name> allows a second concurrent unit per task
 #   Phase A aid   investigate — read-only root-cause / codebase analysis, so long evidence
@@ -16,6 +17,10 @@
 #     passes an explicit effort from model-policy.conf.
 #   - Sandbox mode, timeouts, artifact paths and thread-id capture stay uniform across leads,
 #     which is what keeps the .orchestra artifacts comparable between tasks.
+#   - CC_ORCH_CODEX_ROUTE (set by codex-run-runtime only on auto-routed calls) enables the Astra
+#     availability fallback only when the marker names the resolved model, without overriding an
+#     explicit model choice. Resume never falls back: it continues the recorded thread model; pass
+#     --model sol to move a thread.
 #   - Failure classes get distinct exit codes lead prompts can react to deterministically.
 #   - The dangerous flags (--dangerously-bypass-approvals-and-sandbox, danger-full-access)
 #     simply do not exist here.
@@ -48,7 +53,7 @@
 #   all              -> codex-<mode>[-<lane>].jsonl, .stderr.log
 #   .codex-session   -> "<lane>=<thread-id>" lines; resume reads these to continue a thread
 #
-# exit codes: 0 ok · 1 codex failed · 2 usage/setup · 3 quota/rate-limit · 4 auth · 5 timeout
+# exit codes: 0 ok · 1 codex failed · 2 usage/setup · 3 quota/rate-limit · 4 auth · 5 timeout · 6 model unavailable
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -57,6 +62,8 @@ GLOBAL_LOG="$STATE_DIR/codex.log"
 
 # shellcheck source=/dev/null
 . "$REPO_DIR/model-policy.conf"
+# shellcheck source=/dev/null
+. "$REPO_DIR/lib/codex-catalog.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -76,20 +83,21 @@ usage:
   --lane L    second concurrent implement thread in the same task (own artifact + thread)
   --critical  raise a review or verify run to the critical effort policy
   --fast      switch to the lower-cost Luna model/effort policy (legacy compatibility)
-  --fast-mode keep the resolved Sol/Terra model and opt this invocation into official Fast mode
-  models: sol=gpt-5.6-sol  luna=gpt-5.6-luna  terra=gpt-5.6-terra (or any full slug)
-  exit: 0 ok · 1 codex failed · 2 usage/setup · 3 quota · 4 auth · 5 timeout
+  --fast-mode keep the resolved Astra/Sol/Terra model and opt this invocation into official Fast mode
+  models: sol=gpt-5.6-sol  luna=gpt-5.6-luna  terra=gpt-5.6-terra  astra=gpt-6-astra (or any full slug)
+  exit: 0 ok · 1 codex failed · 2 usage/setup · 3 quota · 4 auth · 5 timeout · 6 model unavailable
 EOF
   exit 2
 }
 die() { echo "codex-run: $*" >&2; exit 2; }
 
 # --- model shortcuts ---------------------------------------------------------------------
-slug() { # sol|luna|terra|<full slug> -> full slug
+slug() { # sol|luna|terra|astra|<full slug> -> full slug
   case "$1" in
     sol)   echo "gpt-5.6-sol" ;;
     luna)  echo "gpt-5.6-luna" ;;
     terra) echo "gpt-5.6-terra" ;;
+    astra) echo "gpt-6-astra" ;;
     *)     echo "$1" ;;
   esac
 }
@@ -153,7 +161,7 @@ while [ $# -gt 0 ]; do
   shift || true
 done
 
-[ "$FAST_MODE" = "0" ] || [ "$FAST" = "0" ] || die "--fast (Luna) and --fast-mode (Sol/Terra Fast tier) cannot be combined"
+[ "$FAST_MODE" = "0" ] || [ "$FAST" = "0" ] || die "--fast (Luna) and --fast-mode (Astra/Sol/Terra Fast tier) cannot be combined"
 
 if [ "$CRITICAL" = "1" ]; then
   case "$MODE" in review|plan-review|verify) ;; *) die "--critical is only valid for review, plan-review, or verify" ;; esac
@@ -197,20 +205,71 @@ case "$MODE" in
   *) usage ;;
 esac
 
+case "${CC_ORCH_CODEX_ROUTE:-}" in
+  *":$MODEL@"*) AUTO_ROUTED=1 ;;
+  *) AUTO_ROUTED=0 ;;
+esac
+
 [ "$CRITICAL" = "1" ] && EFFORT="$CODEX_CRITICAL_EFFORT"
 
 if [ "$FAST_MODE" = "1" ]; then
   case "$MODEL" in
-    gpt-5.6-sol|gpt-5.6-terra) ;;
-    *) die "--fast-mode keeps a Sol/Terra model; resolved model is '$MODEL'" ;;
+    gpt-5.6-sol|gpt-5.6-terra|gpt-6-astra) ;;
+    *) die "--fast-mode keeps an Astra/Sol/Terra model; resolved model is '$MODEL'" ;;
   esac
 fi
 
 case "$EFFORT" in low|medium|high|xhigh|max|ultra) ;; *) die "invalid effort '$EFFORT'" ;; esac
 # luna tops out at max; and "ultra" auto-delegates inside Codex — Tier 2 owns decomposition,
 # so ultra never happens implicitly (a lead must type --effort ultra on explicit user request).
-if [ "$EFFORT" = "ultra" ] && [ "$MODEL" != "gpt-5.6-sol" ] && [ "$MODEL" != "gpt-5.6-terra" ]; then
-  die "effort 'ultra' is only supported by sol/terra (got $MODEL)"
+if [ "$EFFORT" = "ultra" ] && [ "$MODEL" != "gpt-5.6-sol" ] && [ "$MODEL" != "gpt-5.6-terra" ] && [ "$MODEL" != "gpt-6-astra" ]; then
+  die "effort 'ultra' is only supported by sol/terra/astra (got $MODEL)"
+fi
+
+# --- Astra catalog gate --------------------------------------------------------------------
+# gpt-6-astra is the healthy-tier default but is not on every account/CLI. The live/cached Codex
+# catalog decides; other models keep the open-ended contract (Codex itself rejects unknown slugs).
+# unknown = fail open; the run's own error is classified below and retried once when auto-routed.
+FALLBACK_NOTE=""
+astra_fallback_target() { # -> "model|effort" for an auto-routed mode, empty otherwise
+  [ "$AUTO_ROUTED" = 1 ] || return 0
+  case "$MODE" in
+    implement)          printf '%s|%s\n' "$CODEX_IMPL_MODEL" "$CODEX_IMPL_EFFORT" ;;
+    investigate)        printf '%s|%s\n' "$CODEX_INVESTIGATE_MODEL" "$CODEX_INVESTIGATE_EFFORT" ;;
+    intake)             printf '%s|%s\n' "$CODEX_INTAKE_MODEL" "$CODEX_INTAKE_EFFORT" ;;
+    review|plan-review) printf '%s|%s\n' "$CODEX_REVIEW_MODEL" "$CODEX_REVIEW_EFFORT" ;;
+    verify)             printf '%s|%s\n' "$CODEX_VERIFY_MODEL" "$CODEX_VERIFY_EFFORT" ;;
+  esac
+}
+use_astra_fallback() { # $1 reason; returns 1 when no fallback applies
+  local target
+  target="$(astra_fallback_target)"
+  [ -n "$target" ] && [ "${target%%|*}" != "$MODEL" ] || return 1
+  echo "CODEX-RUN: MODEL_FALLBACK — $MODEL $1; running $MODE on ${target%%|*}@${target#*|} instead" >&2
+  FALLBACK_NOTE="fallback-from:$MODEL"
+  MODEL="${target%%|*}"
+  EFFORT="${target#*|}"
+}
+if [ "$MODEL" = "gpt-6-astra" ]; then
+  probe="$(codex_catalog_probe "$MODEL")"
+  cat_state="$(printf '%s\n' "$probe" | sed -n 's/^state=//p')"
+  cat_efforts="$(printf '%s\n' "$probe" | sed -n 's/^efforts=//p')"
+  cat_fast="$(printf '%s\n' "$probe" | sed -n 's/^fast=//p')"
+  REASON=""
+  case "$cat_state" in
+    absent) REASON="is not in the Codex model catalog on this account/CLI" ;;
+    present)
+      case ",$cat_efforts," in *",$EFFORT,"*) ;; *) REASON="does not support effort '$EFFORT' per the Codex catalog" ;; esac
+      [ -n "$REASON" ] || [ "$FAST_MODE" = 0 ] || [ "$cat_fast" = 1 ] || REASON="does not support the official Fast tier per the Codex catalog (CC_ORCH_ALWAYS_FAST_MODE=0 disables the default)"
+      ;;
+  esac
+  if [ -n "$REASON" ] && ! use_astra_fallback "$REASON"; then
+    if [ "$cat_state" = absent ]; then
+      echo "CODEX-RUN: MODEL_UNAVAILABLE — $MODEL $REASON (catalog: $(codex_catalog_file); refresh with 'codex debug models'; pass --model sol|terra to run elsewhere)" >&2
+      exit 6
+    fi
+    die "$MODEL $REASON"
+  fi
 fi
 
 command -v codex >/dev/null 2>&1 || { echo "codex-run: codex CLI not on PATH" >&2; exit 4; }
@@ -407,19 +466,22 @@ case "$MODE" in implement|resume) [ "$LANE" != "implement" ] && RUN_TAG="$MODE-$
 EVENTS="$TASK_DIR/codex-$RUN_TAG.jsonl"
 STDERR="$TASK_DIR/codex-$RUN_TAG.stderr.log"
 
-CMD=(codex exec -C "$WORKDIR" --skip-git-repo-check
-     -m "$MODEL" -c "model_reasoning_effort=$EFFORT")
-if [ "$FAST_MODE" = "1" ]; then
-  CMD+=(-c "service_tier=\"$CODEX_FAST_MODE_SERVICE_TIER\"" -c "features.fast_mode=true")
-fi
-CMD+=(--json -o "$ARTIFACT")
-case "$MODE" in
-  implement|resume|verify) CMD+=(--sandbox workspace-write --add-dir "$TASK_DIR") ;;
-  *)                CMD+=(--sandbox read-only) ;;
-esac
-# subcommand LAST: exec-level flags are not accepted after `resume`
-[ "$MODE" = "resume" ] && CMD+=(resume "$TID")
-CMD+=("$PROMPT")
+build_cmd() {
+  CMD=(codex exec -C "$WORKDIR" --skip-git-repo-check
+       -m "$MODEL" -c "model_reasoning_effort=$EFFORT")
+  if [ "$FAST_MODE" = "1" ]; then
+    CMD+=(-c "service_tier=\"$CODEX_FAST_MODE_SERVICE_TIER\"" -c "features.fast_mode=true")
+  fi
+  CMD+=(--json -o "$ARTIFACT")
+  case "$MODE" in
+    implement|resume|verify) CMD+=(--sandbox workspace-write --add-dir "$TASK_DIR") ;;
+    *)                       CMD+=(--sandbox read-only) ;;
+  esac
+  # subcommand LAST: exec-level flags are not accepted after `resume`
+  [ "$MODE" = "resume" ] && CMD+=(resume "$TID")
+  CMD+=("$PROMPT")
+}
+build_cmd
 
 if [ "$DRY" = "1" ]; then
   printf 'would run (timeout %ss):\n  ' "$TIMEOUT"
@@ -433,9 +495,27 @@ fi
 # <stdin> block even when a prompt argument was given ("Reading additional input from stdin...")
 # — measured hang under the agent harness.
 mkdir -p "$STATE_DIR"
-START="$(date -Is)"
-timeout "$TIMEOUT" "${CMD[@]}" < /dev/null > "$EVENTS" 2> "$STDERR"
-RC=$?
+run_once() {
+  local start
+  start="$(date -Is)"
+  env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null > "$EVENTS" 2> "$STDERR"
+  RC=$?
+  MODEL_SPEC="$MODEL@$EFFORT"
+  [ "$FAST_MODE" = "1" ] && MODEL_SPEC="$MODEL_SPEC+fast-mode"
+  [ -z "$FALLBACK_NOTE" ] || MODEL_SPEC="$MODEL_SPEC ($FALLBACK_NOTE)"
+  printf '%s  %-11s  %s  exit=%s  %s\n' "$start" "$MODE" "$MODEL_SPEC" "$RC" "$WORKDIR" >> "$GLOBAL_LOG"
+}
+run_once
+
+# Observed on codex-cli 0.153.2 for a model the account cannot use: HTTP 400 invalid_request_error.
+# The "Model metadata ... not found" warning alone is NOT decisive and must not be matched.
+model_unavailable_signature() { printf '%s' "$1" | grep -qE "The '[^']+' model is not supported"; }
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$MODEL" = "gpt-6-astra" ] \
+   && model_unavailable_signature "$(tail -c 4000 "$STDERR"; tail -c 4000 "$EVENTS")" \
+   && use_astra_fallback "was rejected by Codex as unavailable on this account/CLI (exit $RC)"; then
+  build_cmd
+  run_once
+fi
 
 # Record "<lane>=<thread-id>|<model>|<effort>" so follow-ups resume with full context on the
 # same model (SendMessage's equivalent). A resume updates its lane's model/effort in place —
@@ -455,10 +535,6 @@ if [ -n "$TID_NEW" ]; then
   flock -u 8
 fi
 
-MODEL_SPEC="$MODEL@$EFFORT"
-[ "$FAST_MODE" = "1" ] && MODEL_SPEC="$MODEL_SPEC+fast-mode"
-printf '%s  %-11s  %s  exit=%s  %s\n' "$START" "$MODE" "$MODEL_SPEC" "$RC" "$WORKDIR" >> "$GLOBAL_LOG"
-
 # --- classify ----------------------------------------------------------------------------
 if [ "$RC" -eq 124 ]; then
   echo "CODEX-RUN: TIMEOUT after ${TIMEOUT}s ($MODE, $MODEL_SPEC)" >&2
@@ -474,6 +550,11 @@ if [ "$RC" -ne 0 ]; then
   if printf '%s' "$ERRTEXT" | grep -qiE 'unauthorized|not logged in|login required|401|invalid.*token'; then
     echo "CODEX-RUN: AUTH_ERROR — 'codex login' needed on this machine; continue Claude-only" >&2
     exit 4
+  fi
+  if model_unavailable_signature "$ERRTEXT"; then
+    echo "CODEX-RUN: MODEL_UNAVAILABLE — '$MODEL' was rejected by Codex as unavailable on this account/CLI (exit $RC); pass --model sol|terra" >&2
+    tail -3 "$STDERR" >&2
+    exit 6
   fi
   echo "CODEX-RUN: FAILED (exit $RC) — stderr tail:" >&2
   tail -5 "$STDERR" >&2

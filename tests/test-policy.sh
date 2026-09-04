@@ -11,8 +11,9 @@ ok() { echo "ok $((++pass)) - $*"; }
 field() { sed -n "s/^$2: //p" "$1" | head -1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
 assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
+assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
 
-for script in "$ROOT/build-roster.sh" "$ROOT/install.sh" "$ROOT/bin/cc-orch" "$ROOT/bin/codex-run" "$ROOT/bin/orch-model-guard" "$ROOT/bin/orch-policy-rev" "$ROOT/bin/orch-summary-check" "$ROOT/bin/orch-usage-report" "$ROOT/hooks/orch-model-notice.sh"
+for script in "$ROOT/build-roster.sh" "$ROOT/install.sh" "$ROOT/bin/cc-orch" "$ROOT/bin/codex-run" "$ROOT/bin/codex-run-runtime" "$ROOT/bin/orch-model-guard" "$ROOT/bin/orch-policy-rev" "$ROOT/bin/orch-summary-check" "$ROOT/bin/orch-usage-report" "$ROOT/hooks/orch-model-notice.sh" "$ROOT/lib/codex-catalog.sh"
 do
   bash -n "$script"
 done
@@ -132,6 +133,201 @@ if run_dry investigate "$WORK" "$TASK" "find the owner" --model luna --fast-mode
   fail "--fast-mode with Luna should be rejected"
 fi
 ok "Codex mode model, effort, sandbox, and flag policy"
+
+CAT_ASTRA="$TMP/cat-astra"
+CAT_NOASTRA="$TMP/cat-noastra"
+CAT_LIMITED="$TMP/cat-limited"
+mkdir -p "$CAT_ASTRA" "$CAT_NOASTRA" "$CAT_LIMITED"
+cat > "$CAT_ASTRA/models_cache.json" <<'JSON'
+{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}],"additional_speed_tiers":["fast"]}]}
+JSON
+cat > "$CAT_NOASTRA/models_cache.json" <<'JSON'
+{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}],"additional_speed_tiers":["fast"]}]}
+JSON
+cat > "$CAT_LIMITED/models_cache.json" <<'JSON'
+{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}],"additional_speed_tiers":[]}]}
+JSON
+
+run_astra_dry() {
+  local catalog="$1" route="$2"
+  shift 2
+  PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" CODEX_HOME="$catalog" \
+    CC_ORCH_CODEX_ROUTE="$route" "$ROOT/bin/codex-run" "$@" --model astra --dry-run 2>&1
+}
+
+out="$(run_astra_dry "$CAT_ASTRA" "" implement "$WORK" "$TASK" --fast-mode)"
+assert_has "$out" "gpt-6-astra" "explicit Astra alias"
+assert_has "$out" "service_tier=" "explicit Astra Fast service tier"
+assert_has "$out" "features.fast_mode=true" "explicit Astra Fast feature"
+out="$(run_astra_dry "$CAT_ASTRA" "" implement "$WORK" "$TASK" --effort ultra)"
+assert_has "$out" "model_reasoning_effort=ultra" "catalog-supported Astra ultra"
+
+set +e
+out="$(run_astra_dry "$CAT_NOASTRA" "" implement "$WORK" "$TASK")"
+rc=$?
+set -e
+assert_eq "$rc" "6" "explicit unavailable Astra exit"
+assert_has "$out" "MODEL_UNAVAILABLE" "explicit unavailable Astra classification"
+assert_has "$out" "gpt-6-astra" "explicit unavailable Astra name"
+assert_not_has "$out" "CODEX-RUN: FAILED" "explicit unavailable Astra is specific"
+assert_not_has "$out" "MODEL_FALLBACK" "explicit unavailable Astra is not substituted"
+
+set +e
+out="$(run_astra_dry "$CAT_NOASTRA" "healthy:gpt-5.6-sol@xhigh" implement "$WORK" "$TASK")"
+rc=$?
+set -e
+assert_eq "$rc" "6" "marker for another model is not an Astra auto-route"
+assert_has "$out" "MODEL_UNAVAILABLE" "mismatched marker keeps explicit Astra classification"
+assert_not_has "$out" "MODEL_FALLBACK" "mismatched marker cannot enable Astra fallback"
+
+for mode in implement investigate intake review plan-review verify; do
+  case "$mode" in
+    implement) args=(implement "$WORK" "$TASK"); fallback="gpt-5.6-sol"; effort="xhigh" ;;
+    investigate) args=(investigate "$WORK" "$TASK" "q"); fallback="gpt-5.6-sol"; effort="high" ;;
+    intake) args=(intake "$WORK" "$TASK" "g"); fallback="gpt-5.6-terra"; effort="high" ;;
+    review) args=(review "$WORK" "$TASK" --base main); fallback="gpt-5.6-sol"; effort="high" ;;
+    plan-review) args=(plan-review "$WORK" "$TASK"); fallback="gpt-5.6-sol"; effort="high" ;;
+    verify) args=(verify "$WORK" "$TASK"); fallback="gpt-5.6-terra"; effort="high" ;;
+  esac
+  out="$(run_astra_dry "$CAT_NOASTRA" "healthy:gpt-6-astra@$effort" "${args[@]}")"
+  assert_has "$out" "MODEL_FALLBACK" "$mode unavailable Astra fallback warning"
+  assert_has "$out" "gpt-6-astra" "$mode unavailable Astra source"
+  assert_has "$out" "$fallback" "$mode lane fallback model"
+  assert_has "$out" "model_reasoning_effort=$effort" "$mode lane fallback effort"
+done
+
+set +e
+out="$(run_astra_dry "$CAT_LIMITED" "" implement "$WORK" "$TASK" --effort ultra)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "limited Astra ultra should be rejected"
+assert_has "$out" "ultra" "limited Astra effort error"
+set +e
+out="$(run_astra_dry "$CAT_LIMITED" "" investigate "$WORK" "$TASK" "q" --fast-mode)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "limited Astra Fast should be rejected"
+assert_has "$out" "Fast" "limited Astra Fast error"
+out="$(run_astra_dry "$CAT_LIMITED" "healthy:gpt-6-astra@xhigh+fast-mode" implement "$WORK" "$TASK" --fast-mode)"
+assert_has "$out" "gpt-5.6-sol" "limited Astra auto fallback model"
+assert_has "$out" "MODEL_FALLBACK" "limited Astra auto fallback warning"
+assert_has "$out" "service_tier=" "limited Astra fallback preserves Fast"
+
+out="$(run_astra_dry "$TMP/no-codex-home" "" implement "$WORK" "$TASK")"
+assert_has "$out" "gpt-6-astra" "missing catalog fails open explicitly"
+assert_not_has "$out" "MODEL_FALLBACK" "missing catalog has no preflight fallback"
+out="$(run_astra_dry "$TMP/no-codex-home" "healthy:gpt-6-astra@xhigh" implement "$WORK" "$TASK")"
+assert_has "$out" "gpt-6-astra" "missing catalog fails open automatically"
+assert_not_has "$out" "MODEL_FALLBACK" "missing catalog auto path has no preflight fallback"
+
+out="$(CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK")"
+assert_has "$out" "gpt-5.6-sol" "plain core default remains Sol"
+if CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK" --model luna --fast-mode >/dev/null 2>&1; then
+  fail "--fast-mode with Luna should remain rejected"
+fi
+if CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK" --model luna --effort ultra >/dev/null 2>&1; then
+  fail "ultra with Luna should remain rejected"
+fi
+out="$(CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK" --model gpt-5.5)"
+assert_has "$out" "gpt-5.5" "catalog gate does not apply to other full slugs"
+usage_out="$("$ROOT/bin/codex-run" 2>&1 || true)"
+assert_has "$usage_out" "astra=gpt-6-astra" "usage lists Astra alias"
+assert_has "$usage_out" "6 model unavailable" "usage lists model-unavailable exit"
+ok "Astra catalog gate and per-lane fallback policy"
+
+HOME_E2E="$TMP/home-e2e"
+STATE_E2E="$TMP/state-e2e"
+mkdir -p "$HOME_E2E" "$STATE_E2E"
+run_facade_dry() {
+  local catalog="$1"
+  shift
+  PATH="$FAKEBIN:$PATH" HOME="$HOME_E2E" CC_ORCH_STATE_DIR="$STATE_E2E" \
+    CODEX_HOME="$catalog" CC_ORCH_CODEX_ROUTE= "$ROOT/bin/codex-run-runtime" "$@" --dry-run 2>&1
+}
+
+for catalog in "$CAT_NOASTRA" "$CAT_ASTRA"; do
+  for mode in implement investigate intake review plan-review verify; do
+    case "$mode" in
+      implement) args=(implement "$WORK" "$TASK"); fallback="gpt-5.6-sol" ;;
+      investigate) args=(investigate "$WORK" "$TASK" "q"); fallback="gpt-5.6-sol" ;;
+      intake) args=(intake "$WORK" "$TASK" "g"); fallback="gpt-5.6-terra" ;;
+      review) args=(review "$WORK" "$TASK" --base main); fallback="gpt-5.6-sol" ;;
+      plan-review) args=(plan-review "$WORK" "$TASK"); fallback="gpt-5.6-sol" ;;
+      verify) args=(verify "$WORK" "$TASK"); fallback="gpt-5.6-terra" ;;
+    esac
+    out="$(run_facade_dry "$catalog" "${args[@]}")"
+    assert_has "$out" "service_tier=" "$mode facade preserves Fast"
+    if [ "$catalog" = "$CAT_NOASTRA" ]; then
+      assert_has "$out" "MODEL_FALLBACK" "$mode facade unavailable warning"
+      assert_has "$out" "$fallback" "$mode facade fallback model"
+    else
+      assert_has "$out" "gpt-6-astra" "$mode facade healthy Astra model"
+      assert_not_has "$out" "MODEL_FALLBACK" "$mode facade available Astra has no fallback"
+    fi
+  done
+done
+
+set +e
+out="$(run_facade_dry "$CAT_NOASTRA" review "$WORK" "$TASK" --base main --model astra)"
+rc=$?
+set -e
+assert_eq "$rc" "6" "facade explicit unavailable Astra exit"
+assert_has "$out" "MODEL_UNAVAILABLE" "facade explicit unavailable Astra classification"
+ok "Astra runtime facade routing and fallback"
+
+FAKEBIN_LIVE="$TMP/fakebin-live"
+mkdir -p "$FAKEBIN_LIVE"
+cat > "$FAKEBIN_LIVE/codex" <<'EOF'
+#!/usr/bin/env bash
+model="" output=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m) shift; model="${1:-}" ;;
+    -o) shift; output="${1:-}" ;;
+  esac
+  shift || true
+done
+if [ "$model" = "gpt-6-astra" ]; then
+  printf '%s\n' 'warning: Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; ...' >&2
+  printf '%s\n' 'ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The '\''gpt-6-astra'\'' model is not supported when using Codex with a ChatGPT account."}}' >&2
+  exit 1
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}'
+printf 'ok\nroute=%s\n' "${CC_ORCH_CODEX_ROUTE-unset}" > "$output"
+EOF
+chmod +x "$FAKEBIN_LIVE/codex"
+
+STATE_LIVE="$TMP/state-live"
+out="$(PATH="$FAKEBIN_LIVE:$PATH" HOME="$HOME_E2E" CC_ORCH_STATE_DIR="$STATE_LIVE" \
+  CODEX_HOME="$TMP/no-codex-home" CC_ORCH_CODEX_ROUTE= \
+  "$ROOT/bin/codex-run-runtime" implement "$WORK" "$TASK" 2>&1)"
+assert_has "$out" "MODEL_FALLBACK" "live Codex rejection triggers auto fallback"
+[ -s "$TASK/impl-report-codex.md" ] || fail "live fallback did not create implementation report"
+assert_has "$(cat "$TASK/impl-report-codex.md")" "route=unset" "live fallback child does not inherit route marker"
+session="$(sed -n 's/^implement=//p' "$TASK/.codex-session")"
+case "$session" in *'|gpt-5.6-sol|xhigh') ;; *) fail "live fallback session has '$session'" ;; esac
+assert_eq "$(wc -l < "$STATE_LIVE/codex.log" | tr -d ' ')" "2" "live fallback attempt log count"
+first_log="$(sed -n '1p' "$STATE_LIVE/codex.log")"
+second_log="$(sed -n '2p' "$STATE_LIVE/codex.log")"
+assert_has "$first_log" "gpt-6-astra" "live first attempt model"
+assert_has "$first_log" "exit=1" "live first attempt exit"
+assert_has "$second_log" "exit=0" "live fallback attempt exit"
+assert_has "$second_log" "fallback-from:gpt-6-astra" "live fallback log marker"
+
+set +e
+out="$(PATH="$FAKEBIN_LIVE:$PATH" CC_ORCH_STATE_DIR="$TMP/state-live-explicit" \
+  CODEX_HOME="$TMP/no-codex-home" CC_ORCH_CODEX_ROUTE= \
+  "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model astra 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "6" "live explicit unavailable Astra exit"
+assert_has "$out" "MODEL_UNAVAILABLE" "live explicit unavailable Astra classification"
+assert_not_has "$out" "CODEX-RUN: FAILED" "live explicit unavailable Astra is specific"
+out="$(PATH="$FAKEBIN_LIVE:$PATH" CC_ORCH_STATE_DIR="$TMP/state-live-sol" \
+  CODEX_HOME="$TMP/no-codex-home" CC_ORCH_CODEX_ROUTE= \
+  "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model sol 2>&1)"
+assert_has "$out" "codex-run: implement done" "live fake Codex fallback-model sanity"
+ok "live unavailable-model retry and explicit classification"
 
 cat > "$TASK/summary.md" <<'EOF'
 [lead-alpha] STATUS: PASS
