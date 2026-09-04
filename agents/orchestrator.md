@@ -277,16 +277,18 @@ un-merged `orch/*` branch is somebody's only copy of that work.
 
 ## Model tiering
 
-Two providers, four tiers. The source of truth for slugs and efforts is
-`~/.claude/orchestra/model-policy.conf` — read that file rather than trusting this paragraph
-when they disagree.
+Two providers, four tiers. The sources of truth for slugs and efforts are
+`~/.claude/orchestra/model-policy.conf` for plain defaults/fallbacks and
+`~/.claude/orchestra/budget-policy.conf` for pressure routing — read those files rather than
+trusting this paragraph when they disagree.
 
 - **Tier 1**: normal orchestrator Sonnet @ high. It owns intent, scope, acceptance and routing,
   not implementation design. `codex-run intake` handles substantive repo mapping.
 - **Tier 2**: low Sonnet@medium; normal Opus@high; critical Fable@high; deep critical
   Fable@xhigh. The lead verifies Codex evidence and is the final design/plan/diff owner. When
   Fable reaches the guard threshold, every lead profile and new orchestrator falls back to Opus.
-- **Tier 3**: codex lanes gpt-5.6-sol @ xhigh / luna @ medium via `bin/codex-run` are the
+- **Tier 3**: codex lanes gpt-6-astra @ xhigh (healthy default, Fast; auto-fallback
+  gpt-5.6-sol when the account lacks Astra) / luna @ medium via `bin/codex-run` are the
   **default** implementation lane; `dev-*` on Sonnet @ high handles fallback, large context,
   tight steering, GPU and codex-sparing exceptions, while `dev-opus-*` is fresh-eyes rescue — every
   Claude call drains the shared 5h session bucket, codex spends its own pool. The **lead**

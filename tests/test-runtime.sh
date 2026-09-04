@@ -9,12 +9,14 @@ ok() { echo "ok $((++pass)) - $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
+assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
 
 for script in \
   "$ROOT/install.sh" "$ROOT/build-roster-runtime.sh" "$ROOT/bin/cc-orch-runtime" \
   "$ROOT/bin/cc-orch-session" "$ROOT/bin/codex-run-runtime" \
   "$ROOT/bin/orch-model-guard-runtime" "$ROOT/bin/orch-policy-rev" \
-  "$ROOT/hooks/orch-runtime-context.sh" "$ROOT/hooks/orch-statusline.sh"
+  "$ROOT/hooks/orch-runtime-context.sh" "$ROOT/hooks/orch-statusline.sh" \
+  "$ROOT/lib/codex-catalog.sh"
 do
   bash -n "$script"
 done
@@ -119,6 +121,7 @@ route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex implement)"
 assert_has "$route" "allow=1" "tight Codex implementation remains available"
 assert_has "$route" "model=gpt-5.6-terra" "tight implementation model"
+assert_not_has "$route" "gpt-6-astra" "tight implementation route unchanged"
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex review)"
 assert_has "$route" "model=gpt-5.6-terra" "tight gate model"
@@ -126,7 +129,7 @@ ok "Codex weekly reset-aware provider and model routing"
 
 cat > "$HARNESS/bin/codex-run" <<'CORE'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > "${TEST_ARGS:?}"
+printf '%s\n' "$*" "route=${CC_ORCH_CODEX_ROUTE:-}" > "${TEST_ARGS:?}"
 CORE
 chmod +x "$HARNESS/bin/codex-run"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
@@ -135,13 +138,14 @@ TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
 args_out="$(cat "$TMP/codex-args")"
 assert_has "$args_out" "--model gpt-5.6-terra --effort high" "auto-routed tight implementation"
 assert_has "$args_out" "--fast-mode" "Fast mode default on auto implementation"
+assert_not_has "$args_out" "gpt-6-astra" "tight facade route unchanged"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" CODEX_HOME="$CODEX_HOME_DIR" \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --dry-run
 args_out="$(cat "$TMP/codex-args")"
 assert_has "$args_out" "--model gpt-5.6-terra --effort high" "auto-routed Codex review args"
 assert_has "$args_out" "--fast-mode" "Fast mode default on auto review"
-TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_CODEX_ROUTE= \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --model sol --dry-run
 args_out="$(cat "$TMP/codex-args")"
 assert_has "$args_out" "--model sol" "explicit Codex model wins"
@@ -167,6 +171,54 @@ route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex implement)"
 assert_has "$route" "allow=0" "critical implementation withheld"
 ok "critical Codex reserve remains intact"
+
+# Advancing past the refresh interval and lowering usage exercises the new healthy Astra rung.
+NOW3=$((NOW2+120))
+cat > "$CODEX_HOME_DIR/sessions/$DAY/rollout-test.jsonl" <<EOF2
+{"event":{"rate_limits":{"primary":{"used_percent":10,"window_minutes":10080,"resets_at":$((NOW+518400))}}}}
+EOF2
+touch -d "@$NOW3" "$CODEX_HOME_DIR/sessions/$DAY/rollout-test.jsonl"
+
+for mode in implement investigate intake review plan-review verify; do
+  route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW3" \
+    CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex "$mode")"
+  assert_has "$route" "model=gpt-6-astra" "healthy $mode route model"
+  if [ "$mode" = implement ]; then effort="xhigh"; else effort="high"; fi
+  assert_has "$route" "effort=$effort" "healthy $mode route effort"
+
+  case "$mode" in
+    implement) args=(implement "$TMP" "$TMP" --dry-run) ;;
+    investigate) args=(investigate "$TMP" "$TMP" "q" --dry-run) ;;
+    intake) args=(intake "$TMP" "$TMP" "g" --dry-run) ;;
+    review) args=(review "$TMP" "$TMP" --dry-run) ;;
+    plan-review) args=(plan-review "$TMP" "$TMP" --dry-run) ;;
+    verify) args=(verify "$TMP" "$TMP" --dry-run) ;;
+  esac
+  TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+    CC_ORCH_NOW_EPOCH="$NOW3" CODEX_HOME="$CODEX_HOME_DIR" \
+    "$HARNESS/bin/codex-run-runtime" "${args[@]}"
+  args_out="$(cat "$TMP/codex-args")"
+  assert_has "$args_out" "--model gpt-6-astra --effort $effort" "healthy $mode facade args"
+  assert_has "$args_out" "--fast-mode" "healthy $mode Fast default"
+  assert_has "$args_out" "route=healthy:gpt-6-astra@$effort+fast-mode" "healthy $mode route marker"
+done
+
+TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+  CC_ORCH_NOW_EPOCH="$NOW3" CODEX_HOME="$CODEX_HOME_DIR" \
+  CC_ORCH_CODEX_ROUTE=healthy:gpt-6-astra@xhigh \
+  "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --model sol --dry-run
+args_out="$(cat "$TMP/codex-args")"
+assert_has "$args_out" "--model sol" "explicit healthy Codex model wins"
+assert_has "$args_out" "--fast-mode" "explicit healthy Sol gets Fast default"
+assert_eq "$(tail -1 "$TMP/codex-args")" "route=" "explicit path has no auto marker"
+
+TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+  CC_ORCH_NOW_EPOCH="$NOW3" CODEX_HOME="$CODEX_HOME_DIR" CC_ORCH_CODEX_ROUTE= \
+  "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --mech --dry-run
+args_out="$(cat "$TMP/codex-args")"
+assert_not_has "$args_out" "--fast-mode" "healthy mechanical path has no Fast mode"
+assert_not_has "$args_out" "gpt-6-astra" "healthy mechanical path has no Astra"
+ok "healthy Codex Astra routing and explicit marker isolation"
 
 cat > "$HARNESS/bin/cc-orch" <<'CORE'
 #!/usr/bin/env bash

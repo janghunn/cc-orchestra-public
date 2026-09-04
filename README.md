@@ -9,7 +9,7 @@ Claude Code를 제어 계층으로, Codex를 조사·구현·검증의 기본 �
   │
   ▼
 orchestrator             Sonnet @ high       의도·범위·분해·배정·보고
-  └─ codex-run intake    Terra @ high        brief 전 코드/테스트 지도 작성
+  └─ codex-run intake    Astra @ high        brief 전 코드/테스트 지도 작성 (Terra 폴백)
   │
   ▼
 lead-<slot>              Opus @ high         일반 작업의 최종 설계·계획·diff 책임자
@@ -18,15 +18,15 @@ lead-<slot>              Opus @ high         일반 작업의 최종 설계·계
   └─ critical-xhigh      Fable @ xhigh       명시적으로 깊은 추론이 필요한 고위험
   │
   ├─ 조사
-  │   └─ Codex Sol @ high
+  │   └─ Codex Astra @ high                 (Sol 폴백)
   ├─ 구현
-  │   ├─ Codex Sol @ xhigh                  기본
+  │   ├─ Codex Astra @ xhigh                기본 (Sol 폴백)
   │   ├─ Codex Luna @ medium                기계적 변경
   │   ├─ Claude Sonnet dev-* @ high         명시적 예외
   │   └─ Claude Opus dev-opus-* @ high      Codex 반복 실패 후 fresh eyes
   └─ 검증
-      ├─ Codex Terra verify @ high           실행 검증
-      ├─ Codex Sol review @ high             의미·회귀 리뷰
+      ├─ Codex Astra verify @ high           실행 검증 (Terra 폴백)
+      ├─ Codex Astra review @ high           의미·회귀 리뷰 (Sol 폴백)
       └─ Claude Opus verifier @ max          critical에 추가
 ```
 
@@ -36,7 +36,8 @@ orchestrator도 구현 설계를 하지 않고 사용자 의도, 범위, 인수 
 
 ## 정책 요약
 
-모델·effort의 단일 소스는 `model-policy.conf`다.
+모델·effort의 단일 소스는 `model-policy.conf`(고정 기본값·폴백)와
+`budget-policy.conf`(quota 압력별 Codex 라우팅, healthy = Astra)다.
 
 | 역할/프로필 | 모델 | effort | 용도 |
 |---|---|---:|---|
@@ -54,16 +55,23 @@ Codex 정책:
 
 | 모드 | 모델 | effort |
 |---|---|---:|
-| `intake` | `gpt-5.6-terra` | high |
-| `investigate` | `gpt-5.6-sol` | high |
-| `implement` | `gpt-5.6-sol` | xhigh |
+| `intake` | `gpt-6-astra` (폴백 `gpt-5.6-terra`) | high |
+| `investigate` | `gpt-6-astra` (폴백 `gpt-5.6-sol`) | high |
+| `implement` | `gpt-6-astra` (폴백 `gpt-5.6-sol`) | xhigh |
 | `implement --mech` | `gpt-5.6-luna` | medium |
-| `review`, `plan-review` | `gpt-5.6-sol` | high |
-| `verify` | `gpt-5.6-terra` | high |
+| `review`, `plan-review` | `gpt-6-astra` (폴백 `gpt-5.6-sol`) | high |
+| `verify` | `gpt-6-astra` (폴백 `gpt-5.6-terra`) | high |
 | review/verify `--critical` | 해당 기본 모델 | xhigh |
 | failed implementation `--escalate` | 해당 모델 | max |
 
-`--fast-mode`는 선택된 Sol/Terra와 effort를 그대로 유지하면서 해당 호출만 공식 Fast service
+healthy 상태에서는 Astra와 Fast mode가 기본이다. 계정/CLI별 가용성은 bundled 목록이 아니라
+`~/.codex/models_cache.json`의 live catalog로 확인한다. 자동 라우팅 호출에서 Astra가 없거나
+요청 effort/Fast tier를 지원하지 않으면 lane별 Sol/Terra 기본값으로 폴백하고
+`CODEX-RUN: MODEL_FALLBACK`을 출력한다. 명시적 `--model astra`는 대체하지 않고
+`CODEX-RUN: MODEL_UNAVAILABLE`과 exit 6으로 종료한다. watch/tight/critical 경로는 그대로이며,
+`CC_ORCH_CODEX_CATALOG_CHECK=0`은 사전 catalog 검사를 끈다.
+
+`--fast-mode`는 선택된 Astra/Sol/Terra와 effort를 그대로 유지하면서 해당 호출만 공식 Fast service
 tier로 실행한다. 공식 안내 기준으로 지원 모델의 처리 속도는 약 1.5배지만 크레딧은 Standard의
 2.5배이므로 지연 시간이 중요한 `codex-first` 호출에만 명시적으로 사용하고,
 `codex-sparing`에서는 사용하지 않는다. 기존 `--fast`는 공식 Fast mode가 아니라 Luna@high로
@@ -230,8 +238,8 @@ codex-run review      <workdir> <task-dir> --base <branch> [--critical]
 codex-run status      <task-dir>
 ```
 
-모델 호출 모드는 `--model`, `--effort`, `--fast`, `--fast-mode`, `--dry-run`을 지원한다.
-`--fast-mode`는 Sol/Terra를 유지하며 호출별로 공식 Fast tier를 켜고 `--critical`과 함께 쓸 수
+모델 호출 모드는 `--model astra`, `--model <slug>`, `--effort`, `--fast`, `--fast-mode`, `--dry-run`을 지원한다.
+`--fast-mode`는 Astra/Sol/Terra를 유지하며 호출별로 공식 Fast tier를 켜고 `--critical`과 함께 쓸 수
 있다. Luna로 낮추는 `--fast`/`--mech` 또는 `--model luna`와는 함께 쓸 수 없다. `--critical`은
 review/plan-review/verify에만 유효하고 기존 `--fast`와 동시에 쓸 수 없다. 구현은
 workspace-write, intake/investigate/review/plan-review는 read-only sandbox다. verify는 테스트가
