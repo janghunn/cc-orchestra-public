@@ -287,6 +287,11 @@ while [ $# -gt 0 ]; do
   esac
   shift || true
 done
+if [ "${FAKE_CODEX_ERROR_STYLE:-not-supported}" = stray-substring ]; then
+  printf '%s\n' 'tool output mentioning model_not_found in an unrelated log line' >&2
+  printf '%s\n' 'ERROR: stream disconnected' >&2
+  exit 1
+fi
 if [ "$model" = "gpt-6-astra" ]; then
   printf '%s\n' 'warning: Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; ...' >&2
   case "${FAKE_CODEX_ERROR_STYLE:-not-supported}" in
@@ -297,6 +302,12 @@ if [ "$model" = "gpt-6-astra" ]; then
       printf '%s\n' 'ERROR: {"type":"error","status":404,"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model `gpt-6-astra` does not exist or you do not have access to it."}}' >&2
       ;;
     warning-only)
+      printf '%s\n' 'ERROR: stream disconnected' >&2
+      ;;
+    embedded-test-output)
+      cat <<'JSON'
+{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"ERROR: {\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.\"}}"}}
+JSON
       printf '%s\n' 'ERROR: stream disconnected' >&2
       ;;
     not-supported|*)
@@ -375,6 +386,38 @@ rc=$?
 set -e
 assert_eq "$rc" "1" "warning-only auto failure is not retried"
 assert_not_has "$out" "MODEL_FALLBACK" "metadata warning alone cannot trigger fallback"
+
+set +e
+out="$(FAKE_CODEX_ERROR_STYLE=stray-substring PATH="$FAKEBIN_LIVE:$PATH" \
+  CC_ORCH_STATE_DIR="$TMP/state-live-stray-sol" CODEX_HOME="$TMP/no-codex-home" \
+  CC_ORCH_CODEX_ROUTE= "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model sol 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "1" "stray model_not_found substring stays generic"
+assert_has "$out" "CODEX-RUN: FAILED" "stray model_not_found failure classification"
+assert_not_has "$out" "MODEL_UNAVAILABLE" "stray model_not_found is not model unavailable"
+
+set +e
+out="$(FAKE_CODEX_ERROR_STYLE=embedded-test-output PATH="$FAKEBIN_LIVE:$PATH" HOME="$HOME_E2E" \
+  CC_ORCH_STATE_DIR="$TMP/state-live-embedded-auto" CODEX_HOME="$TMP/no-codex-home" \
+  CC_ORCH_CODEX_ROUTE= "$ROOT/bin/codex-run-runtime" implement "$WORK" "$TASK" 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "1" "embedded test output is not retried"
+assert_not_has "$out" "MODEL_FALLBACK" "embedded test output cannot trigger fallback"
+assert_eq "$(wc -l < "$TMP/state-live-embedded-auto/codex.log" | tr -d ' ')" "1" "embedded test output attempt log count"
+
+EMPTYBIN="$TMP/emptybin"
+mkdir -p "$EMPTYBIN"
+set +e
+out="$(PATH="$EMPTYBIN:/usr/bin:/bin" CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= \
+  "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model astra 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "4" "missing Codex CLI precedes unavailable catalog"
+assert_has "$out" "codex CLI not on PATH" "missing Codex CLI classification"
+assert_not_has "$out" "MODEL_UNAVAILABLE" "missing CLI is not catalog exit 6"
+
 out="$(PATH="$FAKEBIN_LIVE:$PATH" CC_ORCH_STATE_DIR="$TMP/state-live-sol" \
   CODEX_HOME="$TMP/no-codex-home" CC_ORCH_CODEX_ROUTE= \
   "$ROOT/bin/codex-run" implement "$WORK" "$TASK" --model sol 2>&1)"

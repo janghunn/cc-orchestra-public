@@ -226,6 +226,8 @@ if [ "$EFFORT" = "ultra" ] && [ "$MODEL" != "gpt-5.6-sol" ] && [ "$MODEL" != "gp
   die "effort 'ultra' is only supported by sol/terra/astra (got $MODEL)"
 fi
 
+command -v codex >/dev/null 2>&1 || { echo "codex-run: codex CLI not on PATH" >&2; exit 4; }
+
 # --- Astra catalog gate --------------------------------------------------------------------
 # gpt-6-astra is the healthy-tier default but is not on every account/CLI. The live/cached Codex
 # catalog decides; other models keep the open-ended contract (Codex itself rejects unknown slugs).
@@ -271,8 +273,6 @@ if [ "$MODEL" = "gpt-6-astra" ]; then
     die "$MODEL $REASON"
   fi
 fi
-
-command -v codex >/dev/null 2>&1 || { echo "codex-run: codex CLI not on PATH" >&2; exit 4; }
 
 # --- per-mode prompt and artifact --------------------------------------------------------
 SPEC="$TASK_DIR/plan.md"; BRIEF="$TASK_DIR/brief.md"
@@ -509,10 +509,13 @@ run_once
 
 # Observed on codex-cli 0.153.2 for a model the account cannot use: HTTP 400 invalid_request_error
 # with "The '<model>' model is not supported". Also accept documented "This model is not supported",
-# "does not exist or you do not have access", and model_not_found variants. The "Model metadata ...
-# not found" warning alone is NOT decisive and must not be matched.
+# "does not exist or you do not have access", and structured model_not_found variants. JSON-escaped
+# test output embedded in agent/tool events cannot match: the anchors and unescaped quotes require a
+# top-level error record. The "Model metadata ... not found" warning alone is NOT decisive.
 model_unavailable_signature() {
-  printf '%s' "$1" | grep -qiE "The '[^']+' model is not supported|This model is not supported|The model .{1,80} does not exist or you do not have access to it|\"code\":[[:space:]]*\"model_not_found\"|model_not_found"
+  printf '%s\n' "$1" \
+    | grep -E '^(ERROR:|\{"type":"error")' \
+    | grep -qE "The '[^']+' model is not supported|This model is not supported|The model .{1,80} does not exist or you do not have access to it|\"code\":[[:space:]]*\"model_not_found\""
 }
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$MODEL" = "gpt-6-astra" ] \
    && model_unavailable_signature "$(tail -c 4000 "$STDERR"; tail -c 4000 "$EVENTS")" \
