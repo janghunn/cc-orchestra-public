@@ -56,12 +56,18 @@ if [ -r "$BRIEF" ]; then
       # A RISK: trivial line quoted elsewhere at column 0, e.g. inside a fenced block, must not
       # select the tier; low/normal/critical keep first-anchored-line semantics unchanged.
       parsed="ambiguous-trivial"
-    elif [ "$parsed" = "trivial" ] && ! printf '%s\n' "$risk_line" | grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))'; then
-      parsed="malformed-trivial"
-    # The gate-skipping tier must be unanimous: any other tier named after RISK: anywhere in the
-    # brief, fenced or prose, disqualifies it; other tiers remain unchanged.
-    elif [ "$parsed" = "trivial" ] && sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | grep -qxE 'low|normal|critical'; then
-      parsed="conflicting-trivial"
+    elif [ "$parsed" = "trivial" ]; then
+      # The gate-skipping tier's declaration must be column-0, outside fenced code, unique and
+      # stand-alone, and no other tier may be named after RISK: anywhere in the file — every
+      # occurrence, not just the last per line.
+      nofence="$(awk '/^[[:space:]]*(```|~~~)/{f=!f; next} !f' "$BRIEF")"
+      if grep -oE 'RISK:[[:space:]]*\*{0,2}[a-z]+' "$BRIEF" | grep -oE '[a-z]+$' | grep -qxE 'low|normal|critical'; then
+        parsed="conflicting-trivial"
+      elif [ "$(printf '%s\n' "$nofence" | grep -c '^RISK:')" != 1 ]; then
+        parsed="undeclared-trivial"
+      elif ! printf '%s\n' "$nofence" | grep -qE '^RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))'; then
+        parsed="malformed-trivial"
+      fi
     fi
   else
     parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"

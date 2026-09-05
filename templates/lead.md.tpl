@@ -281,12 +281,12 @@ given:
    `RISK AMENDED: low -> trivial` under *Amendments* in `plan.md`, and report
    `BRIEF AUDIT: amended (low -> trivial: <why>)`; `orch-summary-check` honours exactly that
    transition. `plan.md` may contain at most one `RISK AMENDED` line; it must read exactly
-   `RISK AMENDED: low -> trivial`, optionally followed by a space and a reason. The brief's
-   `RISK: trivial` must stand alone and be the only line in the brief that starts with `RISK:` —
-   never quote it at column 0 elsewhere; a reason may follow only after a dash. No other tier may
-   be named after `RISK:` anywhere in the brief, fenced or prose. Never downgrade
-   `normal`/`critical`→`trivial`, and never invent `trivial` on a task the orchestrator marked
-   `normal`/`critical` — if it looks trivial, say so in `BRIEF AUDIT` and let the orchestrator decide.
+   `RISK AMENDED: low -> trivial`, optionally followed by a space and a reason. The brief's trivial
+   declaration must be `RISK: trivial` at column 0, outside any fenced code block, never indented
+   or bulleted, and the only line anywhere in the brief that starts with `RISK:`; a reason may
+   follow only after a dash. No other tier may be named after `RISK:` anywhere in the brief. Never
+   downgrade `normal`/`critical`→`trivial`, and never invent `trivial` on a task the orchestrator
+   marked `normal`/`critical` — if it looks trivial, say so in `BRIEF AUDIT` and let the orchestrator decide.
 
 **Then choose one of two responses. This distinction decides whether the audit saves time or
 wastes it:**

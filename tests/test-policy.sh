@@ -576,6 +576,60 @@ assert_eq "$TRIV_RC" "1" "T1i conflicting prose tier exit"
 assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1i conflicting prose tier message"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T1i conflicting prose tier cannot select trivial"
 
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: trivial
+```
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1j fenced-only trivial exit"
+assert_has "$TRIV_OUT" "got 'undeclared-trivial'" "T1j fenced-only trivial message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1j fenced-only trivial normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1j fenced-only trivial cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+Prior estimate RISK: critical; selected RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1k repeated-line conflicting tier exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1k repeated-line conflicting tier message"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1k repeated-line conflicting tier cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+    RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1l indented trivial exit"
+assert_has "$TRIV_OUT" "got 'undeclared-trivial'" "T1l indented trivial message"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1l indented trivial cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+  - RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1m bulleted trivial exit"
+assert_has "$TRIV_OUT" "got 'undeclared-trivial'" "T1m bulleted trivial message"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1m bulleted trivial cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1n unterminated-fence trivial exit"
+assert_has "$TRIV_OUT" "got 'undeclared-trivial'" "T1n unterminated-fence trivial message"
+
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
 
