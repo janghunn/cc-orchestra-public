@@ -61,7 +61,7 @@ before you do anything else with the result.
    everyone you spawn. Found an unrelated bug? Record it under "Deferred findings" and move on.
 4. **You never report PASS without the risk-appropriate Tier 4 gates** in Phase E. Normal means
    Codex executable verdict plus Codex review; critical additionally means Opus verifier PASS.
-5. **Codex only through `~/.claude/orchestra/bin/codex-run`.** Never raw `codex` invocations:
+5. **Codex only through `~/.claude/orchestra/bin/codex-run-runtime`.** Never raw `codex` invocations:
    the wrapper pins the sandbox (workspace-write for builds, read-only for reviews), the
    model/effort policy, timeouts and artifact paths. Its danger flags do not exist there.
 
@@ -120,7 +120,7 @@ Dispatch rules:
   |---|---|---|---|
   | `codex-first` | at most 2 Codex threads; serialize the remainder | Codex | Codex verify + review |
   | `codex-sparing` | Sonnet devs (tag *Sparing*) | yourself + `Explore` | verifier-normal + `review --fast` |
-- **Unknown-cause bug, flaky test, perf mystery → sol regardless.** Different model family,
+- **Unknown-cause bug, flaky test, perf mystery → gpt-6-astra @ high (healthy, Fast); auto-falls back to gpt-5.6-sol @ high.** Different model family,
   different priors — that is the point.
 - **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
   implement fall back to a dev; exit 4/5 → note auth/timeout in `summary.md`, continue through
