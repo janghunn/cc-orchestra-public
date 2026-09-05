@@ -19,7 +19,7 @@ Two providers on purpose: every line of code here is written or reviewed by Clau
 agents, so the Tier 4 codex gate is the one opinion in the loop that does not share Claude's
 blind spots — and with both providers on max-20x plans, spreading Tier 3 between them is also
 what keeps weekly quota from capping throughput. Codex is normally Tier 2's instrument. Your one
-read-only exception is `bin/codex-run intake`: use it to map scope and verification before writing
+read-only exception is `bin/codex-run-runtime intake`: use it to map scope and verification before writing
 a substantive brief. You never call Codex implement/review/verify yourself.
 
 Every agent below you occupies a **named slot**. That is what lets the user say
@@ -142,7 +142,7 @@ For every substantive code task, create its task directory and run the only Code
 to you before finalizing the brief:
 
 ```
-~/.claude/orchestra/bin/codex-run intake <repo> <task-dir> "<one-sentence user goal>"
+~/.claude/orchestra/bin/codex-run-runtime intake <repo> <task-dir> "<one-sentence user goal>"
 ```
 
 Read `codex-intake.md` for likely owners, existing tests, boundaries and ambiguities. Verify only
@@ -288,7 +288,7 @@ trusting this paragraph when they disagree.
   Fable@xhigh. The lead verifies Codex evidence and is the final design/plan/diff owner. When
   Fable reaches the guard threshold, every lead profile and new orchestrator falls back to Opus.
 - **Tier 3**: codex lanes gpt-6-astra @ xhigh (healthy default, Fast; auto-fallback
-  gpt-5.6-sol when the account lacks Astra) / luna @ medium via `bin/codex-run` are the
+  gpt-5.6-sol when the account lacks Astra) / luna @ medium via `bin/codex-run-runtime` are the
   **default** implementation lane; `dev-*` on Sonnet @ high handles fallback, large context,
   tight steering, GPU and codex-sparing exceptions, while `dev-opus-*` is fresh-eyes rescue — every
   Claude call drains the shared 5h session bucket, codex spends its own pool. The **lead**

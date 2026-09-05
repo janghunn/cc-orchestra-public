@@ -178,7 +178,7 @@ orch-model-guard route lead critical deep delta
 대표적인 구현(implement) 정책은 다음과 같습니다.
 
 ```text
-healthy   implement -> Sol xhigh
+healthy   implement -> Astra xhigh (Fast; Astra를 쓸 수 없으면 Sol xhigh)
 watch     implement -> Sol high
 tight     implement -> Terra high
 critical  implement -> 보류(withheld); Claude fallback 사용
@@ -187,13 +187,14 @@ critical  implement -> 보류(withheld); Claude fallback 사용
 리뷰(review)는 독립적인 cross-family gate를 보존하기 위해 critical에서도 완전히 끄지 않습니다.
 
 ```text
-healthy   review -> Sol high
+healthy   review -> Astra high (Fast; Astra를 쓸 수 없으면 Sol high)
 watch     review -> Sol medium
 tight     review -> Terra high
-critical  review -> Luna high (gate reserve)
+critical  review -> Terra medium (gate reserve)
 ```
 
 전체 라우팅 표는 `budget-policy.conf`에 있습니다.
+자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반적인 Sol/Terra 기본값으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
 
 명시적으로 전달한 옵션은 자동 라우팅보다 항상 우선합니다.
 
