@@ -280,9 +280,11 @@ given:
    already-working code to produce an artifact the user will judge by eye. Write a line of its own
    `RISK AMENDED: low -> trivial` under *Amendments* in `plan.md`, and report
    `BRIEF AUDIT: amended (low -> trivial: <why>)`; `orch-summary-check` honours exactly that
-   transition. Never downgrade `normal`/`critical`→`trivial`, and never invent `trivial` on a task
-   the orchestrator marked `normal`/`critical` — if it looks trivial, say so in `BRIEF AUDIT` and
-   let the orchestrator decide.
+   transition. The amendment line must read exactly `RISK AMENDED: low -> trivial`, optionally
+   followed by a space and a reason, and the brief's `RISK: trivial` must stand alone on its line
+   (a reason may follow after a dash). Never downgrade `normal`/`critical`→`trivial`, and never
+   invent `trivial` on a task the orchestrator marked `normal`/`critical` — if it looks trivial,
+   say so in `BRIEF AUDIT` and let the orchestrator decide.
 
 **Then choose one of two responses. This distinction decides whether the audit saves time or
 wastes it:**
@@ -523,8 +525,7 @@ COMMITS: <sha — message, oldest first; the first one is the revert-to-here bas
 PUSHED: <remote/branch, or "local only — <reason>">
 CHANGED: <file list, or "none">
 VERIFIED BY: <verification command> → <PASS/FAIL, key output line>
-GATES: codex-verify <PASS|FAIL|INCONCLUSIVE|unavailable> · codex-review <CLEAR|BLOCKING n|waived|unavailable> · claude-verifier <PASS|FAIL|not-required>
-GATES: self-check only (trivial) — <what was checked>     (trivial only)
+GATES: codex-verify <PASS|FAIL|INCONCLUSIVE|unavailable> · codex-review <CLEAR|BLOCKING n|waived|unavailable> · claude-verifier <PASS|FAIL|not-required>   (trivial instead: self-check only (trivial) — <what was checked>)
 PLAN CROSS-CHECK: <SOUND|ISSUES n addressed|skipped: why>
 ROUNDS: <n>
 DISPATCH: <codex-first|codex-sparing at Phase C, from orch-model-guard lanes>

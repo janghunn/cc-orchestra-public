@@ -495,6 +495,37 @@ triv_check
 assert_eq "$TRIV_RC" "0" "T1 trivial self-check exit"
 assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T1 trivial self-check risk"
 
+# T1b-T1d: trivial accepts a dash-led reason, but not enum or slash suffixes.
+triv_brief 'RISK: trivial — docs only'
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "T1b trivial dash reason exit"
+assert_has "$TRIV_OUT" "risk=trivial" "T1b trivial dash reason risk"
+
+triv_brief 'RISK: trivial | low | normal | critical'
+triv_check
+assert_eq "$TRIV_RC" "1" "T1c trivial enum declaration exit"
+assert_has "$TRIV_OUT" "got 'malformed-trivial'" "T1c trivial enum declaration message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1c trivial enum declaration normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1c trivial enum declaration cannot select trivial"
+
+triv_brief 'RISK: trivial/critical'
+triv_check
+assert_eq "$TRIV_RC" "1" "T1d trivial slash declaration exit"
+assert_has "$TRIV_OUT" "got 'malformed-trivial'" "T1d trivial slash declaration message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1d trivial slash declaration normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1d trivial slash declaration cannot select trivial"
+
+triv_brief 'RISK: trivial-ish'
+triv_check
+assert_eq "$TRIV_RC" "1" "T1e trivial hyphen suffix exit"
+assert_has "$TRIV_OUT" "got 'malformed-trivial'" "T1e trivial hyphen suffix message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1e trivial hyphen suffix normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1e trivial hyphen suffix cannot select trivial"
+
+triv_brief 'RISK: trivial'
+triv_summary 'light sonnet@medium' "$SELF"
+
 # T2: GATES remains mandatory for trivial.
 sed -i '/^GATES:/d' "$TRIV/summary.md"
 triv_check
@@ -506,6 +537,16 @@ triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) —'
 triv_check
 assert_eq "$TRIV_RC" "1" "T3 empty self-check description exit"
 assert_has "$TRIV_OUT" "trivial risk must report" "T3 empty self-check description message"
+
+# T3b: non-ASCII descriptions work in the C locale while a bare dash remains invalid.
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — 문서 확인'
+LC_ALL=C triv_check
+assert_eq "$TRIV_RC" "0" "T3b C-locale non-ASCII description exit"
+
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) —'
+LC_ALL=C triv_check
+assert_eq "$TRIV_RC" "1" "T3b C-locale empty description exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T3b C-locale empty description message"
 
 triv_summary 'light sonnet@medium' 'GATES: looked fine'
 triv_check
@@ -648,12 +689,39 @@ triv_check
 assert_eq "$TRIV_RC" "1" "T17 amendment audit exit"
 assert_has "$TRIV_OUT" "BRIEF AUDIT: amended" "T17 amendment audit message"
 
+triv_summary 'light sonnet@medium' "$SELF" 1 'clean (not amended)'
+triv_check
+assert_eq "$TRIV_RC" "1" "T17b misleading amendment audit exit"
+assert_has "$TRIV_OUT" "BRIEF AUDIT: amended" "T17b misleading amendment audit message"
+
 triv_brief 'RISK: normal'
 triv_summary 'normal opus@high' "$SELF"
 triv_check
 assert_eq "$TRIV_RC" "1" "T18 normal amendment exit"
 assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade low -> trivial" "T18 normal amendment message"
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T18 normal amendment gates"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: low -> trivial/normal
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T18b malformed target amendment exit"
+assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade" "T18b malformed target amendment message"
+assert_has "$TRIV_OUT" "got 'malformed'" "T18b malformed target amendment value"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T18b malformed target amendment gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T18b malformed target amendment cannot select trivial"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: low -> trivial — docs only
+EOF
+triv_summary 'light sonnet@medium' "$SELF" 1 amended
+triv_check
+assert_eq "$TRIV_RC" "0" "T18c amendment reason exit"
+assert_has "$TRIV_OUT" "risk=trivial" "T18c amendment reason risk"
 
 cat > "$TRIV/plan.md" <<'EOF'
 # Plan

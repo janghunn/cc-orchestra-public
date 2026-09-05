@@ -46,7 +46,14 @@ if [ -r "$BRIEF" ]; then
   # mentions "RISK: x" earlier in the file cannot select the tier. Briefs without such a line
   # keep the legacy first-mention scan, except that it may never yield the gate-skipping tier.
   if grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF"; then
-    parsed="$(sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p' "$BRIEF" | head -1)"
+    risk_line="$(grep -E '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF" | head -1)"
+    parsed="$(printf '%s\n' "$risk_line" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p')"
+    # The gate-skipping tier must stand alone on its line, optionally followed by a dash-led
+    # reason; "RISK: trivial | low | normal | critical" or "RISK: trivial/critical" is malformed,
+    # not trivial. Only trivial gets this rule; low/normal/critical parsing stays unchanged.
+    if [ "$parsed" = "trivial" ] && ! printf '%s\n' "$risk_line" | grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-|\())'; then
+      parsed="malformed-trivial"
+    fi
   else
     parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"
     [ "$parsed" = "trivial" ] && parsed="unanchored-trivial"
@@ -58,14 +65,17 @@ case "$risk" in trivial|low|normal|critical) ;; *) problem error "invalid or mis
 # A lead may downgrade only low -> trivial, recorded as a line of its own in plan.md
 # ("RISK AMENDED: low -> trivial") and reported as BRIEF AUDIT: amended. Nothing else may move.
 amended=""
+downgraded=0
 if [ -r "$PLAN" ]; then
-  amended="$(sed -n 's/^RISK AMENDED:[[:space:]]*\([a-z]*\)[[:space:]]*\(->\|→\)[[:space:]]*\([a-z]*\).*/\1 \3/p' "$PLAN" | head -1)"
-  if [ -n "$amended" ]; then
+  if grep -qE '^RISK AMENDED:' "$PLAN"; then
+    amended="$(sed -n 's/^RISK AMENDED:[[:space:]]*\([a-z]*\)[[:space:]]*\(->\|→\)[[:space:]]*\([a-z]*\)\([[:space:]].*\)\{0,1\}$/\1 \3/p' "$PLAN" | head -1)"
+    printf '%s\n' "$amended" | grep -qE '^[a-z]+ [a-z]+$' || amended=""
     if [ "$amended" = "low trivial" ] && [ "$risk" = "low" ]; then
       risk="trivial"
+      downgraded=1
       echo "NOTE:  RISK low downgraded to trivial by plan.md 'RISK AMENDED: low -> trivial'"
     else
-      problem error "RISK AMENDED may only downgrade low -> trivial (brief risk '$risk', got '$amended')"
+      problem error "RISK AMENDED may only downgrade low -> trivial (brief risk '$risk', got '${amended:-malformed}')"
     fi
   fi
 fi
@@ -84,8 +94,8 @@ if [ -r "$SUMMARY" ]; then
     if [ "$risk" = "trivial" ]; then
       # trivial skips Tier 4 by policy; the line must still open with the lead's own self-check
       # record and say what was checked. Extra evidence may follow, but never replace it.
-      printf '%s' "$gates" | grep -qiE '^GATES:[[:space:]]*self-check only \(trivial\)[^[:alnum:]]*[[:alnum:]]' \
-        || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
+      desc="$(printf '%s' "$gates" | sed -n 's/^GATES:[[:space:]]*self-check only (trivial)//p' | sed 's/^[[:space:]—–:-]*//')"
+      [ -n "$desc" ] || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
     else
       codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
       printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1
@@ -142,8 +152,8 @@ if [ -r "$SUMMARY" ]; then
     critical) printf '%s' "$profile" | grep -qi 'critical\|fable\|fallback.*opus' || problem warning "critical risk should use Fable or recorded Opus fallback" ;;
   esac
 
-  if [ -n "${amended:-}" ] && [ "$risk" = "trivial" ]; then
-    grep -qi '^BRIEF AUDIT:.*amended' "$SUMMARY" || problem warning "low -> trivial downgrade must be reported as BRIEF AUDIT: amended"
+  if [ "$downgraded" = 1 ]; then
+    grep -qiE '^BRIEF AUDIT:[[:space:]]*amended' "$SUMMARY" || problem warning "low -> trivial downgrade must be reported as BRIEF AUDIT: amended"
   fi
 
   if grep -qi '^PROMOTIONS:.*fable' "$SUMMARY" && ! grep -qi '^PROMOTIONS:.*\(critical\|user\|failed\|security\|algorithm\)' "$SUMMARY"; then
