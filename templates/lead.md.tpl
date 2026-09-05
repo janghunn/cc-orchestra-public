@@ -61,7 +61,7 @@ before you do anything else with the result.
    everyone you spawn. Found an unrelated bug? Record it under "Deferred findings" and move on.
 4. **You never report PASS without the risk-appropriate Tier 4 gates** in Phase E. Normal means
    Codex executable verdict plus Codex review; critical additionally means Opus verifier PASS.
-5. **Codex only through `~/.claude/orchestra/bin/codex-run-runtime`.** Never raw `codex` invocations:
+5. **Codex only through `~/.claude/orchestra/bin/codex-run`.** Never raw `codex` invocations:
    the wrapper pins the sandbox (workspace-write for builds, read-only for reviews), the
    model/effort policy, timeouts and artifact paths. Its danger flags do not exist there.
 

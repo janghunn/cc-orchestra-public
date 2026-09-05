@@ -363,6 +363,8 @@ healthy 상태에서는 Astra(`gpt-6-astra`)가 기본이며, `~/.codex/models_c
 없으면 대체하지 않고 `CODEX-RUN: MODEL_UNAVAILABLE`과 exit 6으로 종료한다.
 `CC_ORCH_CODEX_CATALOG_CHECK=0`은 이 사전 catalog 검사를 끈다.
 
+이 표에는 별도의 Luna `--mech`/`--fast` 행이 없으며, 해당 lane은 변경 없이 `templates/lead.md.tpl`의 lane 표에 문서화되어 있다.
+
 ### 왜 critical에서 implement/investigate를 멈추는가
 
 Codex quota가 거의 소진된 경우 마지막 quota를 일반 구현에 모두 써버리지 않고 **cross-family review와 executable verification**에 남긴다.
