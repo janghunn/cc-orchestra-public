@@ -997,6 +997,8 @@ Codex가 unavailable이면 normal에는 `verifier-normal` Sonnet fallback, criti
 check는 생략하지 않는다. 새 로직을 작성하면 `trivial`이 아니다. Lead의 self-downgrade는
 `low`→`trivial`만 허용하며, `plan.md`에 `RISK AMENDED: low -> trivial`을 쓰고 summary에
 `BRIEF AUDIT: amended`를 기록해야 한다.
+`brief.md`의 `RISK: trivial`은 `RISK:`로 시작하는 유일한 줄이어야 하고 다른 곳에서 0열로
+인용하면 안 되며, 사유는 대시 뒤에만 쓸 수 있고 `plan.md`에는 `RISK AMENDED` 줄이 최대 하나만 있어야 한다.
 
 implement→verify 실패 round 상한:
 

@@ -523,6 +523,34 @@ assert_has "$TRIV_OUT" "got 'malformed-trivial'" "T1e trivial hyphen suffix mess
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T1e trivial hyphen suffix normal gates"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T1e trivial hyphen suffix cannot select trivial"
 
+triv_brief 'RISK: trivial (or critical)'
+triv_check
+assert_eq "$TRIV_RC" "1" "T1f trivial parenthesis reason exit"
+assert_has "$TRIV_OUT" "got 'malformed-trivial'" "T1f trivial parenthesis reason message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1f trivial parenthesis reason normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1f trivial parenthesis reason cannot select trivial"
+
+triv_brief 'RISK: trivial ()'
+triv_check
+assert_eq "$TRIV_RC" "1" "T1f trivial empty parentheses exit"
+assert_has "$TRIV_OUT" "got 'malformed-trivial'" "T1f trivial empty parentheses message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1f trivial empty parentheses normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1f trivial empty parentheses cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: trivial
+```
+RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1g ambiguous trivial exit"
+assert_has "$TRIV_OUT" "got 'ambiguous-trivial'" "T1g ambiguous trivial message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1g ambiguous trivial normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1g ambiguous trivial cannot select trivial"
+
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
 
@@ -547,6 +575,16 @@ triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) —'
 LC_ALL=C triv_check
 assert_eq "$TRIV_RC" "1" "T3b C-locale empty description exit"
 assert_has "$TRIV_OUT" "trivial risk must report" "T3b C-locale empty description message"
+
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — !!!'
+triv_check
+assert_eq "$TRIV_RC" "1" "T3c punctuation-only description exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T3c punctuation-only description message"
+
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — ...'
+triv_check
+assert_eq "$TRIV_RC" "1" "T3c ellipsis-only description exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T3c ellipsis-only description message"
 
 triv_summary 'light sonnet@medium' 'GATES: looked fine'
 triv_check
@@ -630,6 +668,17 @@ triv_summary 'light sonnet@medium' "$SELF"
 triv_check
 assert_eq "$TRIV_RC" "1" "T10 low rejects trivial marker exit"
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T10 low rejects trivial marker"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: low
+RISK: critical
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "0" "T10b multiple anchored non-trivial exit"
+assert_has "$TRIV_OUT" "risk=low" "T10b multiple anchored non-trivial first-line risk"
 
 # T11: normal and critical do not accept the trivial marker.
 triv_brief 'RISK: normal'
@@ -722,6 +771,19 @@ triv_summary 'light sonnet@medium' "$SELF" 1 amended
 triv_check
 assert_eq "$TRIV_RC" "0" "T18c amendment reason exit"
 assert_has "$TRIV_OUT" "risk=trivial" "T18c amendment reason risk"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: low -> trivial/normal
+RISK AMENDED: low -> trivial
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF" 1 amended
+triv_check
+assert_eq "$TRIV_RC" "1" "T18d duplicate amendment exit"
+assert_has "$TRIV_OUT" "at most one RISK AMENDED line" "T18d duplicate amendment message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T18d duplicate amendment gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T18d duplicate amendment cannot select trivial"
 
 cat > "$TRIV/plan.md" <<'EOF'
 # Plan

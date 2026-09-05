@@ -208,10 +208,12 @@ rather than inventing a command that does not exist.
   4. You may set `trivial` directly when pattern (a) or (b) holds without doubt, and the user may
      request it explicitly. A lead may self-downgrade **only `low`→`trivial`** by writing
      `RISK AMENDED: low -> trivial` in `plan.md` and reporting `BRIEF AUDIT: amended`; spot-check
-     both afterward. The amendment line must read exactly `RISK AMENDED: low -> trivial`, optionally
-     followed by a space and a reason, and the brief's `RISK: trivial` must stand alone on its line
-     (a reason may follow after a dash). A lead must never invent `trivial` on a task you marked
-     `normal`/`critical`; the checker rejects every other `RISK AMENDED` transition.
+     both afterward. `plan.md` may contain at most one `RISK AMENDED` line; it must read exactly
+     `RISK AMENDED: low -> trivial`, optionally followed by a space and a reason. The brief's
+     `RISK: trivial` must stand alone and be the only line in the brief that starts with `RISK:` —
+     never quote it at column 0 elsewhere; a reason may follow only after a dash. A lead must never
+     invent `trivial` on a task you marked `normal`/`critical`; the checker rejects every other
+     `RISK AMENDED` transition.
 
 **Choosing the lead profile** — risk selects model and effort; the human-facing slot does not
 change:

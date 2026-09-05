@@ -47,11 +47,16 @@ if [ -r "$BRIEF" ]; then
   # keep the legacy first-mention scan, except that it may never yield the gate-skipping tier.
   if grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF"; then
     risk_line="$(grep -E '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF" | head -1)"
+    anchored_count="$(grep -cE '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF")"
     parsed="$(printf '%s\n' "$risk_line" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p')"
     # The gate-skipping tier must stand alone on its line, optionally followed by a dash-led
     # reason; "RISK: trivial | low | normal | critical" or "RISK: trivial/critical" is malformed,
     # not trivial. Only trivial gets this rule; low/normal/critical parsing stays unchanged.
-    if [ "$parsed" = "trivial" ] && ! printf '%s\n' "$risk_line" | grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-|\())'; then
+    if [ "$parsed" = "trivial" ] && [ "$anchored_count" -gt 1 ]; then
+      # A RISK: trivial line quoted elsewhere at column 0, e.g. inside a fenced block, must not
+      # select the tier; low/normal/critical keep first-anchored-line semantics unchanged.
+      parsed="ambiguous-trivial"
+    elif [ "$parsed" = "trivial" ] && ! printf '%s\n' "$risk_line" | grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))'; then
       parsed="malformed-trivial"
     fi
   else
@@ -67,7 +72,10 @@ case "$risk" in trivial|low|normal|critical) ;; *) problem error "invalid or mis
 amended=""
 downgraded=0
 if [ -r "$PLAN" ]; then
-  if grep -qE '^RISK AMENDED:' "$PLAN"; then
+  amended_count="$(grep -cE '^RISK AMENDED:' "$PLAN")"
+  if [ "$amended_count" -gt 1 ]; then
+    problem error "plan.md must contain at most one RISK AMENDED line (found $amended_count)"
+  elif [ "$amended_count" = 1 ]; then
     amended="$(sed -n 's/^RISK AMENDED:[[:space:]]*\([a-z]*\)[[:space:]]*\(->\|→\)[[:space:]]*\([a-z]*\)\([[:space:]].*\)\{0,1\}$/\1 \3/p' "$PLAN" | head -1)"
     printf '%s\n' "$amended" | grep -qE '^[a-z]+ [a-z]+$' || amended=""
     if [ "$amended" = "low trivial" ] && [ "$risk" = "low" ]; then
@@ -95,7 +103,7 @@ if [ -r "$SUMMARY" ]; then
       # trivial skips Tier 4 by policy; the line must still open with the lead's own self-check
       # record and say what was checked. Extra evidence may follow, but never replace it.
       desc="$(printf '%s' "$gates" | sed -n 's/^GATES:[[:space:]]*self-check only (trivial)//p' | sed 's/^[[:space:]—–:-]*//')"
-      [ -n "$desc" ] || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
+      printf '%s' "$desc" | grep -q '[^[:space:][:punct:]]' || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
     else
       codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
       printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1
@@ -153,7 +161,7 @@ if [ -r "$SUMMARY" ]; then
   esac
 
   if [ "$downgraded" = 1 ]; then
-    grep -qiE '^BRIEF AUDIT:[[:space:]]*amended' "$SUMMARY" || problem warning "low -> trivial downgrade must be reported as BRIEF AUDIT: amended"
+    grep -qiE '^BRIEF AUDIT:[[:space:]]*amended' "$SUMMARY" || problem error "low -> trivial downgrade must be reported as BRIEF AUDIT: amended"
   fi
 
   if grep -qi '^PROMOTIONS:.*fable' "$SUMMARY" && ! grep -qi '^PROMOTIONS:.*\(critical\|user\|failed\|security\|algorithm\)' "$SUMMARY"; then
