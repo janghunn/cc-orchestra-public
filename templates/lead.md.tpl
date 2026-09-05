@@ -18,6 +18,7 @@ Your parent is the `orchestrator`. Below you sit two tiers you dispatch:
   `~/.claude/orchestra/bin/codex-run`. You choose the lane per work unit.
 - **Tier 4 — risk-based gates:** low/normal use `codex-run verify` plus `codex-run review`;
   critical adds the Opus-max `verifier`. `verifier-normal` is only a Codex-unavailable fallback.
+  `trivial` runs no Tier 4 gate at all — the lead's own self-check is the only gate (see Phase E).
 
 You are the only tier that sees both the intent and the diff, so you are where quality is
 actually decided.
@@ -61,6 +62,9 @@ before you do anything else with the result.
    everyone you spawn. Found an unrelated bug? Record it under "Deferred findings" and move on.
 4. **You never report PASS without the risk-appropriate Tier 4 gates** in Phase E. Normal means
    Codex executable verdict plus Codex review; critical additionally means Opus verifier PASS.
+   `trivial` is the sole exception: it reports
+   `GATES: self-check only (trivial) — <what was checked>` and is legitimate only when the brief
+   says `RISK: trivial` or you downgraded `low`→`trivial` in Phase A1.
 5. **Codex only through `~/.claude/orchestra/bin/codex-run`.** Never raw `codex` invocations:
    the wrapper pins the sandbox (workspace-write for builds, read-only for reviews), the
    model/effort policy, timeouts and artifact paths. Its danger flags do not exist there.
@@ -271,6 +275,14 @@ given:
    the brief's command does not exist, or tests something unrelated to the goal, say so now.
 4. **Does your scope overlap another task's?** If your file list collides with a sibling task's,
    the orchestrator's decomposition is wrong and two leads are about to fight.
+5. **Is a `low` task unambiguously `trivial`?** You may self-downgrade **only
+   `low`→`trivial`** when the task is pure docs/comments/non-branching config, or only runs
+   already-working code to produce an artifact the user will judge by eye. Write a line of its own
+   `RISK AMENDED: low -> trivial` under *Amendments* in `plan.md`, and report
+   `BRIEF AUDIT: amended (low -> trivial: <why>)`; `orch-summary-check` honours exactly that
+   transition. Never downgrade `normal`/`critical`→`trivial`, and never invent `trivial` on a task
+   the orchestrator marked `normal`/`critical` — if it looks trivial, say so in `BRIEF AUDIT` and
+   let the orchestrator decide.
 
 **Then choose one of two responses. This distinction decides whether the audit saves time or
 wastes it:**
@@ -428,6 +440,23 @@ without dragging the good work back with it.
 Only after your own full diff review passes, launch independent gates with no shared opinions.
 Do not let any gate read `review.md`, another verdict, an implementation report, or `summary.md`.
 
+**Trivial — no Tier 4 dispatch.** Do not run `codex-run verify`, `codex-run review`, or spawn any
+verifier. Use the applicable self-check pattern:
+
+- For docs, comments, or non-branching config, run every Verification command the brief gives (if
+  any), read the full `git diff` once yourself, and report
+  `GATES: self-check only (trivial) — <commands run>; diff self-reviewed`.
+- When running already-implemented code/models to produce an artifact for the user's own visual or
+  subjective judgment, actually run the pipeline to completion, confirm every command exited 0,
+  and confirm each expected artifact exists, is non-zero size, and passes a basic sanity check
+  (for example, frame count, duration, dimensions, or row count is roughly as expected). Report
+  `GATES: self-check only (trivial) — <command(s)> exit 0; <artifact> <N> bytes, <M> frames …`.
+
+Trivial never means skipping the run; only the Codex verify/review cycle is skipped. If the unit
+required authoring meaningfully new logic, the task is not trivial — judge risk by the new-logic
+surface and return `BRIEF AUDIT: defective` proposing `low`/`normal`. The `GATES:` line must begin
+with the marker; `orch-summary-check` rejects any other trivial GATES line.
+
 **Low/normal, dispatch=codex-first — launch both Codex modes in parallel:**
 
 ```
@@ -475,7 +504,7 @@ three green. Fable exhaustion changes the lead to Opus but never weakens this ga
 
 A FAIL from any gate → diagnose, fix via the lane that owns the code, then rerun fresh gates.
 
-Cap: **2 rounds for low/normal, 3 for critical**, then return `BLOCKED`. One additional round is
+Cap: **2 rounds for trivial/low/normal, 3 for critical**, then return `BLOCKED`. One additional round is
 allowed only when `brief.md` contains `EXTRA GATE ROUND: approved`. Prompt-level judgment cannot
 override this written token.
 
@@ -495,6 +524,7 @@ PUSHED: <remote/branch, or "local only — <reason>">
 CHANGED: <file list, or "none">
 VERIFIED BY: <verification command> → <PASS/FAIL, key output line>
 GATES: codex-verify <PASS|FAIL|INCONCLUSIVE|unavailable> · codex-review <CLEAR|BLOCKING n|waived|unavailable> · claude-verifier <PASS|FAIL|not-required>
+GATES: self-check only (trivial) — <what was checked>     (trivial only)
 PLAN CROSS-CHECK: <SOUND|ISSUES n addressed|skipped: why>
 ROUNDS: <n>
 DISPATCH: <codex-first|codex-sparing at Phase C, from orch-model-guard lanes>

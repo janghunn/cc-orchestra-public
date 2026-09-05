@@ -159,6 +159,13 @@ orch-model-guard route lead critical charlie
 orch-model-guard route lead critical deep delta
 ```
 
+`RISK: trivial`에는 별도 route가 없으므로 `low`로 라우팅한다
+(`orch-model-guard route lead low <slot>`). `low`와의 차이는 gate 정책뿐이다. Codex
+verify/review와 Claude verifier를 실행하지 않고 lead가
+`GATES: self-check only (trivial) — <what was checked>`를 보고한다.
+`orch-summary-check --strict`가 이 형식을 강제한다. 적용 기준은
+`agents/orchestrator.md`의 "Choosing RISK"를 참고한다.
+
 이 명령은 `route-lead-bravo-normal` 같은 **고정된(immutable) agent type**과 해당 모델 및 effort를 반환합니다.
 
 `build-roster-runtime.sh`는 4개 slot × 4개 profile 조합, 총 16개의 `route-lead-*` agent를 미리 생성합니다. 기존 legacy quota guard는 이 `route-lead-*` namespace를 다시 쓰지 않습니다.

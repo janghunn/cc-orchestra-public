@@ -16,7 +16,7 @@ cc-orchestra는 단순히 여러 모델을 번갈아 호출하는 wrapper가 아
   - Tier 1 Sonnet orchestrator가 사용자 의도, 범위, 위험도, 작업 배정을 관리
   - Tier 2 Claude lead가 설계·계획·최종 diff 책임
   - Tier 3 Codex가 조사·구현을 기본 수행하고 Claude dev가 예외 fallback
-  - Tier 4 Codex verify/review와 critical용 Claude verifier가 독립 검증
+  - Tier 4 Codex verify/review와 critical용 Claude verifier가 독립 검증 (`trivial`은 lead self-check만)
 - **리셋 시각 기반 quota routing**
   - Claude 5시간 / 7일 window와 Codex 7일 window를 함께 추적
   - 단순 사용률이 아니라 `남은 quota ÷ 남은 시간`으로 소비 속도를 판단
@@ -76,6 +76,7 @@ Tier 2  route-lead-<slot>-<profile>               Claude
 Tier 4  executable verify ──────────────────────► Codex Astra (Terra 폴백)
         semantic/regression review ─────────────► Codex Astra (Sol 폴백)
         critical extra verifier ────────────────► Claude Opus @ max
+        trivial: Tier 4 생략 ─────────────────────► lead self-check only
 ```
 
 ### 역할 분리
@@ -269,6 +270,8 @@ dispatch=codex-first
 | watch | Sonnet | medium |
 | tight | Sonnet | medium |
 | critical | Sonnet | medium |
+
+`trivial` risk도 같은 표를 사용한다(Sonnet medium, `route lead low`). 차이는 모델이 아니라 gate 정책이다.
 
 ## normal task
 
@@ -935,7 +938,8 @@ Runtime-selected Claude lead
    │
    ├─ Codex executable verify
    ├─ Codex semantic/regression review
-   └─ critical: Claude Opus verifier
+   ├─ critical: Claude Opus verifier
+   └─ trivial: Codex verify/review 생략, lead self-check only
           │
           ▼
        summary.md
@@ -982,16 +986,23 @@ summary.md  20 KiB
 
 | Risk | 필수 gate |
 |---|---|
+| trivial | 없음 — lead self-check only (`GATES: self-check only (trivial) — <확인한 내용>`) |
 | low / normal | Codex verify PASS + Codex review CLEAR/NONBLOCKING |
 | critical | 위 Codex gate + Claude Opus@max verifier PASS |
 
 Codex가 unavailable이면 normal에는 `verifier-normal` Sonnet fallback, critical에는 Opus verifier fallback을 사용할 수 있지만 `summary.md`에 degraded gate 상태를 명확히 기록해야 한다.
 
+`trivial`은 문서·주석·비분기 설정 변경이거나, 이미 구현된 코드·모델을 실행해 사용자가
+직접 보고 판단할 산출물을 만드는 경우에만 사용한다. 후자의 경우에도 실행과 산출물 sanity
+check는 생략하지 않는다. 새 로직을 작성하면 `trivial`이 아니다. Lead의 self-downgrade는
+`low`→`trivial`만 허용하며, `plan.md`에 `RISK AMENDED: low -> trivial`을 쓰고 summary에
+`BRIEF AUDIT: amended`를 기록해야 한다.
+
 implement→verify 실패 round 상한:
 
 ```text
-low / normal   2회
-critical       3회
+trivial / low / normal   2회
+critical                 3회
 ```
 
 그 이상은 `brief.md`에:

@@ -125,6 +125,12 @@ orch-model-guard route lead critical charlie
 orch-model-guard route lead critical deep delta
 ```
 
+`RISK: trivial` has no route of its own; route it as `low`
+(`orch-model-guard route lead low <slot>`). It differs from `low` only in gate policy: there is no
+Codex verify/review or Claude verifier, and the lead reports
+`GATES: self-check only (trivial) — <what was checked>`. `orch-summary-check --strict` enforces
+that line. See "Choosing RISK" in `agents/orchestrator.md` for the applicability rules.
+
 The command returns an immutable agent type such as `route-lead-bravo-normal`, plus its model and
 effort. `build-roster-runtime.sh` generates all 16 slot/profile combinations, and the legacy quota
 guard never rewrites the `route-lead-*` namespace. Usage changes therefore choose among already

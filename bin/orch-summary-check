@@ -42,10 +42,33 @@ check_size "$SUMMARY" "$SUMMARY_MAX_BYTES"
 
 risk=""
 if [ -r "$BRIEF" ]; then
-  parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"
+  # Prefer a line that *starts* with RISK: (the brief template's form) so prose that merely
+  # mentions "RISK: x" earlier in the file cannot select the tier. Briefs without such a line
+  # keep the legacy first-mention scan, except that it may never yield the gate-skipping tier.
+  if grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF"; then
+    parsed="$(sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p' "$BRIEF" | head -1)"
+  else
+    parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"
+    [ "$parsed" = "trivial" ] && parsed="unanchored-trivial"
+  fi
   [ -n "$parsed" ] && risk="$parsed"
 fi
-case "$risk" in low|normal|critical) ;; *) problem error "invalid or missing RISK (got '${risk:-empty}')"; risk="normal" ;; esac
+case "$risk" in trivial|low|normal|critical) ;; *) problem error "invalid or missing RISK (got '${risk:-empty}')"; risk="normal" ;; esac
+
+# A lead may downgrade only low -> trivial, recorded as a line of its own in plan.md
+# ("RISK AMENDED: low -> trivial") and reported as BRIEF AUDIT: amended. Nothing else may move.
+amended=""
+if [ -r "$PLAN" ]; then
+  amended="$(sed -n 's/^RISK AMENDED:[[:space:]]*\([a-z]*\)[[:space:]]*\(->\|→\)[[:space:]]*\([a-z]*\).*/\1 \3/p' "$PLAN" | head -1)"
+  if [ -n "$amended" ]; then
+    if [ "$amended" = "low trivial" ] && [ "$risk" = "low" ]; then
+      risk="trivial"
+      echo "NOTE:  RISK low downgraded to trivial by plan.md 'RISK AMENDED: low -> trivial'"
+    else
+      problem error "RISK AMENDED may only downgrade low -> trivial (brief risk '$risk', got '$amended')"
+    fi
+  fi
+fi
 
 if [ -r "$SUMMARY" ]; then
   grep -q '^CLAUDE PROFILE:' "$SUMMARY" || problem warning "summary lacks CLAUDE PROFILE"
@@ -58,31 +81,38 @@ if [ -r "$SUMMARY" ]; then
   if [ -z "$gates" ]; then
     problem error "summary lacks GATES"
   else
-    codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
-    printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1
-    printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+(CLEAR|NONBLOCKING)' && codex_review_ok=1
-    printf '%s' "$gates" | grep -qiE 'claude-verifier[[:space:]]+PASS' && claude_verify_ok=1
+    if [ "$risk" = "trivial" ]; then
+      # trivial skips Tier 4 by policy; the line must still open with the lead's own self-check
+      # record and say what was checked. Extra evidence may follow, but never replace it.
+      printf '%s' "$gates" | grep -qiE '^GATES:[[:space:]]*self-check only \(trivial\)[^[:alnum:]]*[[:alnum:]]' \
+        || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
+    else
+      codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
+      printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1
+      printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+(CLEAR|NONBLOCKING)' && codex_review_ok=1
+      printf '%s' "$gates" | grep -qiE 'claude-verifier[[:space:]]+PASS' && claude_verify_ok=1
 
-    # A provider outage may fall back to the zero-context Claude verifier, but it must be
-    # visible in the same line; a bare missing/waived executable verdict is never PASS.
-    if [ "$codex_verify_ok" = "0" ]; then
-      if ! printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+unavailable' || \
-         [ "$claude_verify_ok" = "0" ]; then
-        problem error "executable verification did not PASS and has no explicit Claude fallback"
+      # A provider outage may fall back to the zero-context Claude verifier, but it must be
+      # visible in the same line; a bare missing/waived executable verdict is never PASS.
+      if [ "$codex_verify_ok" = "0" ]; then
+        if ! printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+unavailable' || \
+           [ "$claude_verify_ok" = "0" ]; then
+          problem error "executable verification did not PASS and has no explicit Claude fallback"
+        fi
       fi
-    fi
-    if [ "$codex_review_ok" = "0" ]; then
-      if [ "$risk" = "low" ] && printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+waived'; then
-        :
-      elif printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+unavailable' && \
-           [ "$claude_verify_ok" = "1" ]; then
-        :
-      else
-        problem error "adversarial review is not CLEAR/NONBLOCKING (only low risk may waive it)"
+      if [ "$codex_review_ok" = "0" ]; then
+        if [ "$risk" = "low" ] && printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+waived'; then
+          :
+        elif printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+unavailable' && \
+             [ "$claude_verify_ok" = "1" ]; then
+          :
+        else
+          problem error "adversarial review is not CLEAR/NONBLOCKING (only low risk may waive it)"
+        fi
       fi
-    fi
-    if [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
-      problem error "critical risk requires claude-verifier PASS"
+      if [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
+        problem error "critical risk requires claude-verifier PASS"
+      fi
     fi
   fi
 
@@ -95,6 +125,7 @@ if [ -r "$SUMMARY" ]; then
   rounds="$(sed -n 's/^ROUNDS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SUMMARY" | tail -1)"
   if [ -n "$rounds" ]; then
     [ "$rounds" -ge 1 ] || problem error "ROUNDS must be at least 1"
+    # trivial and low share the normal cap.
     cap="$NORMAL_GATE_ROUNDS"; [ "$risk" = "critical" ] && cap="$CRITICAL_GATE_ROUNDS"
     if [ "$rounds" -gt "$cap" ] && ! grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved' "$BRIEF"; then
       problem error "ROUNDS=$rounds exceeds $risk cap=$cap without EXTRA GATE ROUND: approved"
@@ -106,9 +137,14 @@ if [ -r "$SUMMARY" ]; then
   profile="$(sed -n 's/^CLAUDE PROFILE:[[:space:]]*//p' "$SUMMARY" | tail -1)"
   case "$risk" in
     low)      printf '%s' "$profile" | grep -qi 'light\|sonnet\|fallback.*opus' || problem warning "low risk should use light/Sonnet or recorded Opus fallback" ;;
+    trivial)  printf '%s' "$profile" | grep -qi 'light\|sonnet\|fallback.*opus' || problem warning "trivial risk should use light/Sonnet or recorded Opus fallback" ;;
     normal)   printf '%s' "$profile" | grep -qi 'normal\|opus\|fallback' || problem warning "normal risk should use the normal/Opus profile" ;;
     critical) printf '%s' "$profile" | grep -qi 'critical\|fable\|fallback.*opus' || problem warning "critical risk should use Fable or recorded Opus fallback" ;;
   esac
+
+  if [ -n "${amended:-}" ] && [ "$risk" = "trivial" ]; then
+    grep -qi '^BRIEF AUDIT:.*amended' "$SUMMARY" || problem warning "low -> trivial downgrade must be reported as BRIEF AUDIT: amended"
+  fi
 
   if grep -qi '^PROMOTIONS:.*fable' "$SUMMARY" && ! grep -qi '^PROMOTIONS:.*\(critical\|user\|failed\|security\|algorithm\)' "$SUMMARY"; then
     problem warning "Fable promotion lacks a critical/user/failure reason"

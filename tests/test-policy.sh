@@ -449,6 +449,273 @@ sed -i 's/ROUNDS: 3/ROUNDS: 2/' "$TASK/summary.md"
 "$ROOT/bin/orch-summary-check" --strict "$TASK" >/dev/null
 ok "strict artifact and gate policy"
 
+TRIV="$WORK/.orchestra/02-trivial"
+mkdir -p "$TRIV"
+cp "$TASK/plan.md" "$TRIV/plan.md"
+
+SELF='GATES: self-check only (trivial) — ran bash tests/test-policy.sh; self-reviewed diff once'
+FULL='GATES: codex-verify PASS · codex-review CLEAR · claude-verifier not-required'
+LOW_WAIVED='GATES: codex-verify PASS · codex-review waived (docs only) · claude-verifier not-required'
+
+triv_brief() {
+  local risk_line="$1"
+  cat > "$TRIV/brief.md" <<EOF
+# Test
+$risk_line
+Verification: true
+EOF
+}
+
+triv_summary() {
+  local profile="$1" gates="$2" rounds="${3:-1}" audit="${4:-clean}"
+  cat > "$TRIV/summary.md" <<EOF
+[lead-alpha] STATUS: PASS
+CLAUDE PROFILE: $profile
+PROMOTIONS: none
+BRIEF AUDIT: $audit
+$gates
+ROUNDS: $rounds
+DISPATCH: codex-first
+INVESTIGATION: self: trivial lookup
+LANES: codex gpt-5.6-sol@xhigh
+EOF
+}
+
+triv_check() {
+  set +e
+  TRIV_OUT="$("$ROOT/bin/orch-summary-check" --strict "$TRIV" 2>&1)"
+  TRIV_RC=$?
+  set -e
+}
+
+# T1: a well-formed trivial summary needs only a populated self-check marker.
+triv_brief 'RISK: trivial'
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "T1 trivial self-check exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T1 trivial self-check risk"
+
+# T2: GATES remains mandatory for trivial.
+sed -i '/^GATES:/d' "$TRIV/summary.md"
+triv_check
+assert_eq "$TRIV_RC" "1" "T2 missing GATES exit"
+assert_has "$TRIV_OUT" "summary lacks GATES" "T2 missing GATES message"
+
+# T3-T5: the fixed marker must be anchored and followed by a description.
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) —'
+triv_check
+assert_eq "$TRIV_RC" "1" "T3 empty self-check description exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T3 empty self-check description message"
+
+triv_summary 'light sonnet@medium' 'GATES: looked fine'
+triv_check
+assert_eq "$TRIV_RC" "1" "T4 arbitrary GATES exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T4 arbitrary GATES message"
+
+triv_summary 'light sonnet@medium' "$FULL"
+triv_check
+assert_eq "$TRIV_RC" "1" "T5 full gates without marker exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T5 full gates without marker message"
+
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — ran tests; additionally codex-verify PASS'
+triv_check
+assert_eq "$TRIV_RC" "0" "T5b marker with extra evidence exit"
+
+triv_summary 'light sonnet@medium' 'GATES: codex-verify FAIL · self-check only (trivial) — ran tests'
+triv_check
+assert_eq "$TRIV_RC" "1" "T5c unanchored marker exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T5c unanchored marker message"
+
+# T6-T8: malformed, missing, and prose-only trivial declarations fall back to normal.
+triv_brief 'RISK: trivail'
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T6 misspelled RISK exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK (got 'trivail')" "T6 misspelled RISK message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T6 misspelled RISK normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T6 misspelled RISK cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T7 missing RISK exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK (got 'empty')" "T7 missing RISK message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T7 missing RISK normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T7 missing RISK cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Add a RISK: trivial tier
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T7b prose-only trivial exit"
+assert_has "$TRIV_OUT" "got 'unanchored-trivial'" "T7b prose-only trivial message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T7b prose-only trivial normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T7b prose-only trivial cannot select trivial"
+
+triv_brief 'RISK:'
+triv_check
+assert_eq "$TRIV_RC" "1" "T8 empty RISK exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK (got 'empty')" "T8 empty RISK message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T8 empty RISK normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T8 empty RISK cannot select trivial"
+
+# T9: an anchored declaration wins over an earlier prose mention.
+cat > "$TRIV/brief.md" <<'EOF'
+# Add a RISK: trivial tier
+RISK: critical
+Verification: true
+EOF
+triv_summary 'critical fable@high' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T9 prose-first critical exit"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T9 prose-first critical executable gate"
+assert_has "$TRIV_OUT" "critical risk requires claude-verifier PASS" "T9 prose-first critical verifier gate"
+assert_not_has "$TRIV_OUT" "invalid or missing RISK" "T9 prose-first anchored declaration"
+
+# T10: legacy unanchored low layouts retain their existing behavior.
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+## Risk — RISK: low
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "0" "T10 legacy low full gate exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=low)" "T10 legacy low risk"
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T10 low rejects trivial marker exit"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T10 low rejects trivial marker"
+
+# T11: normal and critical do not accept the trivial marker.
+triv_brief 'RISK: normal'
+triv_summary 'normal opus@high' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T11 normal rejects trivial marker exit"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T11 normal rejects trivial marker"
+
+triv_brief 'RISK: critical'
+triv_summary 'critical fable@high' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T11 critical rejects trivial marker exit"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T11 critical rejects trivial marker"
+
+# T12-T14: trivial keeps the normal round cap and light profile, including bold syntax.
+triv_brief 'RISK: trivial'
+triv_summary 'light sonnet@medium' "$SELF" 3
+triv_check
+assert_eq "$TRIV_RC" "1" "T12 trivial round cap exit"
+assert_has "$TRIV_OUT" "exceeds trivial cap=2" "T12 trivial round cap message"
+triv_summary 'light sonnet@medium' "$SELF" 2
+triv_check
+assert_eq "$TRIV_RC" "0" "T12 trivial round cap boundary"
+
+triv_summary 'critical fable@high' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T13 trivial profile exit"
+assert_has "$TRIV_OUT" "trivial risk should use light/Sonnet" "T13 trivial profile message"
+
+triv_brief 'RISK: **trivial**'
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "T14 bold trivial exit"
+assert_has "$TRIV_OUT" "risk=trivial" "T14 bold trivial risk"
+
+# T15: the pre-existing normal fixture and checks above remain unchanged and passing.
+set +e
+out="$("$ROOT/bin/orch-summary-check" --strict "$TASK" 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" "0" "T15 pre-existing normal fixture"
+
+# T16-T19: plan amendments can move only a matching low brief to trivial.
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: low -> trivial
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF" 1 'amended (low -> trivial: docs only)'
+triv_check
+assert_eq "$TRIV_RC" "0" "T16 low to trivial amendment exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T16 low to trivial amendment risk"
+assert_has "$TRIV_OUT" "NOTE:" "T16 low to trivial amendment note"
+
+triv_summary 'light sonnet@medium' "$SELF" 1 clean
+triv_check
+assert_eq "$TRIV_RC" "1" "T17 amendment audit exit"
+assert_has "$TRIV_OUT" "BRIEF AUDIT: amended" "T17 amendment audit message"
+
+triv_brief 'RISK: normal'
+triv_summary 'normal opus@high' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T18 normal amendment exit"
+assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade low -> trivial" "T18 normal amendment message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T18 normal amendment gates"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: critical -> trivial
+EOF
+triv_brief 'RISK: critical'
+triv_summary 'critical fable@high' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T19 critical amendment exit"
+assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade" "T19 critical amendment message"
+assert_has "$TRIV_OUT" "critical risk requires claude-verifier PASS" "T19 critical amendment gates"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: low -> normal
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "T19 low to normal amendment exit"
+assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade" "T19 low to normal amendment message"
+cp "$TASK/plan.md" "$TRIV/plan.md"
+
+# T20-T26: lock every pre-existing risk tier's gate behavior.
+triv_brief 'RISK: critical'
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS · codex-review CLEAR · claude-verifier PASS'
+triv_check
+assert_eq "$TRIV_RC" "0" "T20 critical complete gates exit"
+assert_has "$TRIV_OUT" "risk=critical" "T20 critical complete gates risk"
+
+triv_summary 'critical fable@high' "$FULL"
+triv_check
+assert_eq "$TRIV_RC" "1" "T21 critical missing verifier exit"
+assert_has "$TRIV_OUT" "critical risk requires claude-verifier PASS" "T21 critical missing verifier message"
+
+triv_brief 'RISK: normal'
+triv_summary 'normal opus@high' 'GATES: codex-verify unavailable · codex-review CLEAR · claude-verifier PASS'
+triv_check
+assert_eq "$TRIV_RC" "0" "T22 normal executable fallback exit"
+
+triv_summary 'normal opus@high' 'GATES: codex-verify unavailable · codex-review CLEAR · claude-verifier not-required'
+triv_check
+assert_eq "$TRIV_RC" "1" "T23 normal missing executable fallback exit"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T23 normal missing executable fallback message"
+
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' 'GATES: codex-verify PASS · codex-review waived (docs) · claude-verifier not-required'
+triv_check
+assert_eq "$TRIV_RC" "0" "T24 low review waiver exit"
+assert_has "$TRIV_OUT" "risk=low" "T24 low review waiver risk"
+
+triv_brief 'RISK: normal'
+triv_summary 'normal opus@high' 'GATES: codex-verify PASS · codex-review waived (docs) · claude-verifier not-required'
+triv_check
+assert_eq "$TRIV_RC" "1" "T25 normal review waiver exit"
+assert_has "$TRIV_OUT" "only low risk may waive it" "T25 normal review waiver message"
+
+triv_summary 'normal opus@high' 'GATES: codex-verify PASS · codex-review unavailable · claude-verifier PASS'
+triv_check
+assert_eq "$TRIV_RC" "0" "T26 normal review fallback exit"
+ok "trivial risk tier gate policy and safe RISK fallback"
+
 report="$(CC_ORCH_CLAUDE_PROJECTS="$TMP/empty-claude" CC_ORCH_CODEX_LOG="$TMP/no-codex.log" "$ROOT/bin/orch-usage-report" --days 1)"
 assert_has "$report" "LOCAL USAGE REPORT" "usage heading"
 assert_has "$report" "Codex wrapper runs" "Codex usage heading"

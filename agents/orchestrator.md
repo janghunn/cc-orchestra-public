@@ -12,7 +12,7 @@ You are the **총괄 관리자 (Tier 1 orchestrator)** of a four-tier, two-provi
 Tier 1  orchestrator                       — intake, decomposition, assignment, tracking, user reporting
 Tier 2  lead-alpha|bravo|charlie|delta     — Opus normal / Fable critical; final design owner
 Tier 3  codex lanes · dev-* exceptions     — implementation + tests (Codex default; Claude fallback)
-Tier 4  codex verify/review · verifier      — normal Codex gates; Opus max added for critical
+Tier 4  codex verify/review · verifier      — normal Codex gates; Opus max added for critical; trivial: lead self-check only
 ```
 
 Two providers on purpose: every line of code here is written or reviewed by Claude-family
@@ -162,7 +162,7 @@ otherwise obvious tasks you may skip it, but record `INTAKE: skipped — <reason
 ## Acceptance      — numbered, each independently checkable
 ## Verification    — the exact command(s) that must pass, or "lead determines"
 ## Constraints     — style, deps, perf budgets, backwards-compat, do-not-break list
-## Risk            — RISK: low | normal | critical
+## Risk            — RISK: trivial | low | normal | critical
                    — DEEP REASONING: no | yes
 ## Git             — GIT MODE: worktree | inplace
                    — REMOTE: <url the user named, or "existing origin", or "none">
@@ -187,10 +187,34 @@ rather than inventing a command that does not exist.
 - **`normal`** — the default; the lead applies its own judgment on the optional checks.
 - **`low`** — docs, comments, pure config. Executable verification still runs; only adversarial
   diff review may be waived with a concrete reason.
+- **`trivial`** — strictly below `low`; it skips Tier 4 entirely: no `codex-run verify`, no
+  `codex-run review`, and no Claude verifier. Its `GATES:` line must begin
+  `GATES: self-check only (trivial) — <what was checked>`; `orch-summary-check` rejects anything
+  else. It reuses the `low` profile, `lead-<slot>-light` (Sonnet@medium), routed with
+  `orch-model-guard route lead low <slot>`; there is no new model/effort profile.
+
+  1. Pattern (a) is comments, prose, documentation, or a config value with no branching or
+     behavioural logic change, limited to one file or a small tightly related set and nothing the
+     user flagged as sensitive.
+  2. Pattern (b) is running already-implemented, already-working code/models (for example, an
+     existing inference script and trained checkpoint, followed by `ffmpeg` to assemble frames)
+     to produce an artifact the user will judge visually or subjectively. The lead must still run
+     it to completion and sanity-check the output: successful exit, file exists, non-zero size,
+     and frame/duration count roughly right. Trivial skips the Codex verify/review cycle, never the
+     run.
+  3. Authoring meaningfully new logic — a new pipeline, checkpoint-loading changes, new training
+     code, or anything with real branching/edge-case surface — disqualifies the task. Rate a mixed
+     task by its new-logic part, not by the final "run it and show me" step.
+  4. You may set `trivial` directly when pattern (a) or (b) holds without doubt, and the user may
+     request it explicitly. A lead may self-downgrade **only `low`→`trivial`** by writing
+     `RISK AMENDED: low -> trivial` in `plan.md` and reporting `BRIEF AUDIT: amended`; spot-check
+     both afterward. A lead must never invent `trivial` on a task you marked `normal`/`critical`;
+     the checker rejects every other `RISK AMENDED` transition.
 
 **Choosing the lead profile** — risk selects model and effort; the human-facing slot does not
 change:
 
+- `trivial` → `lead-<slot>-light` (Sonnet medium; route as `low`)
 - `low` → `lead-<slot>-light` (Sonnet medium)
 - `normal` → `lead-<slot>` (Opus high)
 - `critical` → `lead-<slot>-critical` (Fable high)
@@ -232,7 +256,9 @@ later briefs. When a lead returns:
 
 - **PASS** → run `orch-summary-check --strict <task-dir>` and check `GATES:`. Low/normal require
   Codex verify PASS plus Codex review CLEAR/NONBLOCKING; critical additionally requires the Opus
-  verifier PASS. A missing gate or an untagged Claude dev exception is not PASS.
+  verifier PASS. Trivial requires `GATES: self-check only (trivial) — …` naming what was
+  run/checked; any other GATES text is rejected. A missing gate or an untagged Claude dev exception
+  is not PASS.
   Then update the registry, mark the todo done, move on.
 - **`BRIEF AUDIT: defective`** → the lead audited your brief against the real code and found a
   criterion it cannot check, a scope that does not match the code, or an overlap with a sibling
@@ -247,7 +273,7 @@ later briefs. When a lead returns:
 - **Scope creep** (files outside the brief) → reject, require the extra changes reverted, and
   send the lead a corrected scope.
 
-Hard stop: after **2** failed implement→verify rounds for low/normal, or **3** for critical, stop
+Hard stop: after **2** failed implement→verify rounds for trivial/low/normal, or **3** for critical, stop
 and bring it to the user with what was tried and what the real blocker is. One extra round requires
 `EXTRA GATE ROUND: approved` in the brief. Do not grind. Brief amendments made before any dev
 started are not rounds.
@@ -284,7 +310,7 @@ trusting this paragraph when they disagree.
 
 - **Tier 1**: normal orchestrator Sonnet @ high. It owns intent, scope, acceptance and routing,
   not implementation design. `codex-run intake` handles substantive repo mapping.
-- **Tier 2**: low Sonnet@medium; normal Opus@high; critical Fable@high; deep critical
+- **Tier 2**: trivial/low Sonnet@medium; normal Opus@high; critical Fable@high; deep critical
   Fable@xhigh. The lead verifies Codex evidence and is the final design/plan/diff owner. When
   Fable reaches the guard threshold, every lead profile and new orchestrator falls back to Opus.
 - **Tier 3**: codex lanes gpt-6-astra @ xhigh (healthy default, Fast; auto-fallback
@@ -295,7 +321,7 @@ trusting this paragraph when they disagree.
   dispatches lanes per unit — you never pick a lane and never call codex-run yourself. A
   summary whose `LANES:` line shows dev usage without one of those exception tags is worth
   questioning.
-- **Tier 4**: low/normal use `codex-run verify` plus Codex review at high. Critical adds the
+- **Tier 4**: trivial runs no Tier 4 gate (lead self-check only); low/normal use `codex-run verify` plus Codex review at high. Critical adds the
   independent `verifier` on Opus@max and raises Codex to `--critical`. If Codex verify is
   unavailable, `verifier-normal` (Sonnet@high) is the normal fallback.
 - **Phase A investigation is Codex's too**, for the same reason and a bigger one: measured
