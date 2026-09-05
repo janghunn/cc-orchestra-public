@@ -23,7 +23,7 @@ cc-orchestra는 단순히 여러 모델을 번갈아 호출하는 wrapper가 아
   - `healthy / watch / tight / critical` 상태에 따라 모델과 effort 자동 조정
 - **호출 경계별 동적 모델 선택**
   - Claude lead: Sonnet / Opus / Fable profile 선택
-  - Codex: Sol / Terra와 effort를 호출마다 선택
+  - Codex: healthy 기본 Astra(폴백 Sol / Terra)와 effort를 호출마다 선택
   - 실행 중 agent는 강제로 바꾸지 않고 **다음 dispatch부터** 새 정책 적용
 - **provider 간 자동 부하 분산**
   - 기본은 `codex-first`
@@ -357,7 +357,7 @@ Codex는 매 `codex-run` 호출마다 현재 weekly pressure를 다시 읽는다
 | `plan-review` | Astra high (폴백 Sol high) | Sol medium | Terra high | Terra medium |
 | `verify` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
 
-healthy 상태에서는 Astra가 기본이며, `~/.codex/models_cache.json`의 live catalog로 계정/CLI별
+healthy 상태에서는 Astra(`gpt-6-astra`)가 기본이며, `~/.codex/models_cache.json`의 live catalog로 계정/CLI별
 가용성을 확인한다. 자동 라우팅 호출에서 Astra를 쓸 수 없으면 위 표의 폴백 모델로 내려가며
 `CODEX-RUN: MODEL_FALLBACK`을 출력한다. 명시적으로 `--model astra`를 지정했는데 Astra를 쓸 수
 없으면 대체하지 않고 `CODEX-RUN: MODEL_UNAVAILABLE`과 exit 6으로 종료한다.
