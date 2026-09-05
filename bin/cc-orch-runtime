@@ -16,10 +16,9 @@ case "${1:-}" in
     exec "$SESSION" "$@"
     ;;
   *)
-    # The reset-aware runtime owns new-task routing. Keep a normal Tier-1 on PRIMARY_MODEL even
-    # if the legacy Fable guard is in its global Opus fallback state; critical/deep still retain
-    # the legacy Fable-exhaustion protection inside the core launcher.
-    export CC_ORCH_RUNTIME_ROUTING=1
+    # Pass a one-shot runtime launch marker. The core consumes and clears it so the signal cannot
+    # leak into nested direct launches; critical/deep retain legacy Fable-exhaustion protection.
+    export CC_ORCH_RUNTIME_ROUTING_LAUNCH=1
     exec "$CORE" "$@"
     ;;
 esac

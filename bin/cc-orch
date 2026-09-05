@@ -17,6 +17,13 @@ EFFORT_OVERRIDE_SET=0
 RELOAD=0
 FORCE_RELOAD=0
 
+# Runtime provenance is a one-shot launch marker from bin/cc-orch-runtime. Consume it and clear
+# it immediately: it must not survive into the exec'd session, or every nested direct cc-orch
+# call would be misread as a runtime launch and would silently skip the Fable-exhaustion
+# fallback below.
+RUNTIME_ROUTING="${CC_ORCH_RUNTIME_ROUTING_LAUNCH:-0}"
+unset CC_ORCH_RUNTIME_ROUTING_LAUNCH
+
 usage() {
   cat >&2 <<'HELP'
 usage: cc-orch [options] <project-name> [project-dir] [extra claude args...]
@@ -185,9 +192,9 @@ mv -f "$PROJECT_STATE.tmp" "$PROJECT_STATE"
 # shellcheck source=/dev/null
 . "$ORCH_HOME/model-policy.conf"
 
-# Runtime routing deliberately keeps a normal Tier-1 orchestrator on the cheap primary model.
-# The legacy guard's active=opus fallback still protects explicit critical/deep launches when
-# Fable is exhausted. Direct bin/cc-orch callers retain the historical global fallback behavior.
+# A one-shot runtime marker keeps a facade-launched normal Tier-1 on the cheap primary model.
+# The core clears that marker before the session starts, so nested direct callers retain the
+# historical global fallback behavior while facade critical/deep launches remain protected.
 ACTIVE_CONTROL="$("$ORCH_HOME/bin/orch-model-guard" active 2>/dev/null)"
 ACTIVE_CONTROL="${ACTIVE_CONTROL:-$PRIMARY_MODEL}"
 case "$PROFILE" in
@@ -195,7 +202,7 @@ case "$PROFILE" in
   critical) MODEL="$LEAD_CRITICAL_MODEL"; EFFORT="$LEAD_CRITICAL_EFFORT" ;;
   deep)     MODEL="$LEAD_DEEP_MODEL";     EFFORT="$LEAD_DEEP_EFFORT" ;;
 esac
-if [[ "${CC_ORCH_RUNTIME_ROUTING:-0}" == 1 && "$PROFILE" == normal ]]; then
+if [[ "$RUNTIME_ROUTING" == 1 && "$PROFILE" == normal ]]; then
   MODEL="${MODEL_OVERRIDE:-$PRIMARY_MODEL}"
 elif [[ "$ACTIVE_CONTROL" == "$FALLBACK_MODEL" ]]; then
   MODEL="$FALLBACK_MODEL"
@@ -213,6 +220,7 @@ case "$EFFORT" in low|medium|high|xhigh|max) ;; *) echo "cc-orch: invalid effort
 export CC_ORCH_MODEL="$MODEL"
 export CC_ORCH_EFFORT="$EFFORT"
 export CC_ORCH_PROFILE="$PROFILE"
+export CC_ORCH_RUNTIME_ROUTING="$RUNTIME_ROUTING"
 export CC_ORCH_MODEL_OVERRIDE="$MODEL_OVERRIDE_SET"
 export CC_ORCH_EFFORT_OVERRIDE="$EFFORT_OVERRIDE_SET"
 CC_ORCH_POLICY_REV="$("$ORCH_HOME/bin/orch-policy-rev" "$ORCH_HOME")"

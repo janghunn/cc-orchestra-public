@@ -58,23 +58,23 @@ User
 Tier 1  orchestrator                              Claude Sonnet @ high
         intent / scope / decomposition / routing / status
  │
- ├─ Codex intake                                 current pressure에 따라 Terra effort 조정
+ ├─ Codex intake                                 healthy 기본 Astra (폴백 Terra), pressure에 따라 조정
  │
  ▼
 Tier 2  route-lead-<slot>-<profile>               Claude
         final design / plan / diff owner          Sonnet | Opus | Fable
  │
- ├─ investigate ────────────────────────────────► Codex Sol / Terra
+ ├─ investigate ────────────────────────────────► Codex Astra (Sol 폴백)
  │
- ├─ implement ──────────────────────────────────► Codex Sol / Terra
+ ├─ implement ──────────────────────────────────► Codex Astra (Sol 폴백)
  │                                                 └─ Claude Sonnet dev-* exception
  │                                                 └─ Claude Opus fresh-eyes rescue
  │
  ├─ lead diff review                              Claude lead
  │
  ▼
-Tier 4  executable verify ──────────────────────► Codex Terra
-        semantic/regression review ─────────────► Codex Sol / Terra
+Tier 4  executable verify ──────────────────────► Codex Astra (Terra 폴백)
+        semantic/regression review ─────────────► Codex Astra (Sol 폴백)
         critical extra verifier ────────────────► Claude Opus @ max
 ```
 
@@ -83,6 +83,9 @@ Tier 4  executable verify ──────────────────
 **Tier 1 orchestrator**는 구현하지 않는다. 사용자의 요구를 task로 나누고, acceptance criteria와 risk를 정하고, 적절한 lead에 배정하고 결과를 보고한다.
 
 **Tier 2 lead**는 해당 task의 최종 설계 책임자다. Codex 조사 결과를 근거로 활용하지만, 구현 방식과 plan을 최종 결정하는 것은 lead다.
+
+모델·effort의 단일 소스는 `model-policy.conf`(고정 기본값·폴백)와
+`budget-policy.conf`(quota 압력별 Codex 라우팅, healthy = Astra)다.
 
 **Codex**는 Claude와 다른 provider family이므로 조사·구현뿐 아니라 verify/review에서도 독립적인 관점을 제공한다. 같은 family 안에서만 self-review하는 구조를 피하기 위한 핵심 장치다.
 
@@ -347,12 +350,18 @@ Codex는 매 `codex-run` 호출마다 현재 weekly pressure를 다시 읽는다
 
 | Mode | healthy | watch | tight | critical |
 |---|---|---|---|---|
-| `intake` | Terra high | Terra medium | Terra medium | Terra low |
-| `investigate` | Sol high | Terra high | Terra medium | **withheld** |
-| `implement` | Sol xhigh | Sol high | Terra high | **withheld** |
-| `review` | Sol high | Sol medium | Terra high | Terra medium |
-| `plan-review` | Sol high | Sol medium | Terra high | Terra medium |
-| `verify` | Terra high | Terra medium | Terra medium | Terra low |
+| `intake` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
+| `investigate` | Astra high (폴백 Sol high) | Terra high | Terra medium | **withheld** |
+| `implement` | Astra xhigh (폴백 Sol xhigh) | Sol high | Terra high | **withheld** |
+| `review` | Astra high (폴백 Sol high) | Sol medium | Terra high | Terra medium |
+| `plan-review` | Astra high (폴백 Sol high) | Sol medium | Terra high | Terra medium |
+| `verify` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
+
+healthy 상태에서는 Astra가 기본이며, `~/.codex/models_cache.json`의 live catalog로 계정/CLI별
+가용성을 확인한다. 자동 라우팅 호출에서 Astra를 쓸 수 없으면 위 표의 폴백 모델로 내려가며
+`CODEX-RUN: MODEL_FALLBACK`을 출력한다. 명시적으로 `--model astra`를 지정했는데 Astra를 쓸 수
+없으면 대체하지 않고 `CODEX-RUN: MODEL_UNAVAILABLE`과 exit 6으로 종료한다.
+`CC_ORCH_CODEX_CATALOG_CHECK=0`은 이 사전 catalog 검사를 끈다.
 
 ### 왜 critical에서 implement/investigate를 멈추는가
 
@@ -1016,7 +1025,9 @@ codex-run review      <workdir> <task-dir> --base <branch> [--critical]
 codex-run status      <task-dir>
 ```
 
-명시적 model/effort가 필요하면:
+명시적 model/effort가 필요하면 `--model astra`, `--model <slug>`, `--effort`, `--fast-mode`
+(선택된 Astra/Sol/Terra 모델·effort를 유지한 채 해당 호출만 공식 Fast tier로 실행), 레거시
+`--fast`(Luna 다운그레이드), `--dry-run`을 지정한다:
 
 ```bash
 codex-run ... --model sol --effort xhigh

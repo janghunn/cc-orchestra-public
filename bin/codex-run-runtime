@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Reset-aware facade for the existing codex-run. Model/effort routing is dynamic, while Fast
-# mode is an independent runtime default: every compatible Sol/Terra call gets --fast-mode unless
+# mode is an independent runtime default: every compatible Astra/Sol/Terra call gets --fast-mode unless
 # the caller deliberately selects a Luna path (--fast/--mech/--model luna) or disables it with
 # CC_ORCH_ALWAYS_FAST_MODE=0.
+# CC_ORCH_CODEX_ROUTE is exported only on the auto-routed path; it lets the core fall back from
+# an unavailable Astra without overriding an explicit caller choice.
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -17,7 +19,7 @@ ALWAYS_FAST="${CC_ORCH_ALWAYS_FAST_MODE:-${CODEX_ALWAYS_FAST_MODE:-0}}"
 
 fast_compatible_model() {
   case "$1" in
-    sol|terra|gpt-5.6-sol|gpt-5.6-terra) return 0 ;;
+    sol|terra|astra|gpt-5.6-sol|gpt-5.6-terra|gpt-6-astra) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -47,6 +49,7 @@ fi
 append_fast_if_compatible() {
   # Usage: append_fast_if_compatible <model-or-empty> <original argv...>
   local model="$1"; shift
+  unset CC_ORCH_CODEX_ROUTE
   if [ "$ALWAYS_FAST" = 1 ] && [ "$has_fast_mode" = 0 ] && [ "$fast_incompatible" = 0 ]; then
     if [ -z "$model" ] || fast_compatible_model "$model"; then
       exec "$CORE" "$@" --fast-mode
@@ -56,8 +59,12 @@ append_fast_if_compatible() {
 }
 
 case "$MODE" in
-  ""|status) exec "$CORE" "$@" ;;
+  ""|status)
+    unset CC_ORCH_CODEX_ROUTE
+    exec "$CORE" "$@"
+    ;;
   resume)
+    unset CC_ORCH_CODEX_ROUTE
     # Resume keeps the recorded thread model. Enable Fast mode only when the session index proves
     # that model is compatible; old session records without model metadata are left unchanged.
     if [ "$ALWAYS_FAST" = 1 ] && [ "$has_fast_mode" = 0 ] && [ "$fast_incompatible" = 0 ]; then
@@ -74,7 +81,10 @@ case "$MODE" in
     exec "$CORE" "$@"
     ;;
   implement|investigate|intake|review|plan-review|verify) ;;
-  *) exec "$CORE" "$@" ;;
+  *)
+    unset CC_ORCH_CODEX_ROUTE
+    exec "$CORE" "$@"
+    ;;
 esac
 
 # Disabling model auto-routing does not disable the user's global Fast preference.

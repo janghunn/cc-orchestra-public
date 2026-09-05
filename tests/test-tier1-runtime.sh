@@ -28,7 +28,11 @@ reason=test legacy fallback
 STATE
 cat > "$FAKEBIN/claude" <<'CLAUDE'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > "${TEST_ARGS:?}"
+{
+  printf '%s\n' "$*"
+  printf 'routing=%s\n' "${CC_ORCH_RUNTIME_ROUTING:-unset}"
+  printf 'launch_marker=%s\n' "${CC_ORCH_RUNTIME_ROUTING_LAUNCH:-unset}"
+} > "${TEST_ARGS:?}"
 CLAUDE
 chmod +x "$FAKEBIN/claude"
 
@@ -42,12 +46,21 @@ run_capture() {
 
 out="$(run_capture "$TMP/normal" "$ROOT/bin/cc-orch-runtime" --no-rc demo "$PROJECT")"
 assert_has "$out" "--model sonnet[1m] --effort high" "runtime normal ignores legacy Opus fallback"
+assert_has "$out" "routing=1"        "facade publishes runtime provenance to the session"
+assert_has "$out" "launch_marker=unset" "one-shot launch marker never reaches the session"
 
 out="$(run_capture "$TMP/critical" "$ROOT/bin/cc-orch-runtime" --no-rc --profile critical crit "$PROJECT")"
 assert_has "$out" "--model opus[1m] --effort high" "runtime critical keeps Fable exhaustion protection"
 
 out="$(run_capture "$TMP/direct" "$ROOT/bin/cc-orch" --no-rc legacy "$PROJECT")"
 assert_has "$out" "--model opus[1m] --effort high" "direct core preserves legacy behavior"
+assert_has "$out" "routing=0"        "direct launch publishes non-runtime provenance"
+
+out="$(run_capture "$TMP/direct-inherited" env CC_ORCH_RUNTIME_ROUTING=1 \
+  "$ROOT/bin/cc-orch" --no-rc legacyenv "$PROJECT")"
+assert_has "$out" "--model opus[1m] --effort high" \
+  "direct core ignores an inherited runtime routing marker"
+assert_has "$out" "routing=0" "direct core overrides an inherited provenance value"
 
 out="$(run_capture "$TMP/override" "$ROOT/bin/cc-orch-runtime" --no-rc --model 'opus[1m]' custom "$PROJECT")"
 assert_has "$out" "--model opus[1m] --effort high" "explicit normal model override wins"
