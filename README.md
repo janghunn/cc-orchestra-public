@@ -999,6 +999,8 @@ check는 생략하지 않는다. 새 로직을 작성하면 `trivial`이 아니�
 `BRIEF AUDIT: amended`를 기록해야 한다.
 `brief.md`의 `RISK: trivial`은 `RISK:`로 시작하는 유일한 줄이어야 하고 다른 곳에서 0열로
 인용하면 안 되며, 사유는 대시 뒤에만 쓸 수 있고 `plan.md`에는 `RISK AMENDED` 줄이 최대 하나만 있어야 한다.
+또한 brief의 fenced block이나 본문 어디에서도 `RISK:` 뒤에 다른 tier를 쓰면 안 되며,
+`GATES:` 설명에는 명령·파일·숫자를 나타내는 ASCII 영문자나 숫자가 하나 이상 있어야 한다.
 
 implement→verify 실패 round 상한:
 

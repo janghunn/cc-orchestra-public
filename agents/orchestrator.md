@@ -195,7 +195,8 @@ rather than inventing a command that does not exist.
 
   1. Pattern (a) is comments, prose, documentation, or a config value with no branching or
      behavioural logic change, limited to one file or a small tightly related set and nothing the
-     user flagged as sensitive.
+     user flagged as sensitive. For either pattern, the `GATES:` description must include at least
+     one ASCII letter or digit (a command, file, or number).
   2. Pattern (b) is running already-implemented, already-working code/models (for example, an
      existing inference script and trained checkpoint, followed by `ffmpeg` to assemble frames)
      to produce an artifact the user will judge visually or subjectively. The lead must still run
@@ -211,8 +212,9 @@ rather than inventing a command that does not exist.
      both afterward. `plan.md` may contain at most one `RISK AMENDED` line; it must read exactly
      `RISK AMENDED: low -> trivial`, optionally followed by a space and a reason. The brief's
      `RISK: trivial` must stand alone and be the only line in the brief that starts with `RISK:` —
-     never quote it at column 0 elsewhere; a reason may follow only after a dash. A lead must never
-     invent `trivial` on a task you marked `normal`/`critical`; the checker rejects every other
+     never quote it at column 0 elsewhere; a reason may follow only after a dash. No other tier may
+     be named after `RISK:` anywhere in the brief, fenced or prose. A lead must never invent
+     `trivial` on a task you marked `normal`/`critical`; the checker rejects every other
      `RISK AMENDED` transition.
 
 **Choosing the lead profile** — risk selects model and effort; the human-facing slot does not

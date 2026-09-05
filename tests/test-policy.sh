@@ -551,6 +551,31 @@ assert_has "$TRIV_OUT" "got 'ambiguous-trivial'" "T1g ambiguous trivial message"
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T1g ambiguous trivial normal gates"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T1g ambiguous trivial cannot select trivial"
 
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: trivial
+```
+## Risk — RISK: critical
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1h conflicting fenced trivial exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1h conflicting fenced trivial message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1h conflicting fenced trivial normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1h conflicting fenced trivial cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+This would otherwise be RISK: low.
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "T1i conflicting prose tier exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1i conflicting prose tier message"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T1i conflicting prose tier cannot select trivial"
+
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
 
@@ -566,10 +591,15 @@ triv_check
 assert_eq "$TRIV_RC" "1" "T3 empty self-check description exit"
 assert_has "$TRIV_OUT" "trivial risk must report" "T3 empty self-check description message"
 
-# T3b: non-ASCII descriptions work in the C locale while a bare dash remains invalid.
+# T3b: non-ASCII descriptions work in the C locale when they include ASCII evidence.
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — 문서 확인, exit 0'
+LC_ALL=C triv_check
+assert_eq "$TRIV_RC" "0" "T3b C-locale description with ASCII evidence exit"
+
 triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — 문서 확인'
 LC_ALL=C triv_check
-assert_eq "$TRIV_RC" "0" "T3b C-locale non-ASCII description exit"
+assert_eq "$TRIV_RC" "1" "T3b C-locale description without ASCII evidence exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T3b C-locale description without ASCII evidence message"
 
 triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) —'
 LC_ALL=C triv_check
@@ -585,6 +615,11 @@ triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — ...'
 triv_check
 assert_eq "$TRIV_RC" "1" "T3c ellipsis-only description exit"
 assert_has "$TRIV_OUT" "trivial risk must report" "T3c ellipsis-only description message"
+
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — ✅'
+LC_ALL=C triv_check
+assert_eq "$TRIV_RC" "1" "T3d C-locale emoji-only description exit"
+assert_has "$TRIV_OUT" "trivial risk must report" "T3d C-locale emoji-only description message"
 
 triv_summary 'light sonnet@medium' 'GATES: looked fine'
 triv_check

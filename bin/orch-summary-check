@@ -58,6 +58,10 @@ if [ -r "$BRIEF" ]; then
       parsed="ambiguous-trivial"
     elif [ "$parsed" = "trivial" ] && ! printf '%s\n' "$risk_line" | grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))'; then
       parsed="malformed-trivial"
+    # The gate-skipping tier must be unanimous: any other tier named after RISK: anywhere in the
+    # brief, fenced or prose, disqualifies it; other tiers remain unchanged.
+    elif [ "$parsed" = "trivial" ] && sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | grep -qxE 'low|normal|critical'; then
+      parsed="conflicting-trivial"
     fi
   else
     parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"
@@ -103,7 +107,9 @@ if [ -r "$SUMMARY" ]; then
       # trivial skips Tier 4 by policy; the line must still open with the lead's own self-check
       # record and say what was checked. Extra evidence may follow, but never replace it.
       desc="$(printf '%s' "$gates" | sed -n 's/^GATES:[[:space:]]*self-check only (trivial)//p' | sed 's/^[[:space:]—–:-]*//')"
-      printf '%s' "$desc" | grep -q '[^[:space:][:punct:]]' || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
+      # Every documented trivial GATES form names a command, file, or number, so require at least
+      # one ASCII letter/digit; this is locale-independent and rejects emoji/punctuation-only text.
+      printf '%s' "$desc" | grep -q '[A-Za-z0-9]' || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
     else
       codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
       printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1

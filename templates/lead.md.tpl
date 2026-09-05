@@ -283,7 +283,8 @@ given:
    transition. `plan.md` may contain at most one `RISK AMENDED` line; it must read exactly
    `RISK AMENDED: low -> trivial`, optionally followed by a space and a reason. The brief's
    `RISK: trivial` must stand alone and be the only line in the brief that starts with `RISK:` —
-   never quote it at column 0 elsewhere; a reason may follow only after a dash. Never downgrade
+   never quote it at column 0 elsewhere; a reason may follow only after a dash. No other tier may
+   be named after `RISK:` anywhere in the brief, fenced or prose. Never downgrade
    `normal`/`critical`→`trivial`, and never invent `trivial` on a task the orchestrator marked
    `normal`/`critical` — if it looks trivial, say so in `BRIEF AUDIT` and let the orchestrator decide.
 
@@ -458,7 +459,8 @@ verifier. Use the applicable self-check pattern:
 Trivial never means skipping the run; only the Codex verify/review cycle is skipped. If the unit
 required authoring meaningfully new logic, the task is not trivial — judge risk by the new-logic
 surface and return `BRIEF AUDIT: defective` proposing `low`/`normal`. The `GATES:` line must begin
-with the marker; `orch-summary-check` rejects any other trivial GATES line.
+with the marker; `orch-summary-check` rejects any other trivial GATES line. Its description must
+include at least one ASCII letter or digit (a command, file, or number).
 
 **Low/normal, dispatch=codex-first — launch both Codex modes in parallel:**
 
