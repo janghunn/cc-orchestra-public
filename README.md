@@ -385,7 +385,7 @@ Codex critical
 CODEX_ALWAYS_FAST_MODE=1
 ```
 
-이다. 자동 routing으로 선택된 지원 Sol/Terra 호출에는 Codex CLI Fast mode를 사용한다.
+이다. 자동 routing으로 선택된 지원 Astra/Sol/Terra 호출에는 Codex CLI Fast mode를 사용한다.
 
 명시적 옵션은 자동 정책보다 우선한다.
 
