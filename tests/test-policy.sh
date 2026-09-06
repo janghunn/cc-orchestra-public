@@ -793,6 +793,80 @@ assert_not_has "$TRIV_OUT" "risk=low" "N10 fenced declaration with prose cannot 
 assert_not_has "$TRIV_OUT" "risk=critical" "N10 fenced declaration with prose cannot select critical"
 triv_summary 'light sonnet@medium' "$SELF"
 
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+~~~
+This is a fenced example.
+```markdown
+RISK: critical
+~~~
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N11 tilde fence with backtick content exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N11 tilde fence with backtick content risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+This is a fenced example.
+~~~
+RISK: critical
+```
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N12 backtick fence with tilde content exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N12 backtick fence with tilde content risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+````markdown
+```
+RISK: critical
+```
+````
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N13 nested longer fence exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N13 nested longer fence risk"
+assert_not_has "$TRIV_OUT" "conflicting" "N13 nested longer fence does not conflict"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+```bash
+RISK: critical
+```
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N14 closer with trailing text exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N14 closer with trailing text risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: critical
+````
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N15 longer same-character closer exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N15 longer same-character closer risk"
+assert_not_has "$TRIV_OUT" "undeclared-trivial" "N15 longer same-character closer declaration"
+
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
 
@@ -1039,6 +1113,50 @@ assert_eq "$TRIV_RC" "1" "T18d duplicate amendment exit"
 assert_has "$TRIV_OUT" "at most one RISK AMENDED line" "T18d duplicate amendment message"
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T18d duplicate amendment gates"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T18d duplicate amendment cannot select trivial"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+```
+RISK AMENDED: low -> trivial
+```
+RISK AMENDED: low -> trivial
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF" 1 amended
+triv_check
+assert_eq "$TRIV_RC" "0" "T18e fenced amendment plus real amendment exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T18e fenced amendment plus real amendment risk"
+assert_not_has "$TRIV_OUT" "at most one" "T18e fenced amendment plus real amendment count"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+~~~
+RISK AMENDED: low -> trivial
+~~~
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$LOW_WAIVED" 1 clean
+triv_check
+assert_eq "$TRIV_RC" "0" "T18f fenced-only amendment exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=low)" "T18f fenced-only amendment risk"
+assert_not_has "$TRIV_OUT" "NOTE:" "T18f fenced-only amendment note"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T18f fenced-only amendment cannot downgrade"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+~~~
+```
+RISK AMENDED: low -> normal
+~~~
+RISK AMENDED: low -> trivial
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF" 1 amended
+triv_check
+assert_eq "$TRIV_RC" "0" "T18g mixed delimiter amendment exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T18g mixed delimiter amendment risk"
+assert_not_has "$TRIV_OUT" "at most one" "T18g mixed delimiter amendment count"
+assert_not_has "$TRIV_OUT" "may only downgrade" "T18g mixed delimiter amendment value"
 
 cat > "$TRIV/plan.md" <<'EOF'
 # Plan

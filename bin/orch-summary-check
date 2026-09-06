@@ -31,6 +31,20 @@ check_size() { # file limit
   [ "$size" -le "$limit" ] || problem warning "$(basename "$file") is ${size}B (budget ${limit}B); move detail to evidence/ or rounds/"
 }
 
+# Remove fenced blocks with delimiter- and run-length-faithful tracking: only the same character, a run at least as long, and no trailing content closes.
+strip_fences() { # file -> stdout without fenced blocks
+  awk '
+    {
+      if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
+        run = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", run)
+        ch = substr(run, 1, 1); len = length(run)
+        if (fence == "") { fence = ch; flen = len; next }
+        if (ch == fence && len >= flen && substr($0, RSTART + RLENGTH) ~ /^[[:space:]]*$/) { fence = ""; next }
+      }
+      if (fence == "") print
+    }' "$1"
+}
+
 BRIEF="$TASK_DIR/brief.md"; PLAN="$TASK_DIR/plan.md"; SUMMARY="$TASK_DIR/summary.md"
 check_size "$BRIEF" "$BRIEF_MAX_BYTES"
 check_size "$PLAN" "$PLAN_MAX_BYTES"
@@ -44,7 +58,7 @@ risk=""
 if [ -r "$BRIEF" ]; then
   # Strip fenced examples before any tier selection, counting, or conflict detection. Prefer a
   # declaration-shaped line; only briefs with no raw declaration keep the legacy prose scan.
-  nofence="$(awk '/^[[:space:]]*(```|~~~)/{f=!f; next} !f' "$BRIEF")"
+  nofence="$(strip_fences "$BRIEF")"
   anchor='^[[:space:]]*(-[[:space:]]*)?RISK:'
   anchored="$(printf '%s\n' "$nofence" | grep -E "$anchor")"
   if [ -n "$anchored" ]; then
@@ -85,16 +99,17 @@ if [ -r "$BRIEF" ]; then
 fi
 case "$risk" in trivial|low|normal|critical) ;; *) problem error "invalid or missing RISK (got '${risk:-empty}')"; risk="normal" ;; esac
 
-# A lead may downgrade only low -> trivial, recorded as a line of its own in plan.md
-# ("RISK AMENDED: low -> trivial") and reported as BRIEF AUDIT: amended. Nothing else may move.
+# A lead may downgrade only low -> trivial, recorded as a line of its own in plan.md; fenced
+# examples are ignored. The downgrade must be reported as BRIEF AUDIT: amended. Nothing else may move.
 amended=""
 downgraded=0
 if [ -r "$PLAN" ]; then
-  amended_count="$(grep -cE '^RISK AMENDED:' "$PLAN")"
+  plan_nofence="$(strip_fences "$PLAN")"
+  amended_count="$(printf '%s\n' "$plan_nofence" | grep -cE '^RISK AMENDED:')"
   if [ "$amended_count" -gt 1 ]; then
     problem error "plan.md must contain at most one RISK AMENDED line (found $amended_count)"
   elif [ "$amended_count" = 1 ]; then
-    amended="$(sed -n 's/^RISK AMENDED:[[:space:]]*\([a-z]*\)[[:space:]]*\(->\|→\)[[:space:]]*\([a-z]*\)\([[:space:]].*\)\{0,1\}$/\1 \3/p' "$PLAN" | head -1)"
+    amended="$(printf '%s\n' "$plan_nofence" | sed -n 's/^RISK AMENDED:[[:space:]]*\([a-z]*\)[[:space:]]*\(->\|→\)[[:space:]]*\([a-z]*\)\([[:space:]].*\)\{0,1\}$/\1 \3/p' | head -1)"
     printf '%s\n' "$amended" | grep -qE '^[a-z]+ [a-z]+$' || amended=""
     if [ "$amended" = "low trivial" ] && [ "$risk" = "low" ]; then
       risk="trivial"
