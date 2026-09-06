@@ -42,36 +42,41 @@ check_size "$SUMMARY" "$SUMMARY_MAX_BYTES"
 
 risk=""
 if [ -r "$BRIEF" ]; then
-  # Prefer a line that *starts* with RISK: (the brief template's form) so prose that merely
-  # mentions "RISK: x" earlier in the file cannot select the tier. Briefs without such a line
-  # keep the legacy first-mention scan, except that it may never yield the gate-skipping tier.
-  if grep -qE '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF"; then
-    risk_line="$(grep -E '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF" | head -1)"
-    anchored_count="$(grep -cE '^[[:space:]]*(-[[:space:]]*)?RISK:' "$BRIEF")"
+  # Strip fenced examples before any tier selection, counting, or conflict detection. Prefer a
+  # declaration-shaped line; briefs without one keep the legacy non-trivial first-mention scan.
+  nofence="$(awk '/^[[:space:]]*(```|~~~)/{f=!f; next} !f' "$BRIEF")"
+  anchor='^[[:space:]]*(-[[:space:]]*)?RISK:'
+  anchored="$(printf '%s\n' "$nofence" | grep -E "$anchor")"
+  if [ -n "$anchored" ]; then
+    risk_line="$(printf '%s\n' "$anchored" | head -1)"
+    anchored_count="$(printf '%s\n' "$nofence" | grep -cE "$anchor")"
     parsed="$(printf '%s\n' "$risk_line" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p')"
+    tiers="$(printf '%s\n' "$anchored" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p')"
+    # Differing valid declaration tiers always conflict; same-value non-trivial duplicates retain
+    # first-line semantics. Trivial remains stricter about any duplicate declaration.
+    if printf '%s\n' "$parsed" | grep -xE 'trivial|low|normal|critical' >/dev/null && printf '%s\n' "$tiers" | grep -vxF "$parsed" | grep -xE 'trivial|low|normal|critical' >/dev/null; then
+      parsed="conflicting-$parsed"
     # The gate-skipping tier must stand alone on its line, optionally followed by a dash-led
     # reason; "RISK: trivial | low | normal | critical" or "RISK: trivial/critical" is malformed,
     # not trivial. Only trivial gets this rule; low/normal/critical parsing stays unchanged.
-    if [ "$parsed" = "trivial" ] && [ "$anchored_count" -gt 1 ]; then
-      # A RISK: trivial line quoted elsewhere at column 0, e.g. inside a fenced block, must not
-      # select the tier; low/normal/critical keep first-anchored-line semantics unchanged.
+    elif [ "$parsed" = "trivial" ] && [ "$anchored_count" -gt 1 ]; then
       parsed="ambiguous-trivial"
     elif [ "$parsed" = "trivial" ]; then
-      # The gate-skipping tier's declaration must be column-0, outside fenced code, unique and
-      # stand-alone, and no other tier may be named after RISK: anywhere in the file — every
-      # occurrence, not just the last per line.
-      nofence="$(awk '/^[[:space:]]*(```|~~~)/{f=!f; next} !f' "$BRIEF")"
-      if grep -oE 'RISK:[[:space:]]*\*{0,2}[a-z]+' "$BRIEF" | grep -oE '[a-z]+$' | grep -qxE 'low|normal|critical'; then
-        parsed="conflicting-trivial"
-      elif [ "$(printf '%s\n' "$nofence" | grep -c '^RISK:')" != 1 ]; then
+      # The gate-skipping declaration must be column-0, unique, and stand-alone.
+      if [ "$(printf '%s\n' "$nofence" | grep -c '^RISK:')" != 1 ]; then
         parsed="undeclared-trivial"
       elif ! printf '%s\n' "$nofence" | grep -qE '^RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))'; then
         parsed="malformed-trivial"
       fi
     fi
   else
-    parsed="$(sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' "$BRIEF" | head -1)"
-    [ "$parsed" = "trivial" ] && parsed="unanchored-trivial"
+    parsed="$(printf '%s\n' "$nofence" | sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' | head -1)"
+    if [ "$parsed" = "trivial" ]; then
+      parsed="unanchored-trivial"
+    elif [ -z "$parsed" ] && grep -E "$anchor" "$BRIEF" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p' | grep -x 'trivial' >/dev/null; then
+      # A fenced-only trivial declaration cannot select a tier, but keeps its diagnostic label.
+      parsed="undeclared-trivial"
+    fi
   fi
   [ -n "$parsed" ] && risk="$parsed"
 fi

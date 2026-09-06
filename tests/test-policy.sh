@@ -546,10 +546,8 @@ RISK: trivial
 Verification: true
 EOF
 triv_check
-assert_eq "$TRIV_RC" "1" "T1g ambiguous trivial exit"
-assert_has "$TRIV_OUT" "got 'ambiguous-trivial'" "T1g ambiguous trivial message"
-assert_has "$TRIV_OUT" "executable verification did not PASS" "T1g ambiguous trivial normal gates"
-assert_not_has "$TRIV_OUT" "risk=trivial" "T1g ambiguous trivial cannot select trivial"
+assert_eq "$TRIV_RC" "0" "T1g fenced same-tier example does not block trivial exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T1g fenced same-tier example does not block trivial risk"
 
 cat > "$TRIV/brief.md" <<'EOF'
 # Test
@@ -561,8 +559,8 @@ Verification: true
 EOF
 triv_check
 assert_eq "$TRIV_RC" "1" "T1h conflicting fenced trivial exit"
-assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1h conflicting fenced trivial message"
-assert_has "$TRIV_OUT" "executable verification did not PASS" "T1h conflicting fenced trivial normal gates"
+assert_has "$TRIV_OUT" "critical risk requires claude-verifier PASS" "T1h legacy heading resolves critical"
+assert_not_has "$TRIV_OUT" "invalid or missing RISK" "T1h legacy heading is a valid tier"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T1h conflicting fenced trivial cannot select trivial"
 
 cat > "$TRIV/brief.md" <<'EOF'
@@ -572,9 +570,8 @@ This would otherwise be RISK: low.
 Verification: true
 EOF
 triv_check
-assert_eq "$TRIV_RC" "1" "T1i conflicting prose tier exit"
-assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1i conflicting prose tier message"
-assert_not_has "$TRIV_OUT" "risk=trivial" "T1i conflicting prose tier cannot select trivial"
+assert_eq "$TRIV_RC" "0" "T1i prose tier does not conflict exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T1i prose tier does not conflict risk"
 
 cat > "$TRIV/brief.md" <<'EOF'
 # Test
@@ -596,9 +593,8 @@ Prior estimate RISK: critical; selected RISK: trivial
 Verification: true
 EOF
 triv_check
-assert_eq "$TRIV_RC" "1" "T1k repeated-line conflicting tier exit"
-assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "T1k repeated-line conflicting tier message"
-assert_not_has "$TRIV_OUT" "risk=trivial" "T1k repeated-line conflicting tier cannot select trivial"
+assert_eq "$TRIV_RC" "0" "T1k repeated prose tiers do not conflict exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T1k repeated prose tiers do not conflict risk"
 
 cat > "$TRIV/brief.md" <<'EOF'
 # Test
@@ -629,6 +625,155 @@ EOF
 triv_check
 assert_eq "$TRIV_RC" "1" "T1n unterminated-fence trivial exit"
 assert_has "$TRIV_OUT" "got 'undeclared-trivial'" "T1n unterminated-fence trivial message"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+Correct format:
+~~~
+## Risk
+RISK: critical
+DEEP REASONING: no
+~~~
+## Risk
+RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "0" "N1 fenced example before trivial exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N1 fenced example before trivial risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: low
+```
+## Risk
+RISK: critical
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "1" "N2 fenced low before critical exit"
+assert_has "$TRIV_OUT" "critical risk requires claude-verifier PASS" "N2 fenced low before critical gate"
+assert_not_has "$TRIV_OUT" "risk=low" "N2 fenced low cannot select low"
+triv_summary 'light sonnet@medium' "$SELF"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+## Risk
+RISK: trivial
+## Context
+An old example once had RISK: critical mid-sentence and it hijacked the parser.
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "0" "N3 prose mention after trivial exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N3 prose mention after trivial risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+## Risk
+RISK: trivial
+## Context
+The bad form was `RISK: normal` inside a sentence.
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "0" "N4 inline code mention after trivial exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N4 inline code mention after trivial risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+RISK: critical
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "N5 conflicting trivial declaration exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "N5 conflicting trivial declaration message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "N5 conflicting trivial declaration normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N5 conflicting trivial declaration cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+  - RISK: normal
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "N5b bulleted conflict exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "N5b bulleted conflict message"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "N5b bulleted conflict normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N5b bulleted conflict cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: critical
+```
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "1" "N6 fenced-only critical exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK (got 'empty')" "N6 fenced-only critical message"
+assert_not_has "$TRIV_OUT" "risk=critical" "N6 fenced-only critical cannot select critical"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N6 fenced-only critical cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+Correct format:
+```markdown
+## Risk
+RISK: critical
+DEEP REASONING: no
+```
+## Risk
+RISK: trivial
+Verification: true
+EOF
+triv_check
+assert_eq "$TRIV_RC" "0" "N7 language-tagged fence before trivial exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N7 language-tagged fence before trivial risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: critical
+RISK: low
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "1" "N8 stricter-first non-trivial conflict exit"
+assert_has "$TRIV_OUT" "got 'conflicting-critical'" "N8 stricter-first non-trivial conflict message"
+assert_not_has "$TRIV_OUT" "risk=low" "N8 stricter-first conflict cannot select low"
+assert_not_has "$TRIV_OUT" "risk=critical" "N8 stricter-first conflict cannot select critical"
+triv_summary 'light sonnet@medium' "$SELF"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: low
+RISK: low
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "0" "N8b same-value low duplicate exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=low)" "N8b same-value low duplicate risk"
+triv_summary 'light sonnet@medium' "$SELF"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK:
+RISK: low
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "1" "N9 invalid first declaration exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK (got 'empty')" "N9 invalid first declaration message"
+assert_not_has "$TRIV_OUT" "conflicting" "N9 invalid first declaration is not a conflict"
+assert_not_has "$TRIV_OUT" "risk=low" "N9 invalid first declaration cannot select low"
+triv_summary 'light sonnet@medium' "$SELF"
 
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
@@ -758,6 +903,7 @@ triv_check
 assert_eq "$TRIV_RC" "1" "T10 low rejects trivial marker exit"
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T10 low rejects trivial marker"
 
+# T10b: differing anchored declarations fail for every tier.
 cat > "$TRIV/brief.md" <<'EOF'
 # Test
 RISK: low
@@ -766,8 +912,10 @@ Verification: true
 EOF
 triv_summary 'light sonnet@medium' "$LOW_WAIVED"
 triv_check
-assert_eq "$TRIV_RC" "0" "T10b multiple anchored non-trivial exit"
-assert_has "$TRIV_OUT" "risk=low" "T10b multiple anchored non-trivial first-line risk"
+assert_eq "$TRIV_RC" "1" "T10b conflicting non-trivial declarations exit"
+assert_has "$TRIV_OUT" "got 'conflicting-low'" "T10b conflicting non-trivial declarations message"
+assert_not_has "$TRIV_OUT" "risk=low" "T10b conflict cannot select low"
+assert_not_has "$TRIV_OUT" "risk=critical" "T10b conflict cannot select critical"
 
 # T11: normal and critical do not accept the trivial marker.
 triv_brief 'RISK: normal'
