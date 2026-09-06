@@ -214,7 +214,9 @@ rather than inventing a command that does not exist.
      `RISK AMENDED: low -> trivial`, optionally followed by a space and a reason. The brief's trivial
      declaration must be `RISK: trivial` at column 0, outside any fenced code block, never indented
      or bulleted, and the only line anywhere in the brief that starts with `RISK:`; a reason may
-     follow only after a dash. No other tier may be named after `RISK:` anywhere in the brief. A
+     follow only after a dash. Another tier conflicts only when it appears in a separate,
+     declaration-shaped line outside fenced code, starting at column 0 with at most one leading
+     dash; a fenced example or prose mention does not conflict. A
      lead must never invent `trivial` on a task you marked `normal`/`critical`; the checker rejects
      every other `RISK AMENDED` transition.
 

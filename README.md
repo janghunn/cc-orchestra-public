@@ -1000,7 +1000,7 @@ check는 생략하지 않는다. 새 로직을 작성하면 `trivial`이 아니�
 `brief.md`의 trivial 선언은 fenced code block 밖의 0열에 `RISK: trivial`로 써야 하며,
 들여쓰기나 bullet을 쓰면 안 되고 brief 전체에서 `RISK:`로 시작하는 유일한 줄이어야 한다.
 사유는 대시 뒤에만 쓸 수 있고 `plan.md`에는 `RISK AMENDED` 줄이 최대 하나만 있어야 한다.
-또한 brief 어디에서도 `RISK:` 뒤에 다른 tier를 쓰면 안 되며,
+또한 fenced code block 밖의 0열에서 선택적으로 대시 하나 뒤에 필드 마커로 시작하는 별도 선언형 줄에서 다른 tier를 선언한 경우에만 충돌하며, 일반 문장이나 fenced 예시의 언급은 충돌로 보지 않으며,
 `GATES:` 설명에는 명령·파일·숫자를 나타내는 ASCII 영문자나 숫자가 하나 이상 있어야 한다.
 
 implement→verify 실패 round 상한:
