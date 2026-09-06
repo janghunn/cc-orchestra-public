@@ -31,9 +31,9 @@ check_size() { # file limit
   [ "$size" -le "$limit" ] || problem warning "$(basename "$file") is ${size}B (budget ${limit}B); move detail to evidence/ or rounds/"
 }
 
-# Remove fenced blocks with delimiter- and run-length-faithful tracking: only the same character, a run at least as long, and no trailing content closes.
+# Remove fenced blocks with delimiter- and run-length-faithful tracking: only the same character, a run at least as long, and no trailing content closes; NUL bytes are mapped to \001 so they cannot vanish inside command substitution.
 strip_fences() { # file -> stdout without fenced blocks
-  awk '
+  tr '\000' '\001' < "$1" | awk '
     {
       if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
         run = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", run)
@@ -42,7 +42,7 @@ strip_fences() { # file -> stdout without fenced blocks
         if (ch == fence && len >= flen && substr($0, RSTART + RLENGTH) ~ /^[[:space:]]*$/) { fence = ""; next }
       }
       if (fence == "") print
-    }' "$1"
+    }'
 }
 
 BRIEF="$TASK_DIR/brief.md"; PLAN="$TASK_DIR/plan.md"; SUMMARY="$TASK_DIR/summary.md"

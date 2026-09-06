@@ -867,6 +867,13 @@ assert_eq "$TRIV_RC" "0" "N15 longer same-character closer exit"
 assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N15 longer same-character closer risk"
 assert_not_has "$TRIV_OUT" "undeclared-trivial" "N15 longer same-character closer declaration"
 
+printf '# Test\nRISK: tri\000vial\nVerification: true\n' > "$TRIV/brief.md"
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "N16 NUL in trivial tier exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK" "N16 NUL in trivial tier message"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N16 NUL in trivial tier cannot select trivial"
+
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
 
@@ -1157,6 +1164,15 @@ assert_eq "$TRIV_RC" "0" "T18g mixed delimiter amendment exit"
 assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "T18g mixed delimiter amendment risk"
 assert_not_has "$TRIV_OUT" "at most one" "T18g mixed delimiter amendment count"
 assert_not_has "$TRIV_OUT" "may only downgrade" "T18g mixed delimiter amendment value"
+
+printf '# Plan\nRISK AMENDED: low -> tri\000vial\n' > "$TRIV/plan.md"
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF" 1 amended
+triv_check
+assert_eq "$TRIV_RC" "1" "T18h NUL in amendment tier exit"
+assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade" "T18h NUL in amendment tier message"
+assert_has "$TRIV_OUT" "got 'malformed'" "T18h NUL in amendment tier value"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T18h NUL in amendment tier cannot downgrade"
 
 cat > "$TRIV/plan.md" <<'EOF'
 # Plan
