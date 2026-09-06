@@ -871,8 +871,17 @@ printf '# Test\nRISK: tri\000vial\nVerification: true\n' > "$TRIV/brief.md"
 triv_summary 'light sonnet@medium' "$SELF"
 triv_check
 assert_eq "$TRIV_RC" "1" "N16 NUL in trivial tier exit"
+assert_has "$TRIV_OUT" "brief.md contains NUL bytes" "N16 NUL in trivial tier file message"
 assert_has "$TRIV_OUT" "invalid or missing RISK" "N16 NUL in trivial tier message"
 assert_not_has "$TRIV_OUT" "risk=trivial" "N16 NUL in trivial tier cannot select trivial"
+
+printf '# Test\nRISK: low\000critical\nVerification: true\n' > "$TRIV/brief.md"
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "1" "N17 NUL between valid tiers exit"
+assert_has "$TRIV_OUT" "brief.md contains NUL bytes" "N17 NUL between valid tiers file message"
+assert_not_has "$TRIV_OUT" "risk=low" "N17 NUL between valid tiers cannot select low"
+assert_not_has "$TRIV_OUT" "risk=critical" "N17 NUL between valid tiers cannot select critical"
 
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
@@ -1170,8 +1179,8 @@ triv_brief 'RISK: low'
 triv_summary 'light sonnet@medium' "$SELF" 1 amended
 triv_check
 assert_eq "$TRIV_RC" "1" "T18h NUL in amendment tier exit"
-assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade" "T18h NUL in amendment tier message"
-assert_has "$TRIV_OUT" "got 'malformed'" "T18h NUL in amendment tier value"
+assert_has "$TRIV_OUT" "plan.md contains NUL bytes" "T18h NUL in amendment tier file message"
+assert_not_has "$TRIV_OUT" "NOTE:" "T18h NUL in amendment tier note"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T18h NUL in amendment tier cannot downgrade"
 
 cat > "$TRIV/plan.md" <<'EOF'

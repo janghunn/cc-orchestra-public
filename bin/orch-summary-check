@@ -31,9 +31,10 @@ check_size() { # file limit
   [ "$size" -le "$limit" ] || problem warning "$(basename "$file") is ${size}B (budget ${limit}B); move detail to evidence/ or rounds/"
 }
 
-# Remove fenced blocks with delimiter- and run-length-faithful tracking: only the same character, a run at least as long, and no trailing content closes; NUL bytes are mapped to \001 so they cannot vanish inside command substitution.
+# Remove fenced blocks with delimiter- and run-length-faithful tracking: only the same character, a run at least as long, and no trailing content closes; a file containing NUL bytes yields no output and exit 1 so callers fail closed.
 strip_fences() { # file -> stdout without fenced blocks
-  tr '\000' '\001' < "$1" | awk '
+  if ! tr -d '\000' < "$1" | cmp -s - "$1"; then return 1; fi
+  awk '
     {
       if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
         run = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", run)
@@ -42,7 +43,7 @@ strip_fences() { # file -> stdout without fenced blocks
         if (ch == fence && len >= flen && substr($0, RSTART + RLENGTH) ~ /^[[:space:]]*$/) { fence = ""; next }
       }
       if (fence == "") print
-    }'
+    }' "$1"
 }
 
 BRIEF="$TASK_DIR/brief.md"; PLAN="$TASK_DIR/plan.md"; SUMMARY="$TASK_DIR/summary.md"
@@ -58,7 +59,7 @@ risk=""
 if [ -r "$BRIEF" ]; then
   # Strip fenced examples before any tier selection, counting, or conflict detection. Prefer a
   # declaration-shaped line; only briefs with no raw declaration keep the legacy prose scan.
-  nofence="$(strip_fences "$BRIEF")"
+  if ! nofence="$(strip_fences "$BRIEF")"; then problem error "brief.md contains NUL bytes"; fi
   anchor='^[[:space:]]*(-[[:space:]]*)?RISK:'
   anchored="$(printf '%s\n' "$nofence" | grep -E "$anchor")"
   if [ -n "$anchored" ]; then
@@ -104,7 +105,7 @@ case "$risk" in trivial|low|normal|critical) ;; *) problem error "invalid or mis
 amended=""
 downgraded=0
 if [ -r "$PLAN" ]; then
-  plan_nofence="$(strip_fences "$PLAN")"
+  if ! plan_nofence="$(strip_fences "$PLAN")"; then problem error "plan.md contains NUL bytes"; fi
   amended_count="$(printf '%s\n' "$plan_nofence" | grep -cE '^RISK AMENDED:')"
   if [ "$amended_count" -gt 1 ]; then
     problem error "plan.md must contain at most one RISK AMENDED line (found $amended_count)"
