@@ -43,7 +43,7 @@ check_size "$SUMMARY" "$SUMMARY_MAX_BYTES"
 risk=""
 if [ -r "$BRIEF" ]; then
   # Strip fenced examples before any tier selection, counting, or conflict detection. Prefer a
-  # declaration-shaped line; briefs without one keep the legacy non-trivial first-mention scan.
+  # declaration-shaped line; only briefs with no raw declaration keep the legacy prose scan.
   nofence="$(awk '/^[[:space:]]*(```|~~~)/{f=!f; next} !f' "$BRIEF")"
   anchor='^[[:space:]]*(-[[:space:]]*)?RISK:'
   anchored="$(printf '%s\n' "$nofence" | grep -E "$anchor")"
@@ -70,12 +70,15 @@ if [ -r "$BRIEF" ]; then
       fi
     fi
   else
-    parsed="$(printf '%s\n' "$nofence" | sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' | head -1)"
-    if [ "$parsed" = "trivial" ]; then
-      parsed="unanchored-trivial"
-    elif [ -z "$parsed" ] && grep -E "$anchor" "$BRIEF" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p' | grep -x 'trivial' >/dev/null; then
-      # A fenced-only trivial declaration cannot select a tier, but keeps its diagnostic label.
-      parsed="undeclared-trivial"
+    if grep -qE "$anchor" "$BRIEF"; then
+      # Every declaration-shaped line is fenced: fail closed, preserving the trivial diagnostic.
+      parsed=""
+      if grep -E "$anchor" "$BRIEF" | sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\2/p' | grep -x 'trivial' >/dev/null; then
+        parsed="undeclared-trivial"
+      fi
+    else
+      parsed="$(printf '%s\n' "$nofence" | sed -n 's/.*RISK:[[:space:]]*\*\{0,2\}\([a-z]*\).*/\1/p' | head -1)"
+      [ "$parsed" = "trivial" ] && parsed="unanchored-trivial"
     fi
   fi
   [ -n "$parsed" ] && risk="$parsed"

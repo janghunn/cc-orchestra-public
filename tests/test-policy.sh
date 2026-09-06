@@ -559,9 +559,10 @@ Verification: true
 EOF
 triv_check
 assert_eq "$TRIV_RC" "1" "T1h conflicting fenced trivial exit"
-assert_has "$TRIV_OUT" "critical risk requires claude-verifier PASS" "T1h legacy heading resolves critical"
-assert_not_has "$TRIV_OUT" "invalid or missing RISK" "T1h legacy heading is a valid tier"
+assert_has "$TRIV_OUT" "got 'undeclared-trivial'" "T1h fenced trivial diagnostic"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T1h fenced trivial normal gates"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T1h conflicting fenced trivial cannot select trivial"
+assert_not_has "$TRIV_OUT" "risk=critical" "T1h prose heading cannot select critical"
 
 cat > "$TRIV/brief.md" <<'EOF'
 # Test
@@ -773,6 +774,23 @@ assert_eq "$TRIV_RC" "1" "N9 invalid first declaration exit"
 assert_has "$TRIV_OUT" "invalid or missing RISK (got 'empty')" "N9 invalid first declaration message"
 assert_not_has "$TRIV_OUT" "conflicting" "N9 invalid first declaration is not a conflict"
 assert_not_has "$TRIV_OUT" "risk=low" "N9 invalid first declaration cannot select low"
+triv_summary 'light sonnet@medium' "$SELF"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+RISK: critical
+```
+## Context
+Earlier drafts called this RISK: low in passing.
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+triv_check
+assert_eq "$TRIV_RC" "1" "N10 fenced declaration with prose exit"
+assert_has "$TRIV_OUT" "invalid or missing RISK (got 'empty')" "N10 fenced declaration with prose message"
+assert_not_has "$TRIV_OUT" "risk=low" "N10 fenced declaration with prose cannot select low"
+assert_not_has "$TRIV_OUT" "risk=critical" "N10 fenced declaration with prose cannot select critical"
 triv_summary 'light sonnet@medium' "$SELF"
 
 triv_brief 'RISK: trivial'
