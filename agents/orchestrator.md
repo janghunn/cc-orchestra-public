@@ -162,8 +162,9 @@ otherwise obvious tasks you may skip it, but record `INTAKE: skipped — <reason
 ## Acceptance      — numbered, each independently checkable
 ## Verification    — the exact command(s) that must pass, or "lead determines"
 ## Constraints     — style, deps, perf budgets, backwards-compat, do-not-break list
-## Risk            — RISK: trivial | low | normal | critical
-                   — DEEP REASONING: no | yes
+## Risk
+RISK: trivial | low | normal | critical
+DEEP REASONING: no | yes
 ## Git             — GIT MODE: worktree | inplace
                    — REMOTE: <url the user named, or "existing origin", or "none">
                    — BRANCH: orch/<NN>-<slug>
