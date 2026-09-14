@@ -737,6 +737,8 @@ git status --short
 
 선택형 `PreToolUse` 수동 폴링 방지 hook은 `hooks/orch-poll-guard.sh`에 있으며 등록 방법은 `OPERATIONS.md`를 참고한다.
 
+`build-roster-runtime.sh`는 렌더링한 38개 프로필의 대상 경로, 원본 템플릿, 양쪽 SHA-256 해시와 저장소 커밋을 `${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}/.install-manifest.json`에 NDJSON으로 기록한다(`CC_ORCH_MANIFEST`로 경로 변경 가능). `~/.claude/orchestra/bin/orch-doctor [manifest-path]`는 파일 누락, 출력 변경, 오래된 템플릿, 저장소 버전 불일치를 검사하며, 모두 일치하면 0, 문제가 있으면 1, 매니페스트가 없거나 잘못되었으면 2로 종료한다. Upstream 안내는 fetch 없이 로컬 추적 ref만 확인하므로 아직 fetch하지 않은 원격 변경은 감지하지 못한다. `build-roster.sh`만 실행하면 22개 프로필만 추적하며, 기존 route 파일은 디스크에 남지만 runtime builder를 다시 실행할 때까지 매니페스트에서 빠진다. Quota에 따른 `orch-model-guard set` 전환은 매니페스트 갱신 없이 렌더링된 파일을 의도적으로 변경하므로, 해당 `lead-*.md`의 `DRIFTED` 표시는 다음 roster 재빌드까지 예상되는 정상 동작이다.
+
 ---
 
 # 실행 예시

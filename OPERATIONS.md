@@ -37,6 +37,18 @@ After the first installation of this branch, reload an existing cc-orch session 
 caches the 16 new `route-lead-*` agent types. Ordinary quota/reset movement after that does not
 require another reload.
 
+`build-roster-runtime.sh` records all 38 rendered profiles in the NDJSON manifest
+`${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}/.install-manifest.json` (override with
+`CC_ORCH_MANIFEST`), including destination, source template, both SHA-256 hashes, and repo commit.
+Run `~/.claude/orchestra/bin/orch-doctor [manifest-path]` to check for missing files, changed
+output, stale templates, or a repo-version mismatch; it exits 0 when all entries match, 1 for
+problems, and 2 when the manifest is absent or invalid. Its optional upstream note uses only
+the local tracking ref, without fetching, so it cannot detect remote changes that have never
+been fetched. Running `build-roster.sh` alone tracks only its 22 profiles; existing route files
+remain on disk but leave the manifest until the runtime builder runs again. A quota-driven
+`orch-model-guard set` switch intentionally changes rendered files without updating the manifest,
+so affected `lead-*.md` files show expected `DRIFTED` results until the next roster rebuild.
+
 ## Persistent sessions and worktrees
 
 Create a task in its own branch, worktree, and detached tmux session:
