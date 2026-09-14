@@ -32,6 +32,8 @@ bash tests/test-runtime.sh
 
 이 런타임 기능을 처음 설치한 뒤 이미 실행 중이던 cc-orch 세션이 있다면, 새로 생성된 16개의 `route-lead-*` agent type을 Claude Code가 캐시하도록 **한 번만 reload**하는 것이 좋습니다. 그 이후에는 일반적인 사용량 변화나 리셋 시각 변화 때문에 다시 reload할 필요가 없습니다.
 
+`build-roster-runtime.sh`는 렌더링한 38개 프로필의 대상 경로, 원본 템플릿, 양쪽 SHA-256 해시와 저장소 커밋을 `${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}/.install-manifest.json`에 NDJSON으로 기록합니다(`CC_ORCH_MANIFEST`로 경로 변경 가능). `~/.claude/orchestra/bin/orch-doctor [manifest-path]`로 파일 누락, 출력 변경, 오래된 템플릿, 저장소 버전 불일치를 확인할 수 있으며, 모두 일치하면 0, 문제가 있으면 1, 매니페스트가 없거나 잘못되었으면 2로 종료합니다. 선택적으로 표시되는 upstream 안내는 fetch 없이 로컬 추적 ref만 비교하므로 아직 fetch하지 않은 원격 변경은 감지하지 못합니다. `build-roster.sh`만 실행하면 매니페스트는 22개 프로필만 추적하며, 기존 route 파일은 디스크에 남지만 runtime builder를 다시 실행할 때까지 추적 대상에서 빠집니다. Quota에 따른 `orch-model-guard set` 전환은 매니페스트 갱신 없이 렌더링된 파일을 의도적으로 변경하므로, 해당 `lead-*.md`의 `DRIFTED` 표시는 다음 roster 재빌드까지 예상되는 정상 동작입니다.
+
 ## 지속형 세션과 worktree
 
 작업별로 별도 브랜치, worktree, detached tmux 세션을 한 번에 만들 수 있습니다.
