@@ -1,0 +1,68 @@
+{
+  "orchestrator": {
+    "normal": [
+      "gpt-6-astra",
+      "high"
+    ],
+    "critical": [
+      "gpt-6-astra",
+      "xhigh"
+    ],
+    "deep": [
+      "gpt-6-astra",
+      "max"
+    ]
+  },
+  "lead": {
+    "light": [
+      "gpt-6-astra",
+      "medium"
+    ],
+    "normal": [
+      "gpt-6-astra",
+      "xhigh"
+    ],
+    "critical": [
+      "gpt-6-astra",
+      "xhigh"
+    ],
+    "deep": [
+      "gpt-6-astra",
+      "max"
+    ]
+  },
+  "worker": [
+    "gpt-6-astra",
+    "xhigh"
+  ],
+  "mechanical": [
+    "gpt-6-astra",
+    "medium"
+  ],
+  "verify": [
+    "gpt-6-astra",
+    "high"
+  ],
+  "review": [
+    "gpt-6-astra",
+    "xhigh"
+  ],
+  "auditor": [
+    "gpt-6-astra",
+    "max"
+  ],
+  "intake": [
+    "gpt-6-astra",
+    "medium"
+  ],
+  "investigate": [
+    "gpt-6-astra",
+    "high"
+  ],
+  "plan-review": [
+    "gpt-6-astra",
+    "high"
+  ],
+  "fallback_models": [],
+  "max_concurrent_threads": 12
+}

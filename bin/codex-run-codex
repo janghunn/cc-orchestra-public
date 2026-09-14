@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Astra-only worker/gate lanes, including standalone use outside an orchestra session.
+set -euo pipefail
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export CC_ORCH_BACKEND=codex
+export CC_ORCH_STATE_DIR="${CC_ORCH_STATE_DIR:-$HOME/.local/state/cc-orchestra-codex}"
+exec "$REPO_DIR/bin/codex-run-runtime" "$@"

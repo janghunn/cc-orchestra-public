@@ -8,6 +8,18 @@ REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 CORE="$REPO_DIR/bin/cc-orch"
 SESSION="$REPO_DIR/bin/cc-orch-session"
 
+# Select the backend before touching any Claude launcher or quota path.
+if [ "${1:-}" = --backend ]; then
+  [ "$#" -ge 2 ] || { echo 'cc-orch: --backend needs hybrid or codex' >&2; exit 2; }
+  export CC_ORCH_BACKEND="$2"
+  shift 2
+fi
+case "${CC_ORCH_BACKEND:-claude}" in
+  codex) exec "$REPO_DIR/bin/cc-orch-codex" "$@" ;;
+  claude|hybrid) export CC_ORCH_BACKEND=claude ;;
+  *) echo 'cc-orch: backend must be hybrid (alias: claude) or codex' >&2; exit 2 ;;
+esac
+
 [ -x "$CORE" ] || { echo "cc-orch: missing $CORE" >&2; exit 2; }
 
 case "${1:-}" in

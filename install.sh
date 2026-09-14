@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR="${CC_ORCH_BIN_DIR:-$HOME/.local/bin}"
 RUNTIME_HOOK="$REPO_DIR/hooks/orch-runtime-context.sh"
 
 MODE=install
@@ -25,9 +25,11 @@ usage:
   ./install.sh
   ./install.sh --check
   ./install.sh --safety-hooks-only
+  ./install.sh --codex-only
   ./install.sh --bootstrap [--skip-auth] [--skip-tests]
 
 modes:
+  --codex-only   install Codex launchers without Claude, usage polling, or a timer
   --safety-hooks-only  merge only the two runtime safety hooks into Claude settings
   --check       inspect the current cc-orchestra installation without changing it
   --bootstrap   prepare a fresh Linux user after the repository has been cloned:
@@ -61,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       MODE=safety-hooks-only
       ;;
     --skip-auth) SKIP_AUTH=1 ;;
+    --codex-only)
+      [[ "$MODE" == install ]] || { echo "ERROR: choose only one mode." >&2; exit 2; }
+      MODE=codex-only
+      ;;
     --skip-tests) SKIP_TESTS=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -424,6 +430,9 @@ install_repo() {
   link "$REPO_DIR/bin/orch-model-guard-runtime"  "$BIN_DIR/orch-model-guard"
   link "$REPO_DIR/bin/orch-summary-check"        "$BIN_DIR/orch-summary-check"
   link "$REPO_DIR/bin/orch-usage-report"         "$BIN_DIR/orch-usage-report"
+  link "$REPO_DIR/bin/cc-orch-codex"             "$BIN_DIR/cc-orch-codex"
+  link "$REPO_DIR/bin/codex-run-codex"           "$BIN_DIR/codex-run-codex"
+  link "$REPO_DIR/bin/orch-codex-route"          "$BIN_DIR/orch-codex-route"
 
   chmod +x "$REPO_DIR"/*.sh "$REPO_DIR/bin/"* "$REPO_DIR/hooks/"*.sh
 
@@ -443,6 +452,20 @@ install_repo() {
     *) echo "NOTE: $BIN_DIR is not on PATH — add it to use cc-orch directly." ;;
   esac
   echo "done. try: cc-orch session --help; orch-model-guard budget"
+}
+
+install_codex_only() {
+  command -v python3 >/dev/null || die 'Python 3 is required'
+  command -v codex >/dev/null || die 'Codex CLI is required; install and log in before using this mode'
+  mkdir -p "$BIN_DIR"
+  link "$REPO_DIR/bin/cc-orch-codex" "$BIN_DIR/cc-orch"
+  link "$REPO_DIR/bin/cc-orch-codex" "$BIN_DIR/cc-orch-codex"
+  link "$REPO_DIR/bin/codex-run-codex" "$BIN_DIR/codex-run"
+  link "$REPO_DIR/bin/codex-run-codex" "$BIN_DIR/codex-run-codex"
+  link "$REPO_DIR/bin/orch-codex-route" "$BIN_DIR/orch-codex-route"
+  link "$REPO_DIR/bin/orch-summary-check" "$BIN_DIR/orch-summary-check"
+  echo 'Codex-only launchers installed. No Claude settings, agents or timer changed.'
+  echo 'Start: cc-orch-codex <project-name> [project-dir]'
 }
 
 run_regression_tests() {
@@ -503,6 +526,9 @@ bootstrap() {
 }
 
 case "$MODE" in
+  codex-only)
+    install_codex_only
+    ;;
   safety-hooks-only)
     install_safety_hooks
     ;;

@@ -58,12 +58,22 @@ set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 STATE_DIR="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
+if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+  STATE_DIR="${CC_ORCH_STATE_DIR:-$HOME/.local/state/cc-orchestra-codex}"
+fi
 GLOBAL_LOG="$STATE_DIR/codex.log"
 
 # shellcheck source=/dev/null
 . "$REPO_DIR/model-policy.conf"
 # shellcheck source=/dev/null
 . "$REPO_DIR/lib/codex-catalog.sh"
+
+if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+  policy_values="$(python3 "$REPO_DIR/lib/orch_codex.py" shell-policy)" || exit 2
+  while IFS='=' read -r policy_key policy_value; do
+    printf -v "$policy_key" '%s' "$policy_value"
+  done <<< "$policy_values"
+fi
 
 usage() {
   cat >&2 <<'EOF'
@@ -205,6 +215,10 @@ case "$MODE" in
   *) usage ;;
 esac
 
+if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+  [ "$MODEL" = gpt-6-astra ] || die 'Codex-only mode requires gpt-6-astra; no model fallback (use --model astra when adopting an older thread)'
+  unset CC_ORCH_CODEX_ROUTE
+fi
 case "${CC_ORCH_CODEX_ROUTE:-}" in
   *":$MODEL@"*) AUTO_ROUTED=1 ;;
   *) AUTO_ROUTED=0 ;;
@@ -267,7 +281,11 @@ if [ "$MODEL" = "gpt-6-astra" ]; then
   esac
   if [ -n "$REASON" ] && ! use_astra_fallback "$REASON"; then
     if [ "$cat_state" = absent ]; then
-      echo "CODEX-RUN: MODEL_UNAVAILABLE — $MODEL $REASON (catalog: $(codex_catalog_file); refresh with 'codex debug models'; pass --model sol|terra to run elsewhere)" >&2
+      if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+        echo "CODEX-RUN: MODEL_UNAVAILABLE — Astra unavailable; no model/provider fallback. Preserve artifacts and report BLOCKED." >&2
+      else
+        echo "CODEX-RUN: MODEL_UNAVAILABLE — $MODEL $REASON (catalog: $(codex_catalog_file); refresh with 'codex debug models'; pass --model sol|terra to run elsewhere)" >&2
+      fi
       exit 6
     fi
     die "$MODEL $REASON"
@@ -460,6 +478,16 @@ then one line per issue:
 esac
 
 # --- sandbox and command assembly --------------------------------------------------------
+if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+  PROMPT="${PROMPT//cross-family review gate/independent review gate}"
+  PROMPT="${PROMPT//Claude-family agents/separate implementation agents}"
+  PROMPT="${PROMPT//non-Claude priors/an independent context}"
+  PROMPT="Codex-only boundary: you are one bounded gpt-6-astra lane. Do not delegate to subagents,
+launch nested model CLIs, invoke Claude, or use another model/provider. On quota, authentication,
+or model failure preserve artifacts and report BLOCKED. The parent lead owns all decomposition.
+
+$PROMPT"
+fi
 # Concurrent lanes must not share event logs: a named lane gets its own -<lane> suffix.
 RUN_TAG="$MODE"
 case "$MODE" in implement|resume) [ "$LANE" != "implement" ] && RUN_TAG="$MODE-$LANE" ;; esac
@@ -469,6 +497,9 @@ STDERR="$TASK_DIR/codex-$RUN_TAG.stderr.log"
 build_cmd() {
   CMD=(codex exec -C "$WORKDIR" --skip-git-repo-check
        -m "$MODEL" -c "model_reasoning_effort=$EFFORT")
+  if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+    CMD+=(-c 'model_provider="openai"' -c 'agents.enabled=false')
+  fi
   if [ "$FAST_MODE" = "1" ]; then
     CMD+=(-c "service_tier=\"$CODEX_FAST_MODE_SERVICE_TIER\"" -c "features.fast_mode=true")
   fi
@@ -551,15 +582,27 @@ fi
 if [ "$RC" -ne 0 ]; then
   ERRTEXT="$(tail -c 4000 "$STDERR"; tail -c 4000 "$EVENTS")"
   if printf '%s' "$ERRTEXT" | grep -qiE 'rate.?limit|usage.?limit|quota|too many requests|429'; then
-    echo "CODEX-RUN: QUOTA_EXHAUSTED — fall back per your lane rules (retry --fast with Luna, or Claude lane)" >&2
+    if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+      echo 'CODEX-RUN: QUOTA_EXHAUSTED — preserve artifacts and report BLOCKED; no model/provider fallback.' >&2
+    else
+      echo "CODEX-RUN: QUOTA_EXHAUSTED — fall back per your lane rules (retry --fast with Luna, or Claude lane)" >&2
+    fi
     exit 3
   fi
   if printf '%s' "$ERRTEXT" | grep -qiE 'unauthorized|not logged in|login required|401|invalid.*token'; then
-    echo "CODEX-RUN: AUTH_ERROR — 'codex login' needed on this machine; continue Claude-only" >&2
+    if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+      echo "CODEX-RUN: AUTH_ERROR — 'codex login' needed; preserve artifacts and report BLOCKED." >&2
+    else
+      echo "CODEX-RUN: AUTH_ERROR — 'codex login' needed on this machine; continue Claude-only" >&2
+    fi
     exit 4
   fi
   if model_unavailable_signature "$ERRTEXT"; then
-    echo "CODEX-RUN: MODEL_UNAVAILABLE — '$MODEL' was rejected by Codex as unavailable on this account/CLI (exit $RC); pass --model sol|terra" >&2
+    if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+      echo "CODEX-RUN: MODEL_UNAVAILABLE — '$MODEL' unavailable (exit $RC); preserve artifacts and report BLOCKED; no model/provider fallback." >&2
+    else
+      echo "CODEX-RUN: MODEL_UNAVAILABLE — '$MODEL' was rejected by Codex as unavailable on this account/CLI (exit $RC); pass --model sol|terra" >&2
+    fi
     tail -3 "$STDERR" >&2
     exit 6
   fi

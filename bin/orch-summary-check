@@ -123,7 +123,12 @@ if [ -r "$PLAN" ]; then
 fi
 
 if [ -r "$SUMMARY" ]; then
-  grep -q '^CLAUDE PROFILE:' "$SUMMARY" || problem warning "summary lacks CLAUDE PROFILE"
+  backend="$(sed -n 's/^BACKEND:[[:space:]]*//p' "$SUMMARY" | tail -1)"
+  if [ "$backend" = codex ]; then
+    grep -q '^CODEX PROFILE:' "$SUMMARY" || problem warning "summary lacks CODEX PROFILE"
+  else
+    grep -q '^CLAUDE PROFILE:' "$SUMMARY" || problem warning "summary lacks CLAUDE PROFILE"
+  fi
   grep -q '^PROMOTIONS:' "$SUMMARY" || problem warning "summary lacks PROMOTIONS"
   grep -q '^DISPATCH: codex-\(first\|sparing\)' "$SUMMARY" || problem warning "DISPATCH must be codex-first or codex-sparing"
   grep -q '^INVESTIGATION:' "$SUMMARY" || problem warning "summary lacks INVESTIGATION"
@@ -148,13 +153,19 @@ if [ -r "$SUMMARY" ]; then
 
       # A provider outage may fall back to the zero-context Claude verifier, but it must be
       # visible in the same line; a bare missing/waived executable verdict is never PASS.
-      if [ "$codex_verify_ok" = "0" ]; then
+      if [ "$backend" = codex ]; then
+        [ "$codex_verify_ok" = 1 ] || problem error "Codex-only executable verification must PASS"
+        [ "$codex_review_ok" = 1 ] || problem error "Codex-only review must be CLEAR/NONBLOCKING"
+        if [ "$risk" = critical ]; then
+          printf '%s' "$gates" | grep -qiE 'codex-auditor[[:space:]]+PASS' || problem error "critical Codex-only risk requires codex-auditor PASS"
+        fi
+      elif [ "$codex_verify_ok" = "0" ]; then
         if ! printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+unavailable' || \
            [ "$claude_verify_ok" = "0" ]; then
           problem error "executable verification did not PASS and has no explicit Claude fallback"
         fi
       fi
-      if [ "$codex_review_ok" = "0" ]; then
+      if [ "$backend" != codex ] && [ "$codex_review_ok" = "0" ]; then
         if [ "$risk" = "low" ] && printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+waived'; then
           :
         elif printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+unavailable' && \
@@ -164,7 +175,7 @@ if [ -r "$SUMMARY" ]; then
           problem error "adversarial review is not CLEAR/NONBLOCKING (only low risk may waive it)"
         fi
       fi
-      if [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
+      if [ "$backend" != codex ] && [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
         problem error "critical risk requires claude-verifier PASS"
       fi
     fi
@@ -189,11 +200,14 @@ if [ -r "$SUMMARY" ]; then
   fi
 
   profile="$(sed -n 's/^CLAUDE PROFILE:[[:space:]]*//p' "$SUMMARY" | tail -1)"
+  if [ "$backend" = codex ]; then
+    profile="$(sed -n 's/^CODEX PROFILE:[[:space:]]*//p' "$SUMMARY" | tail -1)"
+  fi
   case "$risk" in
     low)      printf '%s' "$profile" | grep -qi 'light\|sonnet\|fallback.*opus' || problem warning "low risk should use light/Sonnet or recorded Opus fallback" ;;
     trivial)  printf '%s' "$profile" | grep -qi 'light\|sonnet\|fallback.*opus' || problem warning "trivial risk should use light/Sonnet or recorded Opus fallback" ;;
     normal)   printf '%s' "$profile" | grep -qi 'normal\|opus\|fallback' || problem warning "normal risk should use the normal/Opus profile" ;;
-    critical) printf '%s' "$profile" | grep -qi 'critical\|fable\|fallback.*opus' || problem warning "critical risk should use Fable or recorded Opus fallback" ;;
+    critical) printf '%s' "$profile" | grep -qi 'critical\|deep\|fable\|fallback.*opus' || problem warning "critical risk should use its critical/deep profile or recorded fallback" ;;
   esac
 
   if [ "$downgraded" = 1 ]; then

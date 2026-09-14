@@ -12,6 +12,11 @@ CORE="$REPO_DIR/bin/codex-run"
 GUARD="$REPO_DIR/bin/orch-model-guard-runtime"
 
 [ -x "$CORE" ] || { echo "codex-run: missing $CORE" >&2; exit 2; }
+# Astra-only policy has no budget-triggered model/provider substitutions or Claude polling.
+if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+  unset CC_ORCH_CODEX_ROUTE
+  exec "$CORE" "$@"
+fi
 # shellcheck source=/dev/null
 . "$REPO_DIR/budget-policy.conf"
 MODE="${1:-}"

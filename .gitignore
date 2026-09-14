@@ -5,3 +5,4 @@ agents/dev-*.md
 
 # install.sh moves any pre-existing file aside rather than clobbering it.
 *.pre-cc-orchestra
+__pycache__/

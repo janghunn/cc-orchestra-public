@@ -1,6 +1,10 @@
 # cc-orchestra
 
-**Claude Code를 control plane으로, Codex CLI를 investigation / implementation / verification 실행 계층으로 사용하는 quota-aware multi-agent orchestration harness.**
+**Claude + Codex 혼합 모드와 Astra 기반 Codex 전용 모드를 지원하는 4-tier multi-agent orchestration harness.**
+
+Claude 사용량 한도에 도달했다면 `cc-orch-codex`로 모든 역할을 Astra와 역할별 effort로 실행할 수 있다.
+한도 회복 후에는 관리 세션의 `session switch <name> --backend hybrid`로 동일 작업을 인계한다.
+설치·전환 절차와 차이는 [`CODEX-ONLY.ko.md`](CODEX-ONLY.ko.md)를 참고한다. 아래 기본 구조와 quota routing 설명은 혼합 모드 기준이다.
 
 cc-orchestra는 단순히 여러 모델을 번갈아 호출하는 wrapper가 아니다. 사용자 요청을 작업 단위로 분해하고, 각 작업에 설계 책임자를 두고, Claude와 Codex의 서로 다른 관점을 이용해 구현과 검증을 분리한다. 동시에 Claude Max와 ChatGPT Pro/Codex의 **현재 사용량과 리셋까지 남은 시간**을 함께 보면서 다음 작업에 사용할 모델과 effort를 동적으로 고른다.
 

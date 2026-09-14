@@ -130,9 +130,17 @@ old_installer = subprocess.check_output(['git', '-C', str(root), 'show', base + 
 installer = (root / 'install.sh').read_text()
 def runtime(text): return text[text.index('install_runtime_hook() {'):text.index('\n}\n', text.index('install_runtime_hook() {')) + 3]
 assert runtime(old_installer) == runtime(installer)
-assert re.findall(r'^  link .*$', old_installer, re.M) == re.findall(r'^  link .*$', installer, re.M)
+def install_links(text):
+    start = text.index('install_repo() {')
+    return re.findall(r'^  link .*$', text[start:text.index('\n}\n', start)], re.M)
+old_links, new_links = install_links(old_installer), install_links(installer)
+# Additive backend aliases are intentional. Preserve every existing hybrid link in order;
+# the safety-only filesystem assertion below still prohibits creating any of these links.
+added = {'cc-orch-codex', 'codex-run-codex', 'orch-codex-route'}
+assert old_links == [line for line in new_links
+                     if line in old_links or line.rsplit('/', 1)[-1].rstrip('"') not in added]
 PY
-ok 'existing prompt hook, permissions, runtime installer function and link inventory match the base (HEAD fallback if unavailable)'
+ok 'existing prompt hook, permissions, runtime installer function and hybrid links are preserved'
 
 [ -x "$ROOT/hooks/orch-worktree-guard.sh" ] && [ -x "$ROOT/hooks/orch-stop-gate.sh" ] || fail 'hook executable bits missing'
 ok 'both hooks exist and are executable'

@@ -162,6 +162,10 @@ sync_legacy_claude() {
 }
 
 ensure_budget() {
+  if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+    refresh_codex_usage || true
+    return 0
+  fi
   local asof
   asof="$(bget claude_asof_epoch)"
   if ! is_numeric "$asof" || [ $(( $(now_epoch) - ${asof%.*} )) -gt $((BUDGET_CLAUDE_STALE_MINUTES * 60)) ]; then

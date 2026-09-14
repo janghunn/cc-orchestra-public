@@ -46,6 +46,19 @@ mkdir -p "$STATE_DIR"
 # shellcheck source=/dev/null
 . "$REPO_DIR/lib/orch-budget-commands.sh"
 
+if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+  case "${1:-check}" in
+    check) refresh_codex_usage || true; exit 0 ;;
+    route) shift; exec "$REPO_DIR/bin/orch-codex-route" route "$@" ;;
+    set|install|uninstall)
+      echo 'Codex-only mode does not modify Claude profiles or timers.' >&2; exit 2 ;;
+    lanes)
+      echo 'dispatch=codex-first'
+      echo 'reason=Astra-only mode; no model or provider fallback'
+      exit 0 ;;
+  esac
+fi
+
 case "${1:-check}" in
   check) cmd_check ;;
   status) cmd_status ;;
