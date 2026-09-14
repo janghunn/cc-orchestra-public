@@ -35,9 +35,10 @@ json_escape() {
 
 [[ -x "$CORE" ]] || { echo "build-roster-runtime: missing $CORE" >&2; exit 2; }
 mkdir -p "$AGENTS_DIR" "$(dirname "$MANIFEST")"
-trap 'rm -f "$MANIFEST.building"' EXIT
-: > "$MANIFEST.building"
-CC_ORCH_MANIFEST_NO_COMMIT=1 "$CORE"
+MANIFEST_TMP="$MANIFEST.building.$$"
+trap 'rm -f "$MANIFEST_TMP"' EXIT
+: > "$MANIFEST_TMP"
+CC_ORCH_MANIFEST_NO_COMMIT=1 CC_ORCH_MANIFEST_STAGING="$MANIFEST_TMP" "$CORE"
 
 # shellcheck source=/dev/null
 . "$REPO_DIR/model-policy.conf"
@@ -63,7 +64,7 @@ render_route() { # slot profile model effort
   template_sha="$(sha256_of "$REPO_DIR/templates/lead.md.tpl")"
   printf '{"dest":"%s","template":"%s","template_sha256":"%s","sha256":"%s","commit":"%s"}\n' \
     "$(json_escape "$dest")" "$(json_escape 'templates/lead.md.tpl')" \
-    "$template_sha" "$output_sha" "$REPO_COMMIT" >> "$MANIFEST.building"
+    "$template_sha" "$output_sha" "$REPO_COMMIT" >> "$MANIFEST_TMP"
   printf '  %-42s %s @ %s\n' "$(basename "$out")" "$model" "$effort"
 }
 
@@ -83,6 +84,6 @@ if grep -rlE '__(SLOT|MODEL|EFFORT|PROFILE|AGENT_NAME)' "$AGENTS_DIR"/route-lead
   exit 1
 fi
 
-mv "$MANIFEST.building" "$MANIFEST"
+mv "$MANIFEST_TMP" "$MANIFEST"
 
 echo "runtime route roster written to $AGENTS_DIR (16 stable lead profiles)"

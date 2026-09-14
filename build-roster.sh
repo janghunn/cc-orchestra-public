@@ -34,7 +34,7 @@ json_escape() {
 
 mkdir -p "$AGENTS_DIR" "$(dirname "$MANIFEST")"
 if [[ "${CC_ORCH_MANIFEST_NO_COMMIT:-0}" == 1 ]]; then
-  MANIFEST_TMP="$MANIFEST.building"
+  MANIFEST_TMP="${CC_ORCH_MANIFEST_STAGING:?CC_ORCH_MANIFEST_STAGING is required with CC_ORCH_MANIFEST_NO_COMMIT=1}"
 else
   MANIFEST_TMP="$MANIFEST.tmp.$$"
   trap 'rm -f "$MANIFEST_TMP"' EXIT
