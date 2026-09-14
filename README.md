@@ -1064,6 +1064,95 @@ codex-run ... --model sol --effort xhigh
 
 ---
 
+## 런타임 안전 hook
+
+설치 시 독립적인 안전 hook 두 개를 user settings와 session guardrails에 등록합니다.
+`bash install.sh --safety-hooks-only`는 이 등록만 병합하며 symlink 설치, 실행 권한 변경,
+systemd 호출은 수행하지 않습니다. `CC_ORCH_SETTINGS`로 settings 경로를 지정할 수 있으며,
+기본값은 `$HOME/.claude/settings.json`입니다. 기존의 관련 없는 항목을 보존하고 checkout
+경로가 바뀌면 해당 hook command만 현재 경로로 갱신합니다. 등록 command의 `|| true`는
+유지해야 합니다. Timeout은 `PreToolUse` 10초, `SubagentStop` 30초입니다. 저장소의
+`guardrails.json`은 기존 `/home/janghun/cc-orchestra/hooks/` 경로를 사용하므로 다른 위치에
+설치한 경우 그 경로를 조정하십시오.
+
+`hooks/orch-worktree-guard.sh`는 Bash의 Git 명령과 기존 `.orchestra/REGISTRY.md`를
+비교합니다. 상태가 비어 있지 않고 정확히 `PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`,
+`UNASSIGNED` 중 하나가 아닌 lead 행을 active로 봅니다. `PASS (worktree)`는 active입니다.
+호출자 식별은 active 행의 `agentId` 일치를 우선합니다. 전체 값이 같거나, 짧은 쪽이 8자
+이상인 접두사 관계이면 일치합니다. 그다음 `(route-)?lead-(alpha|bravo|charlie|delta)`와
+선택적인 `light`, `normal`, `critical`, `critical-xhigh` 접미사, 또는
+`dev(-opus)?-<양의 정수>` 형식을 인식합니다. Lead임은 알지만 slot을 모르면 checkout의
+`.orchestra/wt/<slot>` 경로를 보조 정보로 사용합니다. 식별되지 않은 호출자와 일반적인
+orchestrator 호출은 평가를 건너뜁니다.
+
+`commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `am`, `apply`, `add`, `rm`,
+`mv`, `stash`, `restore`를 index 변경으로 분류합니다. `checkout`, `switch`,
+`branch -f/-D/-m/-M`, `tag -f/-d`는 ref 이동이며 `push`는 별도 분류입니다. 차단 규칙은
+다음 네 가지입니다.
+
+- **R1:** lead/dev가 `main`, `master`, `develop`, `trunk`에서 index를 변경하거나 대상이
+  생략된 push 또는 보호 branch를 대상으로 하는 push를 실행하면 차단합니다. 보호 대상이
+  아닌 refspec을 명시한 push와 작업 branch를 만들기 위한 switch는 R1에서 허용합니다.
+- **R2:** slot이 확인된 lead가 다른 active lead의 등록 branch에 있는 checkout을 변경하면
+  차단합니다.
+- **R3:** slot이 확인된 lead가 다른 active slot의 `.orchestra/wt/<slot>` checkout을
+  변경하면 차단합니다.
+- **R4:** active lead 행이 둘 이상인데 slot이 확인된 lead가 registry를 소유한 공유
+  checkout을 변경하면 차단합니다. 메시지에 다른 slot과
+  `git worktree add <repo>/.orchestra/wt/<slot> -b <your branch>` 명령을 안내합니다.
+
+Registry의 `dir`는 artifact 디렉터리이며 저장소 root 기준으로 해석합니다. Checkout
+소유권은 현재 HEAD와 등록 branch, slot 경로로 판단합니다. Git worktree metadata를 통해
+분리된 checkout에서도 공유 registry를 찾습니다. 명령 체인의 `cd`/`pushd`와 `git -C`를
+추적해 각 Git 호출의 대상을 따로 평가합니다. 따옴표 안의 설명, 주석, heredoc 본문은
+명령으로 취급하지 않습니다. `cd -`, 확장되지 않은 변수, `--git-dir`/`--work-tree` 등으로
+대상을 확정할 수 없거나 registry가 없거나 잘못된 경우에는 허용합니다. 읽기 전용 또는
+분류되지 않은 명령도 허용합니다. 복잡한 shell 문법 전체를 해석하는 parser는 아닙니다.
+
+`hooks/orch-stop-gate.sh`는 matcher `(route-)?lead-.*`인 **SubagentStop**에 등록합니다.
+`Stop`은 main session용 event입니다. 마지막 assistant transcript 메시지에
+`STATUS: PASS`, `FAIL`, `BLOCKED` 행과 `GATES:` 행이 모두 있을 때만 검사합니다. STATUS
+앞의 lead label은 허용하며 일반적인 작업 중간 보고는 checker를 실행하지 않습니다.
+`stop_hook_active: true`이면 반복 차단을 막기 위해 즉시 허용합니다. Task 디렉터리는
+registry의 agent ID 일치 행, slot 일치 행 순으로 선택하며 `ARTIFACTS:`가 다른 task를
+가리켜도 registry를 우선합니다. Registry에서 task를 찾지 못했을 때만 `ARTIFACTS:`의
+실제 디렉터리에 `brief.md`가 있는지 확인해 fallback으로 사용합니다.
+
+Checker는 `CC_ORCH_SUMMARY_CHECK`의 실행 파일 경로, hook 자신의 저장소에 있는
+`bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`, `PATH` 순서로 찾습니다.
+Override는 운영 점검과 테스트에 사용할 수 있습니다. `--strict <task-dir>`로 실행하여
+exit 0이면 조용히 허용하고, exit 1이면 checker 출력의 처음 1,500바이트와 정확한 재실행
+명령, off-switch 경로를 포함해 차단합니다. Task/checker를 찾지 못하거나 exit 2 또는
+실행 오류가 발생하면 `systemMessage`, stderr, journal에 경고를 남기고 허용합니다.
+Transcript가 없거나 읽을 수 없으면 확인 가능한 claim이 없으므로 조용히 허용합니다.
+Fallback의 `brief.md` 존재 확인만으로 task 소유권까지 증명하지는 않습니다.
+
+두 hook 모두 exit 0을 반환하며 차단 여부는 JSON으로 전달합니다. 각각 다음과 같이
+비활성화하고 journal을 확인할 수 있습니다.
+
+```bash
+state_dir="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
+touch "$state_dir/worktree-guard.off"
+touch "$state_dir/stop-gate.off"
+# 다시 활성화하려면 해당 .off 파일을 삭제합니다.
+tail -n 30 "$state_dir/safety-hooks.log"
+```
+
+Journal 경로는 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`입니다.
+실제로 평가한 Git 호출과 감지한 gate claim에만 ISO 시각, hook/event, 호출자 정보,
+판정(`allow`, `deny`, `block`, `warn`, `skip`), 한 줄 사유를 기록합니다. Fast path는
+기록하지 않습니다. 각 행은 크기를 제한한 단일 append로 씁니다. 파일이 2 MiB를 넘을 때만
+배타적 trim lock을 얻어 약 1 MiB를 임시 파일과 atomic rename으로 보존합니다. Append와
+교체도 동기화하여 교체된 inode에 기록이 남아 사라지는 상황을 막습니다. Trim lock이
+사용 중이면 이번 정리는 건너뜁니다.
+
+제한 사항: Claude Code 2.1.270의 문서상 `SubagentStop` payload는 이 저장소에서 아직 실측하지
+않았습니다. `PreToolUse`의 subagent identity는 실측했지만 stop event의 identity와
+transcript 전달은 실제 세션에서 확인해야 합니다. Gate claim 이후 위 명령으로 journal을
+확인하십시오. 기록이 없으면 지원되지 않는 payload, hook 미호출, off-switch 등을 확인해야
+합니다. `SubagentStop`에서 `systemMessage`가 표시되는지도 미확인 상태이므로 stderr와
+journal에도 경고를 보존합니다.
+
 # 테스트
 
 ```bash

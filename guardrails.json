@@ -16,7 +16,9 @@
     "running session's own model cannot be changed from outside. It is registered here AND in",
     "~/.claude/settings.json on purpose: this file is only read at startup (so it covers every",
     "new cc-orch session), settings.json is watched (so it reaches sessions already running).",
-    "The hook de-duplicates per prompt, so loading it twice still prints one notice."
+    "The hook de-duplicates per prompt, so loading it twice still prints one notice.",
+    "PreToolUse worktree protection denies classified lead/dev Git collisions and is also installed in user settings.",
+    "SubagentStop validates lead gate-result claims with orch-summary-check --strict and is also installed in user settings."
   ],
   "hooks": {
     "UserPromptSubmit": [
@@ -27,6 +29,30 @@
             "type": "command",
             "command": "bash '/home/janghun/cc-orchestra/hooks/orch-model-notice.sh'",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/home/janghun/cc-orchestra/hooks/orch-worktree-guard.sh' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "(route-)?lead-.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/home/janghun/cc-orchestra/hooks/orch-stop-gate.sh' || true",
+            "timeout": 30
           }
         ]
       }

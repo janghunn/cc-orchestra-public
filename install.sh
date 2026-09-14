@@ -24,9 +24,11 @@ usage() {
 usage:
   ./install.sh
   ./install.sh --check
+  ./install.sh --safety-hooks-only
   ./install.sh --bootstrap [--skip-auth] [--skip-tests]
 
 modes:
+  --safety-hooks-only  merge only the two runtime safety hooks into Claude settings
   --check       inspect the current cc-orchestra installation without changing it
   --bootstrap   prepare a fresh Linux user after the repository has been cloned:
                 install missing system dependencies, Claude Code, Codex CLI,
@@ -53,6 +55,10 @@ while [[ $# -gt 0 ]]; do
     --bootstrap)
       [[ "$MODE" == install ]] || { echo "ERROR: choose only one mode." >&2; exit 2; }
       MODE=bootstrap
+      ;;
+    --safety-hooks-only)
+      [[ "$MODE" == install ]] || { echo "ERROR: choose only one mode." >&2; exit 2; }
+      MODE=safety-hooks-only
       ;;
     --skip-auth) SKIP_AUTH=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
@@ -111,6 +117,51 @@ for entry in entries:
             found = True
 if not found:
     entries.append({"hooks": [{"type": "command", "command": command}]})
+fd, tmp = tempfile.mkstemp(prefix="settings.", dir=os.path.dirname(path), text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        json.dump(settings, out, ensure_ascii=False, indent=2)
+        out.write("\n")
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PY
+}
+
+install_safety_hooks() {
+  python3 - "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" "$REPO_DIR" <<'PY'
+import json, os, shlex, sys, tempfile
+path, repo = sys.argv[1:]
+path = os.path.abspath(path)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+settings = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as source:
+        settings = json.load(source)
+hooks = settings.setdefault("hooks", {})
+for event, matcher, basename, timeout in (
+    ("PreToolUse", "Bash", "orch-worktree-guard.sh", 10),
+    ("SubagentStop", "(route-)?lead-.*", "orch-stop-gate.sh", 30),
+):
+    entries = hooks.setdefault(event, [])
+    if not isinstance(entries, list):
+        raise SystemExit(f"settings hooks.{event} must be a list")
+    command = "bash " + shlex.quote(os.path.join(repo, "hooks", basename)) + " || true"
+    found = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks", []):
+            if isinstance(hook, dict) and basename in str(hook.get("command", "")):
+                # Update this command only; co-located hooks and their matcher stay intact.
+                hook["command"] = command
+                hook["type"] = "command"
+                hook["timeout"] = timeout
+                found = True
+    if not found:
+        entries.append({"matcher": matcher, "hooks": [
+            {"type": "command", "command": command, "timeout": timeout}
+        ]})
 fd, tmp = tempfile.mkstemp(prefix="settings.", dir=os.path.dirname(path), text=True)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as out:
@@ -186,6 +237,14 @@ check() {
     echo "  MISSING  Claude reset tap in settings.json"; rc=1
   fi
   echo "  budget   $("$REPO_DIR/bin/orch-model-guard-runtime" budget --compact 2>/dev/null || echo unavailable)"
+
+  for hook in orch-worktree-guard.sh orch-stop-gate.sh; do
+    if grep -q "$hook" "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" 2>/dev/null; then
+      echo "  ok       $hook in settings.json"
+    else
+      echo "  MISSING  $hook in settings.json"; rc=1
+    fi
+  done
 
   if command -v tmux >/dev/null 2>&1; then
     echo "  ok       tmux ($(tmux -V 2>/dev/null)) — managed sessions enabled"
@@ -376,6 +435,7 @@ install_repo() {
   echo "model guard and reset-time taps:"
   "$REPO_DIR/bin/orch-model-guard-runtime" install
   install_runtime_hook
+  install_safety_hooks
 
   echo
   case ":$PATH:" in
@@ -393,7 +453,10 @@ run_regression_tests() {
     tests/test-runtime.sh \
     tests/test-poll-guard.sh \
     tests/test-tier1-runtime.sh \
-    tests/test-notice-runtime.sh
+    tests/test-notice-runtime.sh \
+    tests/test-worktree-guard.sh \
+    tests/test-stop-gate.sh \
+    tests/test-hook-wiring.sh
   do
     [[ -f "$REPO_DIR/$test" ]] || continue
     info "running $test"
@@ -439,6 +502,9 @@ bootstrap() {
 }
 
 case "$MODE" in
+  safety-hooks-only)
+    install_safety_hooks
+    ;;
   check)
     echo "cc-orchestra @ $REPO_DIR"
     check && echo "installed." || { echo "incomplete — run ./install.sh --bootstrap (fresh host) or ./install.sh (repo setup)"; exit 1; }

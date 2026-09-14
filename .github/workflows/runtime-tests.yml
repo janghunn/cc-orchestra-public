@@ -25,3 +25,9 @@ jobs:
         run: bash tests/test-tier1-runtime.sh
       - name: Runtime policy notice suite
         run: bash tests/test-notice-runtime.sh
+      - name: Worktree collision guard suite
+        run: bash tests/test-worktree-guard.sh
+      - name: Lead stop gate suite
+        run: bash tests/test-stop-gate.sh
+      - name: Safety hook wiring suite
+        run: bash tests/test-hook-wiring.sh

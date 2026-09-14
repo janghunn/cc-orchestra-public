@@ -257,6 +257,86 @@ touch ~/.claude/orchestra-state/poll-guard.off
 Remove the file to re-enable the guard. To roll back permanently, remove this `PreToolUse` entry
 from settings; the script can remain on disk.
 
+## Runtime safety hooks
+
+Installation registers two independent hooks in user settings and in the session guardrails.
+`bash install.sh --safety-hooks-only` merges just these registrations, without installing links,
+changing executable bits, or contacting systemd. It honors `CC_ORCH_SETTINGS` (default:
+`$HOME/.claude/settings.json`), preserves unrelated entries, and updates an existing hook command
+when the checkout path changes. Commands retain `|| true`; timeouts are 10 seconds for
+`PreToolUse` and 30 seconds for `SubagentStop`. The checked-in `guardrails.json` uses the existing
+`/home/janghun/cc-orchestra/hooks/` prefix; adjust it for a different installation location.
+
+`hooks/orch-worktree-guard.sh` examines Bash Git commands against the existing
+`.orchestra/REGISTRY.md`. A lead row is active when its status is nonempty and not exactly
+`PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`, or `UNASSIGNED`; `PASS (worktree)` remains active.
+Identity first uses an active row's `agentId`: exact equality or a prefix with at least eight
+characters. Otherwise it recognizes `(route-)?lead-(alpha|bravo|charlie|delta)` with an optional
+`light`, `normal`, `critical`, or `critical-xhigh` suffix, or `dev(-opus)?-<positive integer>`.
+A known lead with an unresolved slot may use the `.orchestra/wt/<slot>` checkout suffix.
+Unknown actors, including ordinary orchestrator calls, bypass evaluation.
+
+The guard classifies `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `am`, `apply`,
+`add`, `rm`, `mv`, `stash`, and `restore` as index writes; `checkout`, `switch`, `branch` with
+`-f/-D/-m/-M`, and `tag` with `-f/-d` as ref moves; and `push` separately. It denies only:
+
+- **R1:** a lead/dev index write or bare/protected-ref push from `main`, `master`, `develop`, or
+  `trunk`. An explicit non-protected push refspec is allowed by R1, as is switching away from a
+  base branch to create a task branch.
+- **R2:** a known lead mutating a checkout on another active lead's registered branch.
+- **R3:** a known lead mutating another active slot's `.orchestra/wt/<slot>` checkout.
+- **R4:** a known lead mutating the registry-owning shared checkout while at least two lead rows
+  are active. The denial names other slots and suggests
+  `git worktree add <repo>/.orchestra/wt/<slot> -b <your branch>`.
+
+The registry `dir` is an artifact directory, resolved against the repository root, not ownership
+of a checkout. Branch ownership uses the checkout HEAD and registry branch; Git worktree metadata
+also locates the shared registry from linked checkouts. Each invocation has its own target:
+`cd`/`pushd` and `git -C` are tracked through command chains. Quoted prose, comments, and heredoc
+bodies are inert. Unknown targets such as `cd -`, unexpanded variables, or explicit
+`--git-dir`/`--work-tree` overrides fail open. Read-only/unclassified commands and missing or
+malformed registries do not block. Complex shell evaluation is not a complete shell interpreter.
+
+`hooks/orch-stop-gate.sh` is registered on **SubagentStop**, with matcher `(route-)?lead-.*`;
+`Stop` is for the main session. It checks the last assistant transcript message only when it
+contains a `STATUS: PASS`, `FAIL`, or `BLOCKED` line (optionally prefixed with a lead label) and a
+`GATES:` line. Ordinary mid-task messages do not run a checker. `stop_hook_active: true` bypasses
+the gate to prevent a stop loop. The registry row selected by agent ID, then slot, supplies the
+task directory even if `ARTIFACTS:` names another task. Only without a registry task does an
+existing `ARTIFACTS:` directory containing `brief.md` qualify as a fallback.
+
+The checker is resolved through `CC_ORCH_SUMMARY_CHECK` (an executable path for operators/tests),
+then the hook's own repository `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`,
+then `PATH`. It runs with `--strict <task-dir>`: exit 0 allows silently; exit 1 blocks with the
+first 1,500 bytes of checker output, the exact rerun command, and the off-switch. An unresolved
+task/checker, exit 2, or execution failure allows with a `systemMessage` warning, the same warning
+on stderr, and a journal record. An absent/unreadable transcript has no observable claim and
+allows silently. A fallback directory's `brief.md` check is structural validation, not proof
+that the task belongs to the reporting lead.
+
+Both hooks always exit 0; decisions travel in JSON. Disable them independently with:
+
+```bash
+state_dir="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
+touch "$state_dir/worktree-guard.off"
+touch "$state_dir/stop-gate.off"
+# Remove the corresponding .off file to re-enable a hook.
+tail -n 30 "$state_dir/safety-hooks.log"
+```
+
+The journal path is `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`.
+Evaluated Git invocations and detected claims append an ISO timestamp, hook/event, actor identity,
+decision (`allow`, `deny`, `block`, `warn`, or `skip`), and one-line reason. Fast paths do not log.
+Records use one bounded append write. Only above 2 MiB does an exclusive trim lock permit retaining
+about 1 MiB via a temporary file and atomic rename; appenders coordinate with rotation so records
+are not lost to the replaced inode. Lock contention skips trimming.
+
+Limitation: Claude Code 2.1.270's documented `SubagentStop` payload has not been measured in this
+repository. `PreToolUse` subagent identity was measured; stop-event identity/transcript behavior
+still needs a live-session check. Inspect the journal after a known gate claim: a missing record
+may mean an unsupported payload, a hook that did not fire, or an off-switch. `systemMessage`
+display on `SubagentStop` is also unconfirmed; stderr and the journal preserve warnings.
+
 ## Tuning
 
 Edit `budget-policy.conf`. It is excluded from `orch-policy-rev`, so tuning does not invalidate
