@@ -136,6 +136,14 @@ effort. `build-roster-runtime.sh` generates all 16 slot/profile combinations, an
 guard never rewrites the `route-lead-*` namespace. Usage changes therefore choose among already
 cached agent types rather than rewriting definitions.
 
+`orch-summary-check` also prints a separate advisory security scan of added lines in committed
+changes from the current branch's merge base with local `main` (or `origin/main`) to `HEAD`.
+It checks `.md`, `.json`, `.conf`, and `.sh` files for secret-shaped literals, instructions to
+bypass confirmation, and broad Bash permission strings. Findings are warn-only and never change
+PASS/FAIL or gate error/warning counts, including with `--strict`; unavailable Git bases are
+skipped. To scan full on-disk files, run `bin/orch-security-scan --files <file>...` (exit 0 for
+no findings, 1 for findings).
+
 Codex model and effort are resolved automatically on each new `codex-run` invocation:
 
 ```text

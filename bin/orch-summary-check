@@ -205,6 +205,20 @@ if [ -r "$SUMMARY" ]; then
   fi
 fi
 
+# Independent advisory scan: its output and status never feed the gate counters.
+if [ -x "$REPO_DIR/bin/orch-security-scan" ]; then
+  echo '--- advisory security scan ---'
+  security_status=0
+  security_output="$("$REPO_DIR/bin/orch-security-scan" "$REPO_DIR")" || security_status=$?
+  [ -z "$security_output" ] || printf '%s\n' "$security_output"
+  security_count="$(printf '%s\n' "$security_output" | grep -c '^SECWARN:' || true)"
+  if [ "$security_count" -gt 0 ]; then
+    echo "SECURITY: $security_count advisory warning(s) — informational only, does not affect PASS/FAIL/error-count"
+  else
+    echo 'SECURITY: clean'
+  fi
+fi
+
 if [ "$errors" -gt 0 ]; then
   echo "CHECK: FAIL ($errors error(s), $warnings warning(s))"
   exit 1
