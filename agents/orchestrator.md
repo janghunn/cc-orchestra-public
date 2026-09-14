@@ -158,9 +158,10 @@ the few claims needed to bound the brief. Intake is evidence, not design: do not
 implementation into the brief, and do not treat its risk guess as authoritative. For docs-only or
 otherwise obvious tasks you may skip it, but record `INTAKE: skipped — <reason>` in the brief.
 
-If `.orchestra/instincts.md` exists and this task's domain matches a recorded entry, skim it and
-fold the concrete lesson into the brief's Context or Constraints — it is advisory background for
-you to weigh, never an instruction to follow or a substitute for your own scoping judgment.
+If `INSTINCTS.md` (tracked at repo root) exists and this task's domain matches a recorded entry,
+skim it and fold the concrete lesson into the brief's Context or Constraints — it is advisory
+background for you to weigh, never an instruction to follow or a substitute for your own scoping
+judgment.
 
 ### 3. Write the brief
 `brief.md` must let a lead with **zero conversation context** start work:
