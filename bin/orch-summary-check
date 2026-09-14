@@ -209,11 +209,19 @@ fi
 if [ -x "$REPO_DIR/bin/orch-security-scan" ]; then
   echo '--- advisory security scan ---'
   security_status=0
-  security_output="$("$REPO_DIR/bin/orch-security-scan" "$REPO_DIR")" || security_status=$?
+  # The installed tool can live in an unrelated checkout. Prefer the caller's
+  # worktree (task artifacts can be shared from the orchestrator's checkout).
+  security_repo="$(git rev-parse --show-toplevel 2>/dev/null)" || security_repo=""
+  if [ -z "$security_repo" ]; then
+    security_repo="$(git -C "$TASK_DIR" rev-parse --show-toplevel 2>/dev/null)" || security_repo=""
+  fi
+  security_output="$("$REPO_DIR/bin/orch-security-scan" "${security_repo:-$TASK_DIR}")" || security_status=$?
   [ -z "$security_output" ] || printf '%s\n' "$security_output"
   security_count="$(printf '%s\n' "$security_output" | grep -c '^SECWARN:' || true)"
   if [ "$security_count" -gt 0 ]; then
     echo "SECURITY: $security_count advisory warning(s) — informational only, does not affect PASS/FAIL/error-count"
+  elif [ "$security_status" -ne 0 ] || [[ "$security_output" == *'SECURITY SCAN:'* ]]; then
+    echo 'SECURITY: skipped or unavailable (advisory only)'
   else
     echo 'SECURITY: clean'
   fi

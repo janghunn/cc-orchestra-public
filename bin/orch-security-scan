@@ -4,7 +4,7 @@ set -uo pipefail
 
 findings=0
 # Generic assignments exclude common placeholder markers; AWS ids have no exclusions.
-secret_pattern="(^|[^[:alnum:]_])(key|token|secret|password|api[_-]?key)[[:space:]]*[:=][[:space:]]*[\"'][a-z0-9_/+=-]{20,}[\"']"
+secret_pattern="(^|[^[:alnum:]_])(key|token|secret|password|api[_-]?key)[\"']?[[:space:]]*[:=][[:space:]]*[\"'][a-z0-9_/+=-]{20,}[\"']"
 placeholder_pattern='example|xxx|changeme|your_|redacted|dummy|placeholder|<[a-z_]+>|\$\{|todo'
 # The documented permission-bypass CLI flag is intentionally not a phrase match.
 instruction_pattern='always allow|auto-approve|auto approve|without confirmation|without asking|no need to ask|never prompt|skip the confirmation|auto-run|auto run|no confirmation needed'
@@ -22,15 +22,18 @@ warn() {
 
 scan_line() {
   local file="$1" number="$2" line="$3" lower="${3,,}"
+  local excerpt="$line"
   if [[ "$line" =~ AKIA[0-9A-Z]{16} ]] ||
      { [[ "$lower" =~ $secret_pattern ]] && ! [[ "$lower" =~ $placeholder_pattern ]]; }; then
-    warn "$file" "$number" hardcoded-secret "$line"
+    # Do not copy a detected credential into terminal output or gate artifacts.
+    excerpt='[redacted: secret-shaped literal]'
+    warn "$file" "$number" hardcoded-secret "$excerpt"
   fi
   if [[ "$lower" =~ $instruction_pattern ]]; then
-    warn "$file" "$number" auto-run-instruction "$line"
+    warn "$file" "$number" auto-run-instruction "$excerpt"
   fi
   if [[ "$line" =~ $shell_pattern ]]; then
-    warn "$file" "$number" broad-shell-allowlist "$line"
+    warn "$file" "$number" broad-shell-allowlist "$excerpt"
   fi
 }
 
