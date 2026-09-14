@@ -294,9 +294,24 @@ The guard classifies `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `rese
 
 The registry `dir` is an artifact directory, resolved against the repository root, not ownership
 of a checkout. Branch ownership uses the checkout HEAD and registry branch; Git worktree metadata
-also locates the shared registry from linked checkouts. Each invocation has its own target:
-`cd`/`pushd` and `git -C` are tracked through command chains. A missing or non-directory
-`cd`/`pushd` target leaves the modeled cwd unchanged, matching Bash's failed directory change.
+also locates the shared registry from linked checkouts. Each invocation has its own target.
+The guard tracks the effective branch after a branch-changing `checkout`/`switch` segment, keyed
+by resolved checkout root so `cd` and `git -C` aliases share the override. Creation flags
+`checkout -b/-B` and `switch -c/-C` supply the new branch; a plain branch argument must resolve
+as a local `refs/heads/` branch. Path checkouts, detached SHAs, and ambiguous forms do not update
+the branch model. Thus a single in-place lead can create a task branch and commit in one call,
+while switching to `develop` before committing triggers R1; shared-checkout rules still apply.
+
+Directory and effective-branch changes follow one conditional-execution rule. A `cd`/`pushd`
+or branch-changing `checkout`/`switch` preceded by `&&` or `||` retains both the previous and
+new values as candidates. A first-segment change, or one after `;` or newline, is unconditional
+and replaces the corresponding candidates. Each later Git invocation evaluates every candidate
+cwd and every candidate branch for its resolved checkout; any violating combination denies the
+call and reports the rule that fired. Unresolvable conditional changes introduce no new candidate.
+Thus `false && git switch -c orch/new; git commit` cannot hide a protected branch, while
+unconditional `git switch -c orch/new && git commit` and `cd <own-worktree> && git commit`
+retain their legitimate allow paths. A missing or non-directory target leaves the modeled cwd
+unchanged, matching Bash's failed directory change.
 Leading `~/` and bare `~` resolve through `$HOME`; `~user` remains unresolvable.
 Quoted prose, comments, and heredoc bodies are inert. Unknown targets such as `cd -`, unexpanded variables, or explicit
 `--git-dir`/`--work-tree` overrides fail open. Read-only/unclassified commands and missing or
@@ -317,10 +332,15 @@ payload `cwd`; an unknown repository root or an outside path, including a symlin
 
 The checker is resolved through `CC_ORCH_SUMMARY_CHECK` (an executable path for operators/tests),
 then the hook's own repository `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`,
-then `PATH`. It runs with `--strict <task-dir>`: exit 0 allows silently; exit 1 blocks with the
-first 1,500 bytes of checker output, the exact rerun command, and the off-switch. An unresolved
-task/checker, exit 2, or execution failure allows with a `systemMessage` warning, the same warning
-on stderr, and a journal record. An absent/unreadable transcript has no observable claim and
+then `PATH`. It runs with `--strict <task-dir>` and reads the task's own `summary.md` STATUS
+line, accepting a `[lead-x]` prefix. Exit 0 allows silently when the transcript and recorded
+statuses agree; disagreement, including an unavailable recorded status, produces a warning.
+Exit 1 blocks only a transcript claiming `PASS`, including when summary.md records `BLOCKED`
+or `FAIL`. The block includes the first 1,500 bytes of checker output, the exact rerun command,
+and the off-switch. A transcript claiming `BLOCKED` or `FAIL` is never blocked: a failing check
+or missing summary produces a warning carrying checker output so honest escalation can finish.
+An unresolved task/checker, exit 2, or execution failure also allows with a `systemMessage`
+warning, the same warning on stderr, and a journal record. An absent/unreadable transcript has no observable claim and
 allows silently. Repository containment and `brief.md` checks are structural validation, not
 proof that the fallback task belongs to the reporting lead. Missing Python fails open silently;
 intentional gate warnings still reach stderr, stdout JSON, and the journal.

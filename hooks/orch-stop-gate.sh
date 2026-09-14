@@ -169,9 +169,21 @@ def checker_path():
     return None
 
 
-def warn(event, status, why, task=None):
+def recorded_status(task):
+    try:
+        summary = (task / "summary.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    matches = re.findall(r"^(?:\[lead-[A-Za-z0-9_-]+\]\s*)?STATUS:\s*(PASS|FAIL|BLOCKED)\b", summary, re.M)
+    return matches[-1] if matches else None
+
+
+def warn(event, status, why, task=None, checked=False):
     command = shlex.join(["orch-summary-check", "--strict", str(task) if task else "<unknown>"])
-    message = f"orch-stop-gate: {status} was claimed but orch-summary-check --strict could not be run ({why}). Verify manually: {command}"
+    if checked:
+        message = f"orch-stop-gate: {status} was claimed; {why}. Verify manually: {command}"
+    else:
+        message = f"orch-stop-gate: {status} was claimed but orch-summary-check --strict could not be run ({why}). Verify manually: {command}"
     print(json.dumps({"systemMessage": message}))
     with os.fdopen(os.dup(4), "w") as warning_stderr:
         print(message, file=warning_stderr)
@@ -232,13 +244,20 @@ def main(event):
             warn(event, status, "checker not found", task)
             return
         result = subprocess.run([checker, "--strict", str(task)], capture_output=True, timeout=20)
+        recorded = recorded_status(task)
         if result.returncode == 0:
-            journal(event, "orch-stop-gate", "allow", f"{status} claim: strict summary check passed for {task}")
+            if status != recorded:
+                warn(event, status, f"strict summary check passed, but transcript STATUS: {status} disagrees with summary.md STATUS: {recorded or 'unknown'}", task, checked=True)
+            else:
+                journal(event, "orch-stop-gate", "allow", f"{status} claim: strict summary check passed for {task}")
         elif result.returncode == 1:
             excerpt = result.stdout[:1500].decode("utf-8", errors="replace")
+            if status in ("BLOCKED", "FAIL"):
+                warn(event, status, f"strict summary check failed; summary.md STATUS: {recorded or 'unknown'}.\n{excerpt}", task, checked=True)
+                return
             command = shlex.join([checker, "--strict", str(task)])
             disable = shlex.join(["touch", str(STATE / "stop-gate.off")])
-            reason = f"orch-stop-gate: {status} claim failed strict validation.\n{excerpt}\nRe-run: {command}\nDisable with: {disable}"
+            reason = f"orch-stop-gate: {status} claim failed strict validation; summary.md STATUS: {recorded or 'unknown'}.\n{excerpt}\nRe-run: {command}\nDisable with: {disable}"
             journal(event, "orch-stop-gate", "block", reason)
             print(json.dumps({"decision": "block", "reason": reason}))
         else:

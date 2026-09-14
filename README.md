@@ -1107,9 +1107,25 @@ orchestrator 호출은 평가를 건너뜁니다.
 
 Registry의 `dir`는 artifact 디렉터리이며 저장소 root 기준으로 해석합니다. Checkout
 소유권은 현재 HEAD와 등록 branch, slot 경로로 판단합니다. Git worktree metadata를 통해
-분리된 checkout에서도 공유 registry를 찾습니다. 명령 체인의 `cd`/`pushd`와 `git -C`를
-추적해 각 Git 호출의 대상을 따로 평가합니다. `cd`/`pushd` 대상이 없거나 디렉터리가
-아니면 Bash의 실패한 디렉터리 이동처럼 기존 cwd를 유지합니다. 선두의 `~/`와 단독 `~`는
+분리된 checkout에서도 공유 registry를 찾습니다. Branch를 바꾸는 `checkout`/`switch`
+이후에는 해당 segment에서 바뀐 branch를 기준으로 평가합니다. 해석한 checkout root를 키로
+사용하므로 `cd`와 `git -C`로 같은 checkout에 접근해도 변경 상태를 공유합니다.
+`checkout -b/-B`, `switch -c/-C`는 새 branch 이름을 사용하고, 일반 branch 인자는 실제
+local `refs/heads/`로 확인된 경우에만 반영합니다. 파일 checkout, detached SHA, 모호한
+형식은 branch 모델을 바꾸지 않습니다. 단독 in-place lead가 한 호출에서 작업 branch를
+만들고 commit하는 것은 허용하지만, `develop`으로 이동한 뒤 commit하면 R1이 차단합니다.
+공유 checkout 충돌 규칙은 계속 적용됩니다.
+
+작업 디렉터리와 effective branch 변경에는 하나의 조건부 실행 규칙을 적용합니다.
+`&&` 또는 `||` 뒤의 `cd`/`pushd`나 branch를 바꾸는 `checkout`/`switch`는 이전 값과 새
+값을 모두 후보로 유지합니다. 첫 segment나 `;` 또는 개행 뒤의 변경은 무조건 실행되는
+것으로 보고 해당 후보를 대체합니다. 이후 Git 호출은 모든 cwd 후보와 각 checkout의
+모든 branch 후보 조합을 평가하며, 하나라도 규칙을 위반하면 해당 규칙을 명시해 차단합니다.
+해석할 수 없는 조건부 변경은 새 후보를 추가하지 않습니다. 따라서
+`false && git switch -c orch/new; git commit`으로 보호 branch를 숨길 수 없지만,
+무조건 실행되는 `git switch -c orch/new && git commit`과
+`cd <own-worktree> && git commit`의 정상 작업은 계속 허용합니다. 디렉터리 대상이 없거나
+디렉터리가 아니면 Bash의 실패한 이동처럼 기존 cwd를 유지합니다. 선두의 `~/`와 단독 `~`는
 `$HOME`으로 확장하며 `~user`는 계속 확정할 수 없는 대상으로 취급합니다.
 따옴표 안의 설명, 주석, heredoc 본문은
 명령으로 취급하지 않습니다. `cd -`, 확장되지 않은 변수, `--git-dir`/`--work-tree` 등으로
@@ -1133,10 +1149,16 @@ root를 알 수 없거나 symlink 등을 통해 root 밖으로 나가는 경로�
 
 Checker는 `CC_ORCH_SUMMARY_CHECK`의 실행 파일 경로, hook 자신의 저장소에 있는
 `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`, `PATH` 순서로 찾습니다.
-Override는 운영 점검과 테스트에 사용할 수 있습니다. `--strict <task-dir>`로 실행하여
-exit 0이면 조용히 허용하고, exit 1이면 checker 출력의 처음 1,500바이트와 정확한 재실행
-명령, off-switch 경로를 포함해 차단합니다. Task/checker를 찾지 못하거나 exit 2 또는
-실행 오류가 발생하면 `systemMessage`, stderr, journal에 경고를 남기고 허용합니다.
+Override는 운영 점검과 테스트에 사용할 수 있습니다. `--strict <task-dir>`로 실행하고
+해당 task의 `summary.md` STATUS 행도 읽으며 `[lead-x]` 접두사를 허용합니다. Exit 0이면
+transcript와 summary의 상태가 같을 때 조용히 허용하고, 다르거나 기록된 상태를 읽을 수
+없으면 경고합니다. Exit 1에서는 transcript가 `PASS`를 주장할 때만 차단합니다. Summary가
+`BLOCKED`나 `FAIL`인데 transcript가 `PASS`인 경우에도 반드시 차단하며 checker 출력의 처음
+1,500바이트, 정확한 재실행 명령, off-switch 경로를 제공합니다. Transcript가 `BLOCKED`
+또는 `FAIL`이면 차단하지 않습니다. 실제 gate 실패나 summary 부재는 checker 출력을 담은
+경고로 전달하여 정직한 실패 보고와 escalation을 끝낼 수 있게 합니다. Task/checker를 찾지
+못하거나 exit 2 또는 실행 오류가 발생한 경우도 `systemMessage`, stderr, journal에 경고를
+남기고 허용합니다.
 Transcript가 없거나 읽을 수 없으면 확인 가능한 claim이 없으므로 조용히 허용합니다.
 저장소 내부 경로와 `brief.md` 확인만으로 fallback task의 소유권까지 증명하지는 않습니다.
 Python이 없으면 오류 출력 없이 허용하며, 의도적인 gate 경고는 계속 stderr, stdout JSON,

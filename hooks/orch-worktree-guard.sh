@@ -271,6 +271,40 @@ def resolve_path(value, cwd):
     return (Path(cwd) / value).resolve()
 
 
+def switched_branch(target, op, args):
+    if op not in ("checkout", "switch"):
+        return None
+    if "--" in args:
+        boundary = args.index("--")
+        if args[boundary + 1:]:
+            return None  # A path checkout must not masquerade as a branch switch.
+        args = args[:boundary]
+    if any(arg in ("--detach", "-d", "--orphan") for arg in args):
+        return None
+    creation_flags = ("-b", "-B") if op == "checkout" else ("-c", "-C")
+    creation = [index for index, arg in enumerate(args) if arg in creation_flags]
+    if creation:
+        if len(creation) != 1 or creation[0] + 1 >= len(args):
+            return None
+        branch = args[creation[0] + 1]
+        if branch.startswith("-") or re.search(r"[\s$`*?\[]", branch):
+            return None
+        return branch
+    # Unknown options may consume an argument or select paths; do not infer a branch then.
+    simple_flags = {"-f", "--force", "-q", "--quiet", "-m", "--merge", "--no-guess",
+                    "--no-track", "--ignore-other-worktrees"}
+    if any(arg.startswith("-") and arg not in simple_flags for arg in args):
+        return None
+    positional = [arg for arg in args if not arg.startswith("-")]
+    if len(positional) != 1:
+        return None
+    try:
+        git(target, "rev-parse", "--verify", "refs/heads/" + positional[0])
+    except Exception:
+        return None
+    return positional[0]
+
+
 def invocations(command, cwd):
     quotes, inert = lex(command)
     syntax = blank_spans(command, inert + [(q["start"], q["end"]) for q in quotes])
@@ -281,6 +315,7 @@ def invocations(command, cwd):
     depth = 0
     start = 0
     index = 0
+    preceding = None
     while index < len(syntax):
         ch = syntax[index]
         if ch == "\\":
@@ -291,12 +326,20 @@ def invocations(command, cwd):
         elif ch in ")}":
             depth = max(0, depth - 1)
         elif ch in ";&|\n" and depth == 0:
-            cuts.append((start, index))
-            start = index + 1
+            separator = syntax[index:index + 2] if syntax[index:index + 2] in ("&&", "||") else ch
+            if syntax[start:index].strip():
+                cuts.append((start, index, preceding))
+                preceding = separator
+            elif separator != "\n" or preceding not in ("&&", "||"):
+                preceding = separator
+            index += len(separator)
+            start = index
+            continue
         index += 1
-    cuts.append((start, len(syntax)))
-    running = Path(cwd).resolve() if isinstance(cwd, str) and cwd and "$" not in cwd else None
-    for start, end in cuts:
+    cuts.append((start, len(syntax), preceding))
+    running = [Path(cwd).resolve() if isinstance(cwd, str) and cwd and "$" not in cwd else None]
+    effective_branches = {}
+    for start, end, preceding in cuts:
         visible = syntax[start:end]
         first = re.search(r"\S+", visible)
         if not first or not at_command_position(syntax, start + first.start()):
@@ -304,7 +347,7 @@ def invocations(command, cwd):
         try:
             words = shlex.split(data[start:end], comments=True)
         except ValueError:
-            running = None
+            running = [None]
             continue
         if not words:
             continue
@@ -312,16 +355,23 @@ def invocations(command, cwd):
             args = words[1:]
             if args and args[0] == "--":
                 args = args[1:]
-            target = (resolve_path(args[0], running) if len(args) == 1 and
-                      not args[0].startswith("-") else None)
-            if target is None:
-                running = None
-            elif target.is_dir():
-                running = target
+            candidates = []
+            for current in running:
+                target = (resolve_path(args[0], current) if len(args) == 1 and
+                          not args[0].startswith("-") else None)
+                if preceding in ("&&", "||"):
+                    candidates.append(current)  # This directory change may not execute.
+                    if target is not None and target.is_dir():
+                        candidates.append(target)
+                elif target is None:
+                    candidates.append(None)
+                else:
+                    candidates.append(target if target.is_dir() else current)
+            running = list(dict.fromkeys(candidates))
             # A missing/non-directory target makes Bash cd/pushd fail, retaining its cwd.
             continue
         if words[0] == "popd" or first[0][0] in "({":
-            running = None
+            running = [None]
             continue
         index = 0
         unsafe_env = False
@@ -347,7 +397,7 @@ def invocations(command, cwd):
         if not re.search(r"\bgit\b", visible):
             continue
         index += 1
-        target = running
+        targets = running[:]
         while index < len(words) and words[index].startswith("-"):
             word = words[index]
             if word.startswith(("--git-dir", "--work-tree")):
@@ -358,10 +408,10 @@ def invocations(command, cwd):
                     unsafe_env = True
                     break
                 if word == "-C":
-                    target = resolve_path(words[index + 1], target)
+                    targets = [resolve_path(words[index + 1], target) for target in targets]
                 index += 2
             elif word.startswith("-C"):
-                target = resolve_path(word[2:], target)
+                targets = [resolve_path(word[2:], target) for target in targets]
                 index += 1
             elif word.startswith(("-c", "--config-env=")) or word in ("--no-pager", "--paginate", "--no-optional-locks"):
                 index += 1
@@ -383,7 +433,30 @@ def invocations(command, cwd):
         elif op == "push":
             category = "PUSH"
         if category:
-            yield target, op, category, args
+            updates = {}
+            for target in dict.fromkeys(targets):
+                try:
+                    if target is None:
+                        raise ValueError("unresolvable git target")
+                    info = git(target, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD", "--git-common-dir").splitlines()
+                    if len(info) != 3:
+                        raise ValueError("unknown git target shape")
+                    checkout = Path(info[0]).resolve()
+                    branches = effective_branches.get(checkout, [info[1]])
+                    common = (target / info[2]).resolve()
+                except Exception as exc:
+                    yield op, category, args, None, str(exc)
+                    continue
+                for branch in branches:
+                    yield op, category, args, (checkout, branch, common), None
+                changed_branch = switched_branch(target, op, args)
+                if changed_branch is not None:
+                    if preceding in ("&&", "||"):
+                        updates[checkout] = list(dict.fromkeys([*branches, changed_branch]))
+                    else:
+                        updates[checkout] = [changed_branch]
+            # All cwd candidates belong to the same segment; publish changes only afterwards.
+            effective_branches.update(updates)
 
 
 def protected_push(args):
@@ -441,16 +514,13 @@ def main(event):
     dev = isinstance(agent_type, str) and re.fullmatch(r"dev(?:-opus)?-[1-9][0-9]*", agent_type)
     if not typed_slot and not dev and not agent_id:
         return
-    for target, op, category, args in invocations(command, event.get("cwd")):
+    for op, category, args, resolved, error in invocations(command, event.get("cwd")):
         # Classification is the evaluation boundary; only known actors are journalled.
         kind, slot = ("lead", typed_slot) if typed_slot else (("dev", None) if dev else ("unknown", None))
         try:
-            if target is None:
-                raise ValueError("unresolvable git target")
-            info = git(target, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD", "--git-common-dir").splitlines()
-            if len(info) != 3:
-                raise ValueError("unknown git target shape")
-            checkout, branch, common = Path(info[0]).resolve(), info[1], (target / info[2]).resolve()
+            if error:
+                raise ValueError(error)
+            checkout, branch, common = resolved
             registry = find_registry(checkout, event.get("cwd"), common)
             rows = [row for row in registry_rows(registry) if row["status"] and row["status"] not in INACTIVE]
             matched = next((row for row in rows if id_matches(agent_id, row["agentId"])), None)

@@ -114,19 +114,28 @@ assert_output() {
   if [ "$expected" = allow ]; then
     [ -z "$RUN_OUTPUT" ] && [ ! -s "$TMP/stderr" ] || fail "$label unexpectedly emitted: $RUN_OUTPUT"
   else
-    if ! python3 - "$RUN_OUTPUT" "$expected" "$TMP/stderr" <<'PY'
+    if ! python3 - "$RUN_OUTPUT" "$expected" "$TMP/stderr" "${CHECK_ERROR_TEXT:-ERROR: missing summary.md}" <<'PY'
 import json, sys
 from pathlib import Path
 out = json.loads(sys.argv[1])
 if sys.argv[2] == 'block':
     assert out['decision'] == 'block'
-    assert 'ERROR: missing summary.md' in out['reason']
+    assert sys.argv[4] in out['reason']
     assert 'Re-run:' in out['reason'] and '--strict' in out['reason']
     assert 'stop-gate.off' in out['reason']
     assert not Path(sys.argv[3]).read_text()
 else:
     assert 'decision' not in out
-    assert 'was claimed but orch-summary-check --strict could not be run' in out['systemMessage']
+    if sys.argv[2] == 'warn':
+        assert 'was claimed but orch-summary-check --strict could not be run' in out['systemMessage']
+    elif sys.argv[2] == 'warn-check':
+        assert 'strict summary check failed' in out['systemMessage']
+        assert sys.argv[4] in out['systemMessage']
+    elif sys.argv[2] == 'warn-mismatch':
+        assert 'strict summary check passed' in out['systemMessage']
+        assert 'disagrees with summary.md STATUS:' in out['systemMessage']
+    else:
+        raise AssertionError('unknown warning expectation')
     assert 'Verify manually:' in out['systemMessage']
     assert Path(sys.argv[3]).read_text().strip() == out['systemMessage']
 PY
@@ -257,9 +266,53 @@ for payload in '{' '' '[]'; do
   assert_output allow 'malformed/empty payload' no
 done
 transcript $'STATUS: BLOCKED\nGATES: failed'
-check block 'BLOCKED claim also validates' yes
+check warn-check 'C BLOCKED with missing summary warns without blocking' yes
 transcript $'STATUS: FAIL\nGATES: failed'
-check block 'FAIL claim also validates' yes
+check warn-check 'C FAIL with missing summary warns without blocking' yes
+
+ESCALATION="$REPO/.orchestra/escalation"
+PASSED_ESCALATION="$REPO/.orchestra/passed-escalation"
+mkdir -p "$ESCALATION" "$PASSED_ESCALATION"
+cp "$GOOD/brief.md" "$GOOD/plan.md" "$GOOD/summary.md" "$PASSED_ESCALATION/"
+cp "$GOOD/plan.md" "$ESCALATION/plan.md"
+printf 'RISK: normal\n' > "$ESCALATION/brief.md"
+cat > "$ESCALATION/summary.md" <<'SUMMARY'
+STATUS: BLOCKED
+CLAUDE PROFILE: normal
+PROMOTIONS: none
+DISPATCH: codex-first
+INVESTIGATION: none
+LANES: codex
+GATES: codex-verify PASS; codex-review BLOCKING
+ROUNDS: 1
+SUMMARY
+registry '.orchestra/escalation'
+transcript $'STATUS: BLOCKED\nGATES: codex-review BLOCKING'
+CHECK_ERROR_TEXT='ERROR: adversarial review is not CLEAR/NONBLOCKING' check warn-check 'C honest BLOCKED summary with real gate failure can escalate' yes route-lead-charlie-critical false cccccccc1234 "$ESCALATION"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: BLOCKED'* ]] || fail 'recorded BLOCKED status was not read'
+transcript "$CLAIM"
+CHECK_ERROR_TEXT='ERROR: adversarial review is not CLEAR/NONBLOCKING' check block 'C PASS claim contradicting BLOCKED summary still blocks' yes route-lead-charlie-critical false cccccccc1234 "$ESCALATION"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: BLOCKED'* ]] || fail 'PASS block did not identify recorded BLOCKED status'
+python3 - "$ESCALATION/summary.md" "$PASSED_ESCALATION/summary.md" <<'PY'
+import sys
+from pathlib import Path
+failed, passed = map(Path, sys.argv[1:])
+failed.write_text(failed.read_text().replace('STATUS: BLOCKED', '[lead-charlie] STATUS: FAIL'))
+passed.write_text(passed.read_text().replace('STATUS: PASS', '[lead-charlie] STATUS: BLOCKED'))
+PY
+transcript $'STATUS: FAIL\nGATES: codex-review BLOCKING'
+CHECK_ERROR_TEXT='ERROR: adversarial review is not CLEAR/NONBLOCKING' check warn-check 'C honest FAIL report never blocks' yes route-lead-charlie-critical false cccccccc1234 "$ESCALATION"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: FAIL'* ]] || fail 'prefixed recorded FAIL status was not read'
+transcript "$CLAIM"
+CHECK_ERROR_TEXT='ERROR: adversarial review is not CLEAR/NONBLOCKING' check block 'C PASS claim contradicting FAIL summary still blocks' yes route-lead-charlie-critical false cccccccc1234 "$ESCALATION"
+registry '.orchestra/passing task'
+transcript $'STATUS: BLOCKED\nGATES: awaiting escalation'
+check warn-mismatch 'C BLOCKED claim with passing PASS summary only warns' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
+registry '.orchestra/passed-escalation'
+check allow 'C BLOCKED claim and prefixed BLOCKED summary with passing check allow' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
+transcript "$CLAIM"
+check warn-mismatch 'C passing checker with mismatched recorded BLOCKED status warns' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
+registry
 transcript "$CLAIM"
 python3 - "$TRANSCRIPT" <<'PY'
 import json, sys

@@ -38,7 +38,7 @@ def make_repo(path):
     tree = obj('tree', b'')
     sha = obj('commit', (f'tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n'
                          'committer Fixture <fixture@example.invalid> 1 +0000\n\nFixture\n').encode())
-    for branch in ('main', 'orch/10-a', 'orch/12-c', 'orch/unowned'):
+    for branch in ('main', 'master', 'develop', 'orch/10-a', 'orch/12-c', 'orch/unowned'):
         target = dot / 'refs/heads' / branch
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(sha + '\n')
@@ -149,7 +149,56 @@ registry one
 check allow 'one active lead in-place' "$REPO" 'git commit'
 head_at "$REPO/.git/HEAD" main
 check allow 'single lead creates task branch from main' "$REPO" 'git switch -c orch/12-c'
+head_at "$REPO/.git/HEAD" master
+check allow 'A new branch then commit uses effective branch' "$REPO" 'git switch -c orch/new && git commit'
+check allow 'A checkout branch then add and commit uses effective branch' "$REPO" 'git checkout -b orch/new && git add -A && git commit'
+check allow 'A standalone new-branch switch remains allowed' "$REPO" 'git switch -c orch/new'
+check deny 'B skipped conditional switch retains protected branch before semicolon' "$REPO" 'false && git switch -c orch/new; git commit -m x' lead-charlie R1
+check deny 'B skipped conditional switch retains protected branch before AND' "$REPO" 'false && git switch -c orch/new && git commit -m x' lead-charlie R1
+check deny 'B skipped conditional checkout retains protected branch for add' "$REPO" 'false && git checkout -b orch/new; git add -A' lead-charlie R1
+check deny 'B OR-conditional switch retains protected branch' "$REPO" 'true || git switch -c orch/new; git commit -m x' lead-charlie R1
+check deny 'B newline after AND keeps branch change conditional' "$REPO" $'false &&\ngit switch -c orch/new; git commit -m x' lead-charlie R1
+check allow 'B unconditional switch before semicolon replaces branch' "$REPO" 'git switch -c orch/new; git commit -m x'
+check allow 'B unconditional switch before AND replaces branch' "$REPO" 'git switch -c orch/new && git commit -m x'
+check allow 'B conditional switch retains effective branch instead of live HEAD' "$REPO" 'git switch -c orch/new; false && git switch -c orch/later; git commit -m x'
+check deny 'B conditional existing branch switch evaluates protected new candidate' "$OWN" 'false && git switch develop; git commit -m x' lead-charlie R1
+check allow 'B conditional switch between task branches stays allowed' "$OWN" 'false && git switch -c orch/new; git commit -m x'
+check allow 'B unconditional switch after semicolon replaces branch candidates' "$OWN" 'false && git switch develop; git switch -c orch/new; git commit -m x'
+check allow 'B unconditional switch after newline replaces branch candidates' "$OWN" $'false && git switch develop\ngit switch -c orch/new; git commit -m x'
+check deny 'B composed cwd and branch candidates retain protected combination' "$REPO" "false && cd '$OWN' && git switch -c orch/new; git commit -m x" lead-charlie R1
+check allow 'B composed candidates keep safe branch set isolated by checkout' "$REPO" "false && cd '$OWN' && git switch -c orch/new; git -C '$OWN' commit -m x"
+check allow 'A forced checkout branch creation is tracked' "$REPO" 'git checkout -B orch/new && git commit'
+check allow 'A forced switch branch creation is tracked' "$REPO" 'git switch -C orch/new && git commit'
+check allow 'A existing task branch switch is tracked' "$REPO" 'git switch orch/12-c && git commit'
+check deny 'A checkout path does not change branch' "$REPO" 'git checkout -- somefile && git commit -m x' lead-charlie R1
+check deny 'A bare path argument does not change branch' "$REPO" 'git checkout somefile && git commit' lead-charlie R1
+check deny 'A multiple arguments remain ambiguous' "$REPO" 'git checkout orch/12-c somefile && git commit' lead-charlie R1
+check deny 'A explicit detach does not become a branch override' "$REPO" 'git switch --detach orch/12-c && git commit' lead-charlie R1
+sha="$(git -C "$REPO" rev-parse HEAD)"
+check deny 'A detached SHA does not become a branch override' "$REPO" "git checkout $sha && git commit" lead-charlie R1
+check deny 'A switch into protected branch then commit is denied' "$OWN" 'git switch develop && git commit -m x' lead-charlie R1
+check deny 'A checkout into protected branch then commit is denied' "$OWN" 'git checkout develop && git commit' lead-charlie R1
+mkdir -p "$OWN/subdir"
+check deny 'B conditional branch candidates survive checkout path aliases' "$OWN" "false && git -C '$OWN/subdir' switch develop; git -C '$OWN' commit -m x" lead-charlie R1
+check deny 'A branch override survives -C and cd aliases' "$OWN" "git -C '$OWN/subdir' switch develop; cd '$OWN'; git commit" lead-charlie R1
+check allow 'A branch override is isolated by checkout root' "$OWN" "git switch develop; git -C '$REPO' switch -c orch/new; git -C '$REPO' commit"
+check deny 'A separate checkout keeps its own effective branch' "$OWN" "git switch develop; git -C '$REPO' switch -c orch/new; git commit" lead-charlie R1
+check allow 'A branch overrides do not leak between payloads' "$OWN" 'git commit'
+head_at "$REPO/.git/HEAD" main
 registry
+check deny 'A creating a branch still cannot bypass shared-checkout collision' "$REPO" 'git switch -c orch/new && git commit' lead-charlie R4
+check deny 'B skipped conditional cd retains shared checkout candidate' "$REPO" "false && cd '$OWN'; git commit" lead-charlie R1
+check deny 'B skipped conditional pushd retains shared checkout candidate' "$REPO" "false && pushd '$OWN'; git commit" lead-charlie R1
+check deny 'B OR-conditional cd retains shared checkout candidate' "$REPO" "true || cd '$OWN'; git commit" lead-charlie R1
+check deny 'B conditional cd also evaluates the new checkout candidate' "$OWN" "false && cd '$OTHER'; git commit" lead-charlie R2
+check deny 'B conditional cd followed by newline retains alternatives' "$REPO" "false && cd '$OWN'"$'\ngit commit' lead-charlie R1
+check deny 'B newline after AND does not erase conditional execution' "$REPO" $'false &&\n'"cd '$OWN'; git commit" lead-charlie R1
+check allow 'B unconditional cd after semicolon replaces candidates' "$REPO" "false && cd '$OTHER'; cd '$OWN'; git commit"
+check allow 'B unconditional cd after newline replaces candidates' "$REPO" "false && cd '$OTHER'"$'\n'"cd '$OWN'; git commit"
+check allow 'B absolute -C resolves all cwd candidates to own checkout' "$REPO" "false && cd '$OTHER'; git -C '$OWN' commit"
+check allow 'B conditional cd within own checkout stays allowed' "$OWN" "false && cd '$OWN/subdir'; git commit"
+check allow 'B conditional unresolvable cd keeps safe previous candidate' "$OWN" 'false && cd $UNSET_VAR; git commit'
+check deny 'B conditional unresolvable cd keeps protected previous candidate' "$REPO" 'false && cd $UNSET_VAR; git commit' lead-charlie R1
 check allow 'cd to own worktree from shared main' "$REPO" "cd '$OWN' && git commit -m x"
 check deny 'cd to other worktree' "$OWN" "cd '$OTHER' && git commit"
 check deny 'second Git invocation tracked' "$OWN" "git status && cd '$OTHER' && git commit"
