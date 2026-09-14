@@ -736,6 +736,7 @@ git status --short
 을 설치한다.
 
 선택형 `PreToolUse` 수동 폴링 방지 hook은 `hooks/orch-poll-guard.sh`에 있으며 등록 방법은 `OPERATIONS.md`를 참고한다.
+`verifier`/`verifier-normal`의 Bash 변경 명령 guard는 agent frontmatter로 자동 활성화된다. 정책과 제한은 [OPERATIONS.md](OPERATIONS.md#verifier-bash-command-guard)를 참고한다.
 
 ---
 

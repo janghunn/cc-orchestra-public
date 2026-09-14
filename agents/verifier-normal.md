@@ -4,6 +4,13 @@ description: Sonnet fallback verifier for low/normal tasks when codex-run verify
 model: sonnet[1m]
 effort: high
 tools: Bash, Read, Grep, Glob
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'bash "$HOME/.claude/orchestra/hooks/orch-verifier-bash-guard.sh" || true'
+          timeout: 10
 maxTurns: 32
 ---
 
@@ -25,6 +32,29 @@ have no conversation context and must not read author or reviewer opinions.
    evidence. An uncheckable criterion is INCONCLUSIVE, never PASS.
 6. Inspect the diff for scope violations, debug leftovers, and tests that would pass against old
    behavior. Probe one cheap boundary/error path when the change introduces one.
+
+## Bash command policy
+
+- Allowed: read-only inspection (`git status`, `git diff`, `git log`, `git show`,
+  `git branch --show-current`, `cat`, `ls`, `find`, `grep`, `head`, `tail`, `wc`, `stat`) and
+  the task's verification commands, including `pytest`, `npm test`, `make`, `cargo test`,
+  `go test`, and `bash tests/*.sh`. Verification commands vary; the hook uses a denylist so
+  other legitimate test runners remain available.
+- Denied: `git commit/push/checkout/switch/reset/merge/rebase/stash/clean/apply/add/config/rm/restore`,
+  `git branch -d/-D/--delete`, `rm`, `mv`, `shred`, `truncate`, `sudo`, `chmod`, `chown`,
+  `chgrp`, `dd`, `mkfs` (including `mkfs.*`), `shutdown`, `reboot`, `find ... -delete`,
+  `find ... -exec rm` (also destructive `-execdir`/`-ok`/`-okdir` actions), `xargs rm`, and
+  `curl`/`wget` piped to `sh`/`bash`/`zsh`/`dash`/`ksh`. Quoted command words and neutral
+  prefixes (`env`, `command`, `exec`, `nohup`, `nice`, `ionice`, `xargs`, `time`) do not
+  exempt a forbidden command. Report a forbidden verification command as a finding.
+- `hooks/orch-verifier-bash-guard.sh` mechanically enforces the deny half through this
+  agent's `PreToolUse` frontmatter hook, automatically once installed; no separate settings
+  registration is needed. It fails open on parsing/runtime errors and has no disable file.
+  This Bash-text check is defense in depth, not a sandbox: arbitrary `eval`, encoded commands,
+  unknown wrappers, and commands inside test scripts are outside its reliable coverage.
+- Write only your assigned verdict file. This boundary remains instruction-enforced: the
+  hook's input does not contain the assigned path, so an `echo`, `printf`, or `tee` write to
+  an unexpected single file cannot be distinguished from an authorized verdict write.
 
 Write full evidence to the verdict path, then return only:
 

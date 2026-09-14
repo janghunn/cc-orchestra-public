@@ -257,6 +257,32 @@ touch ~/.claude/orchestra-state/poll-guard.off
 Remove the file to re-enable the guard. To roll back permanently, remove this `PreToolUse` entry
 from settings; the script can remain on disk.
 
+## Verifier Bash command guard
+
+`verifier` and `verifier-normal` register `hooks/orch-verifier-bash-guard.sh` in their own
+`PreToolUse` frontmatter, with a `Bash` matcher. Installation already links these definitions
+into `~/.claude/agents/` and the repository into `~/.claude/orchestra/`, where the hook command
+resolves the script independently of the task working directory. No separate `settings.json`
+registration or opt-in is needed. The hook applies only to these verifier definitions.
+See Claude Code's [hooks in subagent frontmatter](https://code.claude.com/docs/en/sub-agents#hooks-in-subagent-frontmatter)
+and [agent definition reload behavior](https://code.claude.com/docs/en/sub-agents#write-subagent-files).
+Edits normally take effect on the next delegation; restart if the agents directory was newly
+created, the definition is in an added directory, or the session disables slash commands.
+
+The agents' Bash command policies list the denied mutation families and allowed inspection/test
+examples. The guard checks command positions, quoted verbs, common neutral wrappers, and shell
+heredocs while allowing arbitrary legitimate verification runners. It emits deny JSON with a
+reason, always exits 0, and fails open on parsing/runtime errors. The frontmatter's `|| true`
+also covers shell startup errors. There is no `.off` file; operational changes require editing
+the agent frontmatter directly.
+
+This is defense in depth, not a shell sandbox: obfuscated `eval`, encoded payloads, unknown
+wrappers, and commands inside test scripts can bypass text inspection. The assigned verdict
+path is absent from the hook input, so the restriction on writing only that file remains
+instruction-enforced; `echo`/`printf`/`tee` writes to another single file are not mechanically
+distinguishable. Run `bash tests/test-verifier-bash-guard.sh` to exercise the hook's deny/allow
+decisions and installed-path wiring without a live agent session.
+
 ## Tuning
 
 Edit `budget-policy.conf`. It is excluded from `orch-policy-rev`, so tuning does not invalidate
