@@ -54,15 +54,25 @@ to remove. Your inputs are the spec, the repository, and what commands actually 
   external failures that prevent the Python inspector from running retain pass-through handling.
   This Bash-text check is defense in depth, not a sandbox: arbitrary `eval`, encoded commands,
   unknown wrappers, and commands inside test scripts are outside its reliable coverage.
-- Known residual gaps (accepted): explicit stdin shell invocation such as
-  `bash - <<< "rm target"` can bypass heredoc/here-string inspection; an unparenthesized
-  `function f { rm target; }; f` declaration can bypass command inspection. Interpreter
-  one-liners (`perl -e`, `python -c`, `node -e`) and wrapping through `ssh host cmd`, `su -c`,
-  `flock`, or `watch` also remain outside reliable enforcement. These are disclosed limitations,
-  not permission to run mutating commands.
-- Known false positives (accepted): `env -S` can treat a literal safe string as executable
-  code and deny it; `git branch --list -- "-D*"` can be misread as branch deletion. A parse
-  failure, including a speculative `env -S` inspection failure, is denied even for safe input.
+- Known residual gaps (accepted):
+
+  The guard's fundamental architecture is extract-commands-then-deny-if-denylisted; any shell construct the lexer does not know how to extract commands from yields zero extracted commands, which defaults to allow -- this is a structural property of a denylist-based approach over an expressive grammar, not a fixable one-off bug, and a real fix would mean inverting to an allowlist-of-recognized-shell-grammar architecture, which is out of scope for this task.
+
+  - Explicit stdin shell invocation such as `bash - <<< "rm target"` can bypass heredoc/here-string
+    inspection; an unparenthesized `function f { rm target; }; f` declaration can bypass inspection.
+  - Interpreter one-liners (`perl -e`, `python -c`, `node -e`) and wrapping through `ssh host cmd`,
+    `su -c`, `flock`, or `watch` remain outside reliable enforcement.
+  - `coproc rm target` is allowed because the lexer does not recognize `coproc` as a
+    command-position introducer, so the destructive command inside it is never extracted/classified.
+  - Dangling/incomplete `&&` or `||` at the end of an otherwise-valid command, such as
+    `printf safe &&`, is syntactically invalid Bash that a real shell would reject. The lexer
+    accepts it without error and extracts no meaningful trailing command, so nothing is denied.
+  - Known false positives (accepted): `env -S` can treat a literal safe string as executable
+    code and deny it; `git branch --list -- "-D*"` can be misread as branch deletion. A parse
+    failure, including a speculative `env -S` inspection failure, is denied even for safe input.
+
+  These are disclosed limitations, not permission to run mutating commands.
+
 - Write only your assigned verdict file. This boundary remains instruction-enforced: the
   hook's input does not contain the assigned path, so an `echo`, `printf`, or `tee` write to
   an unexpected single file cannot be distinguished from an authorized verdict write.

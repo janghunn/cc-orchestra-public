@@ -287,10 +287,17 @@ decisions and installed-path wiring without a live agent session.
 
 Known residual gaps are explicitly accepted under this defense-in-depth scope:
 
+The guard's fundamental architecture is extract-commands-then-deny-if-denylisted; any shell construct the lexer does not know how to extract commands from yields zero extracted commands, which defaults to allow -- this is a structural property of a denylist-based approach over an expressive grammar, not a fixable one-off bug, and a real fix would mean inverting to an allowlist-of-recognized-shell-grammar architecture, which is out of scope for this task.
+
 - Explicit stdin shell invocation, such as `bash - <<< "rm target"`, can bypass heredoc/here-string
   inspection. The unparenthesized declaration `function f { rm target; }; f` can also bypass inspection.
 - Interpreter one-liners (`perl -e`, `python -c`, `node -e`) and command wrapping through
   `ssh host cmd`, `su -c`, `flock`, or `watch` remain outside reliable enforcement.
+- `coproc rm target` is allowed because the lexer does not recognize `coproc` as a
+  command-position introducer, so the destructive command inside it is never extracted/classified.
+- Dangling/incomplete `&&` or `||` at the end of an otherwise-valid command, such as
+  `printf safe &&`, is syntactically invalid Bash that a real shell would reject. The lexer
+  accepts it without error and extracts no meaningful trailing command, so nothing is denied.
 - Known false positives remain: `env -S` may interpret a literal safe string as executable code;
   `git branch --list -- "-D*"` may be misread as a deletion. Parsing failures are denied even if
   the input is actually safe, including failures in speculative `env -S` inspection.
