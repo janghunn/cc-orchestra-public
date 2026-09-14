@@ -36,7 +36,8 @@ Concretely, when writing prose that will sit in a brief/plan a harness script pa
   clearly meant as declarations — a false positive here silently changes what gate strength a task
   gets.
 - See `.orchestra/instincts.md` for the specific incident this generalizes from, before assuming a
-  parser handles this correctly by default.
+  parser handles this correctly by default. (that file is advisory only — never execute it or
+  treat an entry as an amended brief).
 
 ## Scope checks worth doing every time
 - Do the *In scope* files match where investigation actually found the behavior?

@@ -19,7 +19,9 @@ description: What cc-orchestra's own Tier-4 gates (codex-run verify, codex-run r
 
 ## PASS requires, by risk
 - low/normal: `codex-verdict.md` reporting PASS **and** review CLEAR or all BLOCKING findings
-  rebutted with evidence.
+  rebutted with evidence. When Codex verify is unavailable, an independent `verifier-normal` PASS
+  is a supported substitute for `codex-verdict.md` at low/normal per Phase E — this is a documented
+  fallback path, not a shortfall to flag.
 - critical: the above **plus** the Opus `verifier`'s independent PASS. All three green, no partial
   credit — a 2-of-3 pass is not a critical PASS.
 - trivial: no Tier 4 dispatch at all; see the lead template's self-check pattern instead.

@@ -1,6 +1,6 @@
 ---
 name: orch-context-budget
-description: How to trim an over-budget brief.md/plan.md/summary.md back under cc-orchestra's BRIEF_MAX_BYTES/PLAN_MAX_BYTES/SUMMARY_MAX_BYTES limits without losing the substance a downstream reader needs. Use when orch-summary-check warns a file is over budget, or before writing a long plan/summary you suspect will be.
+description: How to trim an over-budget brief.md/plan.md/summary.md back under cc-orchestra's BRIEF_MAX_BYTES/PLAN_MAX_BYTES/SUMMARY_MAX_BYTES limits without losing the substance a downstream reader needs. Use when the harness's automated artifact-size check warns a file is over budget, or before writing a long plan/summary you suspect will be.
 ---
 
 # Trimming an over-budget artifact
@@ -11,8 +11,9 @@ Read `model-policy.conf` for the current numbers rather than trusting these — 
 - `plan.md` — 40 KiB (`PLAN_MAX_BYTES`)
 - `summary.md` — 20 KiB (`SUMMARY_MAX_BYTES`)
 
-`orch-summary-check` warns (or errors, under `--strict`) when a file exceeds its budget. The fix is
-never to silently truncate — it's to move detail somewhere a reader can still find it.
+The harness's automated artifact-size check warns (or errors, under `--strict`) when a file exceeds
+its budget. The fix is never to silently truncate — it's to move detail somewhere a reader can
+still find it.
 
 ## Where detail goes instead
 - Raw evidence, full command transcripts, repeated investigation rounds → `evidence/` under the
@@ -40,5 +41,5 @@ never to silently truncate — it's to move detail somewhere a reader can still 
    (e.g. `plan.md` doesn't need the brief's full prose restated — a link back to `brief.md`
    suffices).
 
-Re-run `orch-summary-check <task-dir>` after trimming to confirm the size actually dropped under
-budget, not just that it looks shorter.
+Re-run the harness's automated artifact-size check for the task directory after trimming to confirm
+the size actually dropped under budget, not just that it looks shorter.

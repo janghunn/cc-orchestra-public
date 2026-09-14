@@ -32,14 +32,16 @@ without one of these six tags is worth the orchestrator questioning.
   Fast service tier for that call. Costs more Codex credit — only use it when latency is the
   actual bottleneck under `dispatch=codex-first`, never under `codex-sparing`.
 
-Record whichever you used in the relevant summary field (`LANES`, `INVESTIGATION`, or `GATES`) as
-`model@effort+fast-mode`, and record an Astra→Sol fallback as
+Record the model and effort in the relevant summary field (`LANES`, `INVESTIGATION`, or `GATES`).
+Add the `+fast-mode` suffix only when `--fast-mode` was used, as `model@effort+fast-mode`.
+Record a plain `--fast` call as `gpt-5.6-luna@high`, with no `+fast-mode` suffix.
+Record an Astra→Sol fallback as
 `gpt-5.6-sol@xhigh (fallback-from:gpt-6-astra)`.
 
 ## Exit code cheat sheet
-| exit | meaning | action |
-|---|---|---|
-| 3 | quota | implement → dev fallback; review/verify → retry `--fast` once |
-| 4 | auth | note in summary, fall through to Claude fallback |
-| 5 | timeout | note in summary, fall through to Claude fallback |
-| 6 | model unavailable | retry with `--model sol|terra` before anything else |
+| exit | meaning | implement | verify | review |
+|---|---|---|---|---|
+| 3 | quota | fall back to a dev | fall back to `verifier-normal` (low/normal) or the existing Opus `verifier` (critical) | retry `--fast` once |
+| 4 | auth | note auth in summary; fall through to Claude dev fallback | note auth in summary; fall back to `verifier-normal` (low/normal) or the existing Opus `verifier` (critical) | `unavailable`, never silently waived |
+| 5 | timeout | note timeout in summary; fall through to Claude dev fallback | note timeout in summary; fall back to `verifier-normal` (low/normal) or the existing Opus `verifier` (critical) | `unavailable`, never silently waived |
+| 6 | model unavailable | retry with `--model sol\|terra` first | retry with `--model sol\|terra` first | retry with `--model sol\|terra` first |
