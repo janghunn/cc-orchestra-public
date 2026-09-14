@@ -273,16 +273,17 @@ when the checkout path changes. Commands retain `|| true`; timeouts are 10 secon
 Identity first uses an active row's `agentId`: exact equality or a prefix with at least eight
 characters. Otherwise it recognizes `(route-)?lead-(alpha|bravo|charlie|delta)` with an optional
 `light`, `normal`, `critical`, or `critical-xhigh` suffix, or `dev(-opus)?-<positive integer>`.
-A known lead with an unresolved slot may use the `.orchestra/wt/<slot>` checkout suffix.
 Unknown actors, including ordinary orchestrator calls, bypass evaluation.
 
 The guard classifies `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `am`, `apply`,
 `add`, `rm`, `mv`, `stash`, and `restore` as index writes; `checkout`, `switch`, `branch` with
 `-f/-D/-m/-M`, and `tag` with `-f/-d` as ref moves; and `push` separately. It denies only:
 
-- **R1:** a lead/dev index write or bare/protected-ref push from `main`, `master`, `develop`, or
-  `trunk`. An explicit non-protected push refspec is allowed by R1, as is switching away from a
-  base branch to create a task branch.
+- **R1:** a lead/dev index write or bare/unresolved-ref push from `main`, `master`, `develop`, or
+  `trunk`. Pushes explicitly targeting any of those protected destinations, or using `--all`,
+  `--mirror`, or `--tags`, are denied regardless of the checked-out branch. R1 allows an explicit
+  non-protected push refspec, a bare push from a task branch, and switching away from a base
+  branch to create a task branch.
 - **R2:** a known lead mutating a checkout on another active lead's registered branch.
 - **R3:** a known lead mutating another active slot's `.orchestra/wt/<slot>` checkout.
 - **R4:** a known lead mutating the registry-owning shared checkout while at least two lead rows
@@ -300,9 +301,10 @@ malformed registries do not block. Complex shell evaluation is not a complete sh
 `hooks/orch-stop-gate.sh` is registered on **SubagentStop**, with matcher `(route-)?lead-.*`;
 `Stop` is for the main session. It checks the last assistant transcript message only when it
 contains a `STATUS: PASS`, `FAIL`, or `BLOCKED` line (optionally prefixed with a lead label) and a
-`GATES:` line. Ordinary mid-task messages do not run a checker. `stop_hook_active: true` bypasses
-the gate to prevent a stop loop. The registry row selected by agent ID, then slot, supplies the
-task directory even if `ARTIFACTS:` names another task. Only without a registry task does an
+`GATES:` line. Ordinary mid-task messages do not run a checker. Any truthy `stop_hook_active`
+value (including boolean `true`, string `"true"`, or numeric `1`) bypasses the gate to prevent a
+stop loop. The registry row selected by agent ID, then slot, supplies the task directory even if
+`ARTIFACTS:` names another task. Only without a registry task does an
 existing `ARTIFACTS:` directory containing `brief.md` qualify as a fallback.
 
 The checker is resolved through `CC_ORCH_SUMMARY_CHECK` (an executable path for operators/tests),
@@ -327,8 +329,9 @@ tail -n 30 "$state_dir/safety-hooks.log"
 The journal path is `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`.
 Evaluated Git invocations and detected claims append an ISO timestamp, hook/event, actor identity,
 decision (`allow`, `deny`, `block`, `warn`, or `skip`), and one-line reason. Fast paths do not log.
-Records use one bounded append write. Only above 2 MiB does an exclusive trim lock permit retaining
-about 1 MiB via a temporary file and atomic rename; appenders coordinate with rotation so records
+Bash payloads without both a bare `git` token and a mutation keyword return before starting Python
+or Git. Records use one bounded append write. Only above 2 MiB does an exclusive trim lock permit
+retaining about 1 MiB via a temporary file and atomic rename; appenders coordinate with rotation so records
 are not lost to the replaced inode. Lock contention skips trimming.
 
 Limitation: Claude Code 2.1.270's documented `SubagentStop` payload has not been measured in this

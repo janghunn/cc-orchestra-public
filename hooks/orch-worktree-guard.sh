@@ -7,7 +7,8 @@ payload="$(cat)"
 [ -n "$payload" ] || exit 0
 # Common Bash calls exit before starting Python or Git.
 mutating='(^|[^[:alnum:]_]|\\[nrt])(commit|merge|rebase|cherry-pick|revert|reset|am|apply|add|rm|mv|stash|restore|checkout|switch|branch|tag|push)($|[^[:alnum:]_])'
-[[ "$payload" =~ $mutating ]] || exit 0
+git_token='(^|[^[:alnum:]_]|\\[nrt])git($|[^[:alnum:]_])'
+[[ "$payload" =~ $mutating && "$payload" =~ $git_token ]] || exit 0
 python3 - "$state_dir" 3<<< "$payload" 2>/dev/null <<'PYTHON' || true
 import datetime
 import fcntl
@@ -376,13 +377,16 @@ def invocations(command, cwd):
 
 
 def protected_push(args):
+    # True: explicitly protected/bulk push; None: implicit or unresolved destination;
+    # False: only explicit non-protected destinations. Preserve the latter two separately
+    # so an ordinary bare push remains allowed from a non-protected checkout.
     positional = []
     remote_option = False
     index = 0
     while index < len(args):
         arg = args[index]
         if arg in ("--all", "--mirror", "--tags"):
-            return True  # No explicitly non-protected refspec.
+            return True
         if arg == "--repo":
             remote_option = True
             index += 2
@@ -402,15 +406,16 @@ def protected_push(args):
         index += 1
     refs = positional if remote_option else positional[1:]
     if not refs:
-        return True
+        return None
+    unresolved = False
     for ref in refs:
         destination = ref.lstrip("+").split(":")[-1]
         destination = destination.removeprefix("refs/heads/")
-        if destination in PROTECTED or destination == "HEAD" or not destination:
+        if destination in PROTECTED:
             return True
-        if any(ch in destination for ch in ("$", "`", "*", "?", "[")):
-            return True
-    return False
+        if destination == "HEAD" or not destination or any(ch in destination for ch in ("$", "`", "*", "?", "[")):
+            unresolved = True
+    return None if unresolved else False
 
 
 def main(event):
@@ -443,14 +448,15 @@ def main(event):
                 kind, slot = "lead", matched["slot"]
             if kind == "unknown":
                 continue
-            if kind == "lead" and not slot and checkout.parent.name == "wt" and checkout.parent.parent.name == ".orchestra":
-                slot = checkout.name
             if not rows:
                 journal(event, "orch-worktree-guard", "skip", "no active registry rows")
                 continue
             registry_root = registry.parent.parent.resolve()
             reason = None
-            if branch in PROTECTED and (category == "INDEX_WRITE" or (category == "PUSH" and protected_push(args))):
+            push_protection = protected_push(args) if category == "PUSH" else False
+            if category == "PUSH" and push_protection is True:
+                reason = f"R1: push from {checkout} on {branch} targets protected refs or a bulk ref set ({shlex.join(args)}). Push only your own task branch."
+            elif branch in PROTECTED and (category == "INDEX_WRITE" or (category == "PUSH" and push_protection is not False)):
                 reason = f"R1: {op} would mutate protected branch {branch} in {checkout}. Switch to your task branch in your own worktree first."
             elif kind == "lead" and slot:
                 other_branch = next((row for row in rows if row["slot"] != slot and row["branch"] == branch), None)
@@ -463,8 +469,8 @@ def main(event):
                     reason = f"R3: checkout {checkout} belongs to active {owner}. Use your own worktree ({slot})."
                 elif checkout == registry_root and len(rows) >= 2:
                     others = ", ".join(row["slot"] for row in rows if row["slot"] != slot)
-                    command = "git worktree add " + shlex.quote(str(registry_root / ".orchestra/wt" / slot)) + " -b <your branch>"
-                    reason = f"R4: shared checkout {checkout} has concurrent active leads ({others}). Create your own worktree: {command}."
+                    suggestion = "git worktree add " + shlex.quote(str(registry_root / ".orchestra/wt" / slot)) + " -b <your branch>"
+                    reason = f"R4: shared checkout {checkout} has concurrent active leads ({others}). Create your own worktree: {suggestion}."
             if reason:
                 reason += " Disable with: " + shlex.join(["touch", str(STATE / "worktree-guard.off")])
                 journal(event, "orch-worktree-guard", "deny", reason)

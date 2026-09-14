@@ -168,6 +168,14 @@ check allow 'explicit push with --repo=remote' "$REPO" 'git push --repo=origin o
 check deny 'bare push from main' "$REPO" 'git push' lead-charlie R1
 check deny 'explicit main push from main' "$REPO" 'git push origin main' lead-charlie R1
 check deny 'refspec targeting main' "$REPO" 'git push origin orch/12-c:refs/heads/main' lead-charlie R1
+for command in 'git push origin main' 'git push origin HEAD:main' 'git push origin orch/12-c:refs/heads/main' 'git push origin +main' 'git push --all' 'git push --mirror' 'git push --tags'; do
+  check deny "protected push from task branch: $command" "$OWN" "$command" lead-charlie R1
+done
+check allow 'explicit task push from task branch' "$OWN" 'git push -u origin orch/12-c'
+check allow 'bare push from task branch' "$OWN" 'git push'
+check allow 'HEAD push from task branch' "$OWN" 'git push origin HEAD'
+check deny 'HEAD push from protected branch' "$REPO" 'git push origin HEAD' lead-charlie R1
+check deny 'protected destination after unresolved refspec' "$OWN" 'git push origin HEAD main' lead-charlie R1
 registry
 for command in 'git status' 'git diff' 'git log' 'git show' 'git fetch' 'git rev-parse HEAD' 'git worktree add /unused' 'git branch -a' 'git tag -l'; do
   check allow "read-only/unclassified: $command" "$REPO" "$command"
@@ -217,8 +225,21 @@ ok 'evaluated invocations journal valid one-line decisions'
 before="$(wc -c < "$STATE/safety-hooks.log")"
 check allow 'unknown actor mutation bypass' "$REPO" 'git commit' unrelated
 check allow 'fast path with no mutation keywords' "$REPO" 'printf hello'
+check allow 'non-git add command fast path' "$REPO" 'npm add package'
 [ "$(wc -c < "$STATE/safety-hooks.log")" = "$before" ] || fail 'fast/unknown path journalled'
 ok 'fast and unknown paths do not journal'
+# Confirm the non-git fast path avoids Python, beyond simply emitting no journal record.
+mkdir -p "$TMP/fastbin"
+cat > "$TMP/fastbin/python3" <<'PYTHON_STUB'
+#!/usr/bin/env bash
+touch "$TEST_PYTHON_MARKER"
+exit 1
+PYTHON_STUB
+chmod +x "$TMP/fastbin/python3"
+payload="$(make_payload "$REPO" 'npm add package')"
+PATH="$TMP/fastbin:$PATH" TEST_PYTHON_MARKER="$TMP/python-called" run_payload "$payload"
+assert_output allow 'non-git add command bypasses Python'
+[ ! -e "$TMP/python-called" ] || fail 'non-git fast path spawned Python'
 python3 - "$HOOK" "$STATE" "$OWN" <<'PY'
 import concurrent.futures, json, os, subprocess, sys
 from pathlib import Path

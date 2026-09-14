@@ -1081,8 +1081,7 @@ systemd 호출은 수행하지 않습니다. `CC_ORCH_SETTINGS`로 settings 경�
 호출자 식별은 active 행의 `agentId` 일치를 우선합니다. 전체 값이 같거나, 짧은 쪽이 8자
 이상인 접두사 관계이면 일치합니다. 그다음 `(route-)?lead-(alpha|bravo|charlie|delta)`와
 선택적인 `light`, `normal`, `critical`, `critical-xhigh` 접미사, 또는
-`dev(-opus)?-<양의 정수>` 형식을 인식합니다. Lead임은 알지만 slot을 모르면 checkout의
-`.orchestra/wt/<slot>` 경로를 보조 정보로 사용합니다. 식별되지 않은 호출자와 일반적인
+`dev(-opus)?-<양의 정수>` 형식을 인식합니다. 식별되지 않은 호출자와 일반적인
 orchestrator 호출은 평가를 건너뜁니다.
 
 `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `am`, `apply`, `add`, `rm`,
@@ -1091,8 +1090,10 @@ orchestrator 호출은 평가를 건너뜁니다.
 다음 네 가지입니다.
 
 - **R1:** lead/dev가 `main`, `master`, `develop`, `trunk`에서 index를 변경하거나 대상이
-  생략된 push 또는 보호 branch를 대상으로 하는 push를 실행하면 차단합니다. 보호 대상이
-  아닌 refspec을 명시한 push와 작업 branch를 만들기 위한 switch는 R1에서 허용합니다.
+  생략되었거나 확정되지 않은 push를 실행하면 차단합니다. 이 보호 branch를 대상으로 명시한
+  push와 `--all`, `--mirror`, `--tags` push는 현재 checkout branch와 무관하게 차단합니다.
+  보호 대상이 아닌 refspec을 명시한 push, 작업 branch에서의 bare push, 작업 branch를
+  만들기 위한 switch는 R1에서 허용합니다.
 - **R2:** slot이 확인된 lead가 다른 active lead의 등록 branch에 있는 checkout을 변경하면
   차단합니다.
 - **R3:** slot이 확인된 lead가 다른 active slot의 `.orchestra/wt/<slot>` checkout을
@@ -1113,7 +1114,8 @@ Registry의 `dir`는 artifact 디렉터리이며 저장소 root 기준으로 해
 `Stop`은 main session용 event입니다. 마지막 assistant transcript 메시지에
 `STATUS: PASS`, `FAIL`, `BLOCKED` 행과 `GATES:` 행이 모두 있을 때만 검사합니다. STATUS
 앞의 lead label은 허용하며 일반적인 작업 중간 보고는 checker를 실행하지 않습니다.
-`stop_hook_active: true`이면 반복 차단을 막기 위해 즉시 허용합니다. Task 디렉터리는
+`stop_hook_active`가 truthy이면 반복 차단을 막기 위해 즉시 허용합니다. Boolean `true`뿐
+아니라 문자열 `"true"`와 숫자 `1`도 포함합니다. Task 디렉터리는
 registry의 agent ID 일치 행, slot 일치 행 순으로 선택하며 `ARTIFACTS:`가 다른 task를
 가리켜도 registry를 우선합니다. Registry에서 task를 찾지 못했을 때만 `ARTIFACTS:`의
 실제 디렉터리에 `brief.md`가 있는지 확인해 fallback으로 사용합니다.
@@ -1141,7 +1143,9 @@ tail -n 30 "$state_dir/safety-hooks.log"
 Journal 경로는 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`입니다.
 실제로 평가한 Git 호출과 감지한 gate claim에만 ISO 시각, hook/event, 호출자 정보,
 판정(`allow`, `deny`, `block`, `warn`, `skip`), 한 줄 사유를 기록합니다. Fast path는
-기록하지 않습니다. 각 행은 크기를 제한한 단일 append로 씁니다. 파일이 2 MiB를 넘을 때만
+기록하지 않습니다. Bash payload에 독립된 `git` 토큰과 변경 키워드가 모두 있지 않으면
+Python이나 Git을 시작하기 전에 반환합니다. 각 행은 크기를 제한한 단일 append로 씁니다.
+파일이 2 MiB를 넘을 때만
 배타적 trim lock을 얻어 약 1 MiB를 임시 파일과 atomic rename으로 보존합니다. Append와
 교체도 동기화하여 교체된 inode에 기록이 남아 사라지는 상황을 막습니다. Trim lock이
 사용 중이면 이번 정리는 건너뜁니다.

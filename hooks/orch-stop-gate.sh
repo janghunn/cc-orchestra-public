@@ -21,7 +21,6 @@ import tempfile
 
 STATE = Path(sys.argv[1])
 LEAD = re.compile(r"^(?:route-)?lead-(alpha|bravo|charlie|delta)(?:-(?:light|normal|critical|critical-xhigh))?$")
-INACTIVE = {"PASS", "FAIL", "BLOCKED", "CLOSED", "IDLE", "UNASSIGNED"}
 
 
 def journal(event, hook, decision, reason):
@@ -178,7 +177,7 @@ def warn(event, status, why, task=None):
 
 
 def main(event):
-    if not isinstance(event, dict) or event.get("stop_hook_active") is True:
+    if not isinstance(event, dict) or event.get("stop_hook_active"):
         return
     slot = slot_for_type(event.get("agent_type"))
     if not slot:

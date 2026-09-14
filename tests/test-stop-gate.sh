@@ -75,7 +75,7 @@ make_payload() {
   python3 - "$REPO" "$TRANSCRIPT" "${1:-route-lead-charlie-critical}" "${2:-false}" "${3:-cccccccc1234}" <<'PY'
 import json, sys
 print(json.dumps({'hook_event_name': 'SubagentStop', 'cwd': sys.argv[1], 'agent_transcript_path': sys.argv[2],
-                  'agent_type': sys.argv[3], 'stop_hook_active': sys.argv[4] == 'true', 'agent_id': sys.argv[5]}))
+                  'agent_type': sys.argv[3], 'stop_hook_active': json.loads(sys.argv[4]), 'agent_id': sys.argv[5]}))
 PY
 }
 run_payload() {
@@ -138,6 +138,8 @@ transcript 'STATUS: PASS'
 check allow 'STATUS without GATES never invokes checker' no
 transcript "$CLAIM"
 check allow 'stop_hook_active loop protection' no route-lead-charlie-critical true
+check allow 'string stop_hook_active loop protection' no route-lead-charlie-critical '"true"'
+check allow 'numeric stop_hook_active loop protection' no route-lead-charlie-critical 1
 touch "$STATE/stop-gate.off"
 check allow 'off-switch bypass' no
 rm "$STATE/stop-gate.off"
