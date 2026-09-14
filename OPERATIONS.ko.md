@@ -325,6 +325,54 @@ touch ~/.claude/orchestra-state/poll-guard.off
 다시 켜려면 위 파일을 삭제합니다. 영구 rollback은 settings에서 이 `PreToolUse` 항목을
 삭제하면 되며, hook 스크립트 파일은 디스크에 남아 있어도 됩니다.
 
+## Verifier Bash 명령 guard
+
+`verifier`와 `verifier-normal`은 각자 frontmatter의 `PreToolUse`에 `Bash` matcher로
+`hooks/orch-verifier-bash-guard.sh`를 등록합니다. 기존 설치 과정에서 agent 정의는
+`~/.claude/agents/`에, repository는 `~/.claude/orchestra/`에 연결되므로 task 작업 디렉터리와
+무관하게 hook 경로를 찾습니다. 별도의 `settings.json` 등록이나 opt-in은 필요하지 않으며,
+이 hook은 두 verifier 정의에만 적용됩니다.
+Claude Code의 [subagent frontmatter hook 문서](https://code.claude.com/docs/en/sub-agents#hooks-in-subagent-frontmatter)와
+[agent 정의 갱신 동작](https://code.claude.com/docs/en/sub-agents#write-subagent-files)을 참고하십시오.
+수정은 보통 다음 위임부터 반영됩니다. Agents 디렉터리를 새로 만들었거나, 추가 디렉터리의
+정의를 수정했거나, slash command를 비활성화한 세션이라면 재시작이 필요합니다.
+
+각 agent의 Bash 명령 정책에 금지된 변경 명령군과 허용된 조회·테스트 예시가 있습니다.
+Guard는 command 위치, 따옴표로 감싼 명령어, 일반적인 중립 wrapper, shell로 전달되는
+heredoc을 검사하며 정상적인 검증 runner는 계속 허용합니다. 차단 시 이유가 포함된 deny JSON을
+출력하고 항상 0으로 종료합니다. Bash parsing/classification 실패는 재귀 검사 중 발생한 오류를
+포함해 명확한 parsing 실패 이유와 함께 기본적으로 차단합니다. 잘못된 형식 또는 Bash가 아닌
+hook event와 Python 검사기 자체가 실행되지 못하는 외부 오류는 기존 pass-through 처리를
+유지합니다. Frontmatter의 `|| true`는 shell 시작 오류도 처리합니다. `.off` 파일은 없으며
+운영상 변경하려면 agent frontmatter를 직접 수정해야 합니다.
+
+이 기능은 심층 방어이며 shell sandbox가 아닙니다. 난독화한 `eval`, 인코딩된 payload, 알 수
+없는 wrapper, 테스트 스크립트 내부 명령은 텍스트 검사를 우회할 수 있습니다. Hook 입력에는
+지정된 verdict 경로가 없으므로 해당 파일만 쓰라는 경계는 여전히 지시로 강제됩니다.
+`echo`/`printf`/`tee`로 다른 단일 파일을 쓰는 행위는 정상 verdict 쓰기와 기계적으로 구분할 수
+없습니다. `bash tests/test-verifier-bash-guard.sh`는 실제 agent 세션 없이 hook의 차단·허용
+결정과 설치 경로 연결을 검증합니다.
+
+이 심층 방어 범위에서 다음 알려진 잔여 공백을 명시적으로 수용합니다.
+
+이 guard는 기본적으로 명령을 추출한 뒤 차단 목록에 있는 경우에만 거부하는 구조이므로, lexer가 명령 추출 방법을 모르는 shell 구문에서는 명령이 하나도 추출되지 않아 기본적으로 허용되며, 이는 표현력이 풍부한 문법에 차단 목록을 적용하는 방식의 구조적 특성으로 개별 버그 수정으로 해결할 수 없고, 근본적으로 해결하려면 인식 가능한 shell 문법만 허용하는 허용 목록 기반 구조로 전환해야 하지만 이는 이 작업의 범위 밖입니다.
+
+- `bash - <<< "rm target"`처럼 stdin을 명시한 shell 호출은 heredoc/here-string 검사를
+  우회할 수 있습니다. 괄호 없는 `function f { rm target; }; f` 선언도 검사를 우회할 수 있습니다.
+- `perl -e`, `python -c`, `node -e` 인터프리터 한 줄 코드와 `ssh host cmd`, `su -c`,
+  `flock`, `watch`를 통한 명령 wrapping은 여전히 신뢰할 수 있는 강제 범위 밖에 있습니다.
+- `coproc rm target`은 lexer가 `coproc`을 명령 위치를 여는 키워드로 인식하지 못하므로
+  허용됩니다. 따라서 그 안의 파괴적 명령은 추출되거나 분류되지 않습니다.
+- `printf safe &&`처럼 그 외에는 유효한 명령 끝에 `&&` 또는 `||`가 매달린 불완전한 입력은
+  실제 shell이 거부하는 잘못된 Bash 문법입니다. 하지만 lexer는 오류 없이 받아들이고 의미 있는
+  후속 명령을 추출하지 않으므로 아무것도 차단하지 않습니다.
+- 알려진 오탐도 남아 있습니다. `env -S`는 안전한 리터럴 문자열을 실행 코드로 취급해 차단할 수
+  있고, `git branch --list -- "-D*"`는 branch 삭제로 오인될 수 있습니다. `env -S`의 추정 검사
+  오류를 포함한 parsing 실패는 실제로 안전한 입력이어도 기본적으로 차단합니다.
+
+이러한 한계의 공개는 verifier의 변경 작업을 허용한다는 뜻이 아닙니다. Hook이 작업을 놓쳐도
+verdict 파일만 쓰라는 지시와 명령 정책은 그대로 적용됩니다.
+
 ## 설정 튜닝
 
 라우팅 정책을 조정하려면 `budget-policy.conf`를 수정합니다.

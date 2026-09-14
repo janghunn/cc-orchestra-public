@@ -269,6 +269,54 @@ touch ~/.claude/orchestra-state/poll-guard.off
 Remove the file to re-enable the guard. To roll back permanently, remove this `PreToolUse` entry
 from settings; the script can remain on disk.
 
+## Verifier Bash command guard
+
+`verifier` and `verifier-normal` register `hooks/orch-verifier-bash-guard.sh` in their own
+`PreToolUse` frontmatter, with a `Bash` matcher. Installation already links these definitions
+into `~/.claude/agents/` and the repository into `~/.claude/orchestra/`, where the hook command
+resolves the script independently of the task working directory. No separate `settings.json`
+registration or opt-in is needed. The hook applies only to these verifier definitions.
+See Claude Code's [hooks in subagent frontmatter](https://code.claude.com/docs/en/sub-agents#hooks-in-subagent-frontmatter)
+and [agent definition reload behavior](https://code.claude.com/docs/en/sub-agents#write-subagent-files).
+Edits normally take effect on the next delegation; restart if the agents directory was newly
+created, the definition is in an added directory, or the session disables slash commands.
+
+The agents' Bash command policies list the denied mutation families and allowed inspection/test
+examples. The guard checks command positions, quoted verbs, common neutral wrappers, and shell
+heredocs while allowing arbitrary legitimate verification runners. It emits deny JSON with a
+reason and always exits 0. Bash parsing/classification failures deny the command by default with
+a clear parsing-failure reason, including errors encountered during recursive inspection.
+Malformed/non-Bash hook events and external failures that prevent the Python inspector from
+running retain pass-through handling; the frontmatter's `|| true` also covers shell startup
+errors. There is no `.off` file; operational changes require editing the agent frontmatter directly.
+
+This is defense in depth, not a shell sandbox: obfuscated `eval`, encoded payloads, unknown
+wrappers, and commands inside test scripts can bypass text inspection. The assigned verdict
+path is absent from the hook input, so the restriction on writing only that file remains
+instruction-enforced; `echo`/`printf`/`tee` writes to another single file are not mechanically
+distinguishable. Run `bash tests/test-verifier-bash-guard.sh` to exercise the hook's deny/allow
+decisions and installed-path wiring without a live agent session.
+
+Known residual gaps are explicitly accepted under this defense-in-depth scope:
+
+The guard's fundamental architecture is extract-commands-then-deny-if-denylisted; any shell construct the lexer does not know how to extract commands from yields zero extracted commands, which defaults to allow -- this is a structural property of a denylist-based approach over an expressive grammar, not a fixable one-off bug, and a real fix would mean inverting to an allowlist-of-recognized-shell-grammar architecture, which is out of scope for this task.
+
+- Explicit stdin shell invocation, such as `bash - <<< "rm target"`, can bypass heredoc/here-string
+  inspection. The unparenthesized declaration `function f { rm target; }; f` can also bypass inspection.
+- Interpreter one-liners (`perl -e`, `python -c`, `node -e`) and command wrapping through
+  `ssh host cmd`, `su -c`, `flock`, or `watch` remain outside reliable enforcement.
+- `coproc rm target` is allowed because the lexer does not recognize `coproc` as a
+  command-position introducer, so the destructive command inside it is never extracted/classified.
+- Dangling/incomplete `&&` or `||` at the end of an otherwise-valid command, such as
+  `printf safe &&`, is syntactically invalid Bash that a real shell would reject. The lexer
+  accepts it without error and extracts no meaningful trailing command, so nothing is denied.
+- Known false positives remain: `env -S` may interpret a literal safe string as executable code;
+  `git branch --list -- "-D*"` may be misread as a deletion. Parsing failures are denied even if
+  the input is actually safe, including failures in speculative `env -S` inspection.
+
+These disclosed gaps do not authorize verifier mutations. The verdict-only writing instruction
+and the command policy still apply when the hook misses an operation.
+
 ## Tuning
 
 Edit `budget-policy.conf`. It is excluded from `orch-policy-rev`, so tuning does not invalidate

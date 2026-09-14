@@ -21,6 +21,8 @@ jobs:
         run: bash tests/test-runtime.sh
       - name: Poll guard hook suite
         run: bash tests/test-poll-guard.sh
+      - name: Verifier Bash guard hook suite
+        run: bash tests/test-verifier-bash-guard.sh
       - name: Tier-1 runtime regression suite
         run: bash tests/test-tier1-runtime.sh
       - name: Runtime policy notice suite
