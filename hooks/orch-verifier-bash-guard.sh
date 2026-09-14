@@ -54,9 +54,6 @@ def unwrap(words):
         if wrapper not in WRAPPERS:
             break
         index += 1
-        # command -v/-V describes commands; it does not execute them.
-        if wrapper == "command" and index < len(words) and words[index] in {"-v", "-V"}:
-            return []
         while index < len(words):
             option = words[index]
             if option == "--":
@@ -65,10 +62,122 @@ def unwrap(words):
             if ASSIGNMENT.match(option):
                 index += 1
             elif option.startswith("-"):
+                # Lookup flags may follow -p or be combined with it.
+                if wrapper == "command" and not option.startswith("--") and any(
+                    flag in option[1:] for flag in "vV"
+                ):
+                    return []
                 index += 2 if option in WRAPPER_VALUES.get(wrapper, set()) else 1
             else:
                 break
     return words[index:]
+
+
+def shell_mode(words):
+    """Return executable -c code and whether the shell executes stdin as code.
+
+    Parse options before selecting the command string: -o/-O and startup-file
+    options consume values, while -n/noexec can be combined or later unset.
+    Outer-shell expansions are inspected separately even for syntax-only calls.
+    """
+    if not words or basename(words[0]) not in SHELLS:
+        return None, False
+    index = 1
+    noexec = interactive = command_string = stdin = False
+    while index < len(words):
+        option = words[index]
+        if option == "--":
+            index += 1
+            break
+        if len(option) < 2 or option[0] not in "-+":
+            break
+        index += 1
+        if option in {"--help", "--version"}:
+            return None, False
+        if option in {"--rcfile", "--init-file"}:
+            index += 1
+            continue
+        if option.startswith("--"):
+            continue
+        enabled = option[0] == "-"
+        for position, flag in enumerate(option[1:], 1):
+            if flag in "oO":
+                value = option[position + 1:]
+                if not value and index < len(words):
+                    value = words[index]
+                    index += 1
+                if flag == "o" and value == "noexec":
+                    noexec = enabled
+                break
+            if flag == "n":
+                noexec = enabled
+            elif flag == "i":
+                interactive = enabled
+            elif flag == "c":
+                command_string = True
+            elif flag == "s":
+                stdin = enabled
+    # Interactive shells ignore noexec; a later +n/+o noexec also restores execution.
+    if noexec and not interactive:
+        return None, False
+    if command_string:
+        return (words[index] if index < len(words) else None), False
+    return None, stdin or index >= len(words)
+
+
+def substitution(command, start):
+    """Consume a $(...), <(...), or >(...) unit without losing later commands."""
+    cursor = start + 2
+    depth = 1
+    quote = None
+    while cursor < len(command):
+        char = command[cursor]
+        if char == "\\" and quote != chr(39):
+            cursor += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in (chr(39), "\""):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return command[start + 2:cursor], cursor + 1
+        cursor += 1
+    raise ValueError("unclosed substitution")
+
+
+def backtick(command, start):
+    cursor = start + 1
+    while cursor < len(command):
+        if command[cursor] == "\\":
+            cursor += 2
+        elif command[cursor] == "`":
+            return command[start + 1:cursor], cursor + 1
+        else:
+            cursor += 1
+    raise ValueError("unclosed backtick")
+
+
+def heredoc_substitutions(body):
+    """Unquoted heredocs expand substitutions even inside literal quote characters."""
+    substitutions = []
+    index = 0
+    while index < len(body):
+        if body[index] == "\\":
+            index += 2
+        elif body.startswith("$(", index):
+            code, index = substitution(body, index)
+            substitutions.append(code)
+        elif body[index] == "`":
+            code, index = backtick(body, index)
+            substitutions.append(code)
+        else:
+            index += 1
+    return substitutions
 
 
 def lex(command):
@@ -87,35 +196,18 @@ def lex(command):
     length = len(command)
     index = 0
 
-    def substitution(start):
-        cursor = start + 2
-        depth = 1
-        quote = None
-        while cursor < length:
-            char = command[cursor]
-            if char == "\\" and quote != chr(39):
-                cursor += 2
-                continue
-            if quote:
-                if char == quote:
-                    quote = None
-            elif char in (chr(39), "\""):
-                quote = char
-            elif char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    return command[start + 2:cursor], cursor + 1
-            cursor += 1
-        raise ValueError("unclosed command substitution")
-
     def word(start):
         cursor = start
         value = []
         quote = None
         while cursor < length:
             char = command[cursor]
+            if not quote and command[cursor:cursor + 2] in {"<(", ">("}:
+                body, end = substitution(command, cursor)
+                substitutions.append(body)
+                value.append(command[cursor:end])
+                cursor = end
+                continue
             if not quote and (char.isspace() or char in ";|&()<>"):
                 break
             if char == "\\" and quote != chr(39):
@@ -134,18 +226,16 @@ def lex(command):
                     cursor += 1
                     continue
             if quote != chr(39) and command.startswith("$(", cursor):
-                body, end = substitution(cursor)
+                body, end = substitution(command, cursor)
                 substitutions.append(body)
                 value.append(command[cursor:end])
                 cursor = end
                 continue
             if quote != chr(39) and char == "`":
-                end = command.find("`", cursor + 1)
-                if end < 0:
-                    raise ValueError("unclosed backtick")
-                substitutions.append(command[cursor + 1:end])
-                value.append(command[cursor:end + 1])
-                cursor = end + 1
+                body, end = backtick(command, cursor)
+                substitutions.append(body)
+                value.append(command[cursor:end])
+                cursor = end
                 continue
             value.append(char)
             cursor += 1
@@ -162,7 +252,7 @@ def lex(command):
                 pipeline = []
                 current = {"words": [], "heredocs": []}
             index += 1
-            for delimiter, strip_tabs, owner in pending:
+            for delimiter, strip_tabs, quoted, owner in pending:
                 body = []
                 while index < length:
                     end = command.find("\n", index)
@@ -174,7 +264,10 @@ def lex(command):
                     if candidate == delimiter:
                         break
                     body.append(line)
-                owner["heredocs"].append("\n".join(body))
+                body = "\n".join(body)
+                owner["heredocs"].append(body)
+                if not quoted:
+                    substitutions.extend(heredoc_substitutions(body))
             pending = []
             continue
         if char.isspace():
@@ -187,7 +280,8 @@ def lex(command):
             end = command.find("\n", index)
             index = end if end >= 0 else length
             continue
-        redirect = REDIRECT.match(command, index)
+        redirect = (None if command[index:index + 2] in {"<(", ">("}
+                    else REDIRECT.match(command, index))
         if redirect:
             pipe_pending = False
             index = redirect.end()
@@ -196,9 +290,12 @@ def lex(command):
             target, end = word(index)
             if end == index:
                 raise ValueError("missing redirect target")
-            index = end
             if redirect.group(1) in {"<<", "<<-"}:
-                pending.append((target, redirect.group(1) == "<<-", current))
+                quoted = any(char in command[index:end] for char in (chr(39), "\"", "\\"))
+                pending.append((target, redirect.group(1) == "<<-", quoted, current))
+            elif redirect.group(1) == "<<<":
+                current["heredocs"].append(target)
+            index = end
             continue
         if char in ";|&()":
             operator = char
@@ -230,6 +327,11 @@ def denied_verb(words):
     verb, args = basename(words[0]), words[1:]
     if verb in DESTRUCTIVE or verb.startswith("mkfs."):
         return verb
+    code, _ = shell_mode(words)
+    if code is not None:
+        reason = inspect(code)
+        if reason:
+            return reason
     if verb == "git":
         index = 0
         while index < len(args) and args[index].startswith("-"):
@@ -285,6 +387,7 @@ def inspect(command):
     for pipeline in pipelines:
         verbs = [unwrap(part["words"]) for part in pipeline]
         names = [basename(words[0]) if words else "" for words in verbs]
+        shell_stdin = [shell_mode(words)[1] for words in verbs]
         for index, part in enumerate(pipeline):
             words = verbs[index]
             reason = denied_verb(words)
@@ -294,18 +397,8 @@ def inspect(command):
                 name in SHELLS for name in names[index + 1:]
             ):
                 return names[index] + " piped to a shell"
-            if names[index] in SHELLS:
-                for position, arg in enumerate(words[1:], 1):
-                    if arg == "--" or not arg.startswith("-"):
-                        break
-                    if not arg.startswith("--") and "c" in arg[1:]:
-                        if position + 1 < len(words):
-                            reason = inspect(words[position + 1])
-                            if reason:
-                                return reason
-                        break
             # A heredoc belongs to its command, or flows through a pipe to a shell.
-            if any(name in SHELLS for name in names[index:]):
+            if any(shell_stdin[index:]):
                 for body in part["heredocs"]:
                     reason = inspect(body)
                     if reason:

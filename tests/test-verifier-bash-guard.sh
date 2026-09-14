@@ -127,6 +127,54 @@ assert_allow $'cat <<\'EOF\' > verdict.md\nrm -rf x\ngit push\nEOF' 'ALLOW: verd
 assert_allow $'cat <<\'ONE\' <<\'TWO\'\nrm x\nONE\ngit push\nTWO' 'ALLOW: multiple data heredocs'
 assert_allow $'cat <<\'EOF\'; bash tests/test-x.sh\nrm x\nEOF' 'ALLOW: unrelated shell does not execute data heredoc'
 
+# Review regressions: keep each reported command verbatim as a direct JSON probe.
+assert_deny 'cat <(printf safe); rm -rf x' 'DENY: REVIEW 1 process substitution preserves later command checks'
+assert_deny 'bash -o pipefail -c "rm -rf x"' 'DENY: REVIEW 2 shell option values before -c'
+assert_deny 'bash <<< "rm -rf x"' 'DENY: REVIEW 3 shell here-string code'
+assert_deny 'find . -maxdepth 0 -exec bash -c "rm -rf x" \;' 'DENY: REVIEW 4 find shell callback code'
+assert_deny $'cat <<EOF\n$(rm -rf x)\nEOF' 'DENY: REVIEW 5 unquoted data heredoc expands command substitution'
+assert_allow 'bash -n -c "rm -rf x"' 'ALLOW: REVIEW 6 shell syntax check does not execute -c code'
+assert_allow 'command -p -v /bin/rm' 'ALLOW: REVIEW 7 command lookup flags after -p'
+
+for command in \
+  'cat <(rm -rf x)' 'printf safe > >(rm -rf x)' 'cat < <(rm -rf x)' \
+  'cat prefix<(rm -rf x)' 'bash --rcfile /dev/null -c "rm -rf x"' \
+  'bash --init-file /dev/null -o pipefail -c "rm -rf x"' \
+  'bash -O extglob -c "rm -rf x"' 'bash -n +n -c "rm -rf x"' \
+  'bash +c "rm -rf x"' \
+  'bash -n +o noexec -c "rm -rf x"' 'bash -ni -c "rm -rf x"' \
+  'env sh <<< "rm -rf x"' \
+  'find . -execdir env bash -o pipefail -c "rm -rf x" \;' \
+  'find . -ok sh -c "rm -rf x" \;' 'find . -okdir sh -c "rm -rf x" \;' \
+  'bash -n -c "echo $(rm -rf x)"' 'bash -n <<< "$(rm -rf x)"' \
+  'bash -n -c "rm -rf x"; rm -rf y' 'command -p -v /bin/rm; rm -rf x'; do
+  assert_deny "$command"
+done
+
+assert_deny $'cat <<EOF\n`rm -rf x`\nEOF' 'DENY: unquoted data heredoc expands backticks'
+assert_deny $'cat <<EOF\n\'$(rm -rf x)\'\nEOF' 'DENY: quote characters in heredoc body do not suppress expansion'
+assert_deny $'bash -n <<EOF\n$(rm -rf x)\nEOF' 'DENY: outer heredoc substitution executes before syntax-check shell'
+assert_deny $'cat <<\'EOF\' | sh\n$(rm -rf x)\nEOF' 'DENY: shell consumes quoted heredoc substitution as code'
+
+for command in \
+  'cat <(printf safe)' 'printf safe > >(cat)' 'cat < <(printf safe)' \
+  'printf "%s" "<(rm -rf x)"' 'cat <<< "rm -rf x"' 'bash -n <<< "rm -rf x"' \
+  'bash -c "cat" <<< "rm -rf x"' 'bash -nc "rm -rf x"' 'bash -cn "rm -rf x"' \
+  'bash -c -n "rm -rf x"' 'bash -o noexec -c "rm -rf x"' 'sh -n -c "rm -rf x"' \
+  'bash --rcfile /dev/null -o pipefail -n -c "rm -rf x"' \
+  'find . -exec bash -n -c "rm -rf x" \;' 'command -p -V /bin/rm' \
+  'command -pv /bin/rm' 'command -p -v -- /bin/rm'; do
+  assert_allow "$command"
+done
+
+assert_allow $'cat <<\'EOF\'\n$(rm -rf x)\n`rm -rf x`\nEOF' 'ALLOW: quoted data heredoc suppresses substitutions'
+assert_allow $'cat <<"EOF"\n$(rm -rf x)\nEOF' 'ALLOW: double-quoted heredoc delimiter suppresses substitutions'
+assert_allow $'cat <<\\EOF\n$(rm -rf x)\nEOF' 'ALLOW: escaped heredoc delimiter suppresses substitutions'
+assert_allow $'cat <<E\'OF\'\n$(rm -rf x)\nEOF' 'ALLOW: partly quoted heredoc delimiter suppresses substitutions'
+assert_allow $'cat <<EOF\n\\$(rm -rf x)\n\\`rm -rf x\\`\nEOF' 'ALLOW: escaped substitutions in unquoted data heredoc'
+assert_allow $'cat <<EOF\nplease do not rm anything\nEOF' 'ALLOW: unquoted data heredoc words remain data'
+assert_allow $'bash -n <<\'EOF\'\nrm -rf x\nEOF' 'ALLOW: shell only syntax-checks quoted heredoc'
+
 for payload in '{not json' '' 'null' '[]' '{}' \
   '{"tool_name":"Bash"}' '{"tool_name":"Bash","tool_input":null}' \
   '{"tool_name":"Bash","tool_input":{}}' \
