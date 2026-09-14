@@ -338,9 +338,11 @@ Claude Code의 [subagent frontmatter hook 문서](https://code.claude.com/docs/e
 각 agent의 Bash 명령 정책에 금지된 변경 명령군과 허용된 조회·테스트 예시가 있습니다.
 Guard는 command 위치, 따옴표로 감싼 명령어, 일반적인 중립 wrapper, shell로 전달되는
 heredoc을 검사하며 정상적인 검증 runner는 계속 허용합니다. 차단 시 이유가 포함된 deny JSON을
-출력하고 항상 0으로 종료하며, parsing/runtime 오류는 fail-open으로 처리합니다. Frontmatter의
-`|| true`는 shell 시작 오류도 처리합니다. `.off` 파일은 없으며 운영상 변경하려면 agent
-frontmatter를 직접 수정해야 합니다.
+출력하고 항상 0으로 종료합니다. Bash parsing/classification 실패는 재귀 검사 중 발생한 오류를
+포함해 명확한 parsing 실패 이유와 함께 기본적으로 차단합니다. 잘못된 형식 또는 Bash가 아닌
+hook event와 Python 검사기 자체가 실행되지 못하는 외부 오류는 기존 pass-through 처리를
+유지합니다. Frontmatter의 `|| true`는 shell 시작 오류도 처리합니다. `.off` 파일은 없으며
+운영상 변경하려면 agent frontmatter를 직접 수정해야 합니다.
 
 이 기능은 심층 방어이며 shell sandbox가 아닙니다. 난독화한 `eval`, 인코딩된 payload, 알 수
 없는 wrapper, 테스트 스크립트 내부 명령은 텍스트 검사를 우회할 수 있습니다. Hook 입력에는
@@ -348,6 +350,19 @@ frontmatter를 직접 수정해야 합니다.
 `echo`/`printf`/`tee`로 다른 단일 파일을 쓰는 행위는 정상 verdict 쓰기와 기계적으로 구분할 수
 없습니다. `bash tests/test-verifier-bash-guard.sh`는 실제 agent 세션 없이 hook의 차단·허용
 결정과 설치 경로 연결을 검증합니다.
+
+이 심층 방어 범위에서 다음 알려진 잔여 공백을 명시적으로 수용합니다.
+
+- `bash - <<< "rm target"`처럼 stdin을 명시한 shell 호출은 heredoc/here-string 검사를
+  우회할 수 있습니다. 괄호 없는 `function f { rm target; }; f` 선언도 검사를 우회할 수 있습니다.
+- `perl -e`, `python -c`, `node -e` 인터프리터 한 줄 코드와 `ssh host cmd`, `su -c`,
+  `flock`, `watch`를 통한 명령 wrapping은 여전히 신뢰할 수 있는 강제 범위 밖에 있습니다.
+- 알려진 오탐도 남아 있습니다. `env -S`는 안전한 리터럴 문자열을 실행 코드로 취급해 차단할 수
+  있고, `git branch --list -- "-D*"`는 branch 삭제로 오인될 수 있습니다. `env -S`의 추정 검사
+  오류를 포함한 parsing 실패는 실제로 안전한 입력이어도 기본적으로 차단합니다.
+
+이러한 한계의 공개는 verifier의 변경 작업을 허용한다는 뜻이 아닙니다. Hook이 작업을 놓쳐도
+verdict 파일만 쓰라는 지시와 명령 정책은 그대로 적용됩니다.
 
 ## 설정 튜닝
 

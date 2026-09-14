@@ -49,9 +49,20 @@ to remove. Your inputs are the spec, the repository, and what commands actually 
   exempt a forbidden command. Report a forbidden verification command as a finding.
 - `hooks/orch-verifier-bash-guard.sh` mechanically enforces the deny half through this
   agent's `PreToolUse` frontmatter hook, automatically once installed; no separate settings
-  registration is needed. It fails open on parsing/runtime errors and has no disable file.
+  registration is needed. Bash parsing/classification failures deny the command by default,
+  with an explicit reason. There is no disable file. Malformed/non-Bash hook events and
+  external failures that prevent the Python inspector from running retain pass-through handling.
   This Bash-text check is defense in depth, not a sandbox: arbitrary `eval`, encoded commands,
   unknown wrappers, and commands inside test scripts are outside its reliable coverage.
+- Known residual gaps (accepted): explicit stdin shell invocation such as
+  `bash - <<< "rm target"` can bypass heredoc/here-string inspection; an unparenthesized
+  `function f { rm target; }; f` declaration can bypass command inspection. Interpreter
+  one-liners (`perl -e`, `python -c`, `node -e`) and wrapping through `ssh host cmd`, `su -c`,
+  `flock`, or `watch` also remain outside reliable enforcement. These are disclosed limitations,
+  not permission to run mutating commands.
+- Known false positives (accepted): `env -S` can treat a literal safe string as executable
+  code and deny it; `git branch --list -- "-D*"` can be misread as branch deletion. A parse
+  failure, including a speculative `env -S` inspection failure, is denied even for safe input.
 - Write only your assigned verdict file. This boundary remains instruction-enforced: the
   hook's input does not contain the assigned path, so an `echo`, `printf`, or `tee` write to
   an unexpected single file cannot be distinguished from an authorized verdict write.

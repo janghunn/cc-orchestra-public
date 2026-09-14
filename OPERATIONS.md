@@ -272,9 +272,11 @@ created, the definition is in an added directory, or the session disables slash 
 The agents' Bash command policies list the denied mutation families and allowed inspection/test
 examples. The guard checks command positions, quoted verbs, common neutral wrappers, and shell
 heredocs while allowing arbitrary legitimate verification runners. It emits deny JSON with a
-reason, always exits 0, and fails open on parsing/runtime errors. The frontmatter's `|| true`
-also covers shell startup errors. There is no `.off` file; operational changes require editing
-the agent frontmatter directly.
+reason and always exits 0. Bash parsing/classification failures deny the command by default with
+a clear parsing-failure reason, including errors encountered during recursive inspection.
+Malformed/non-Bash hook events and external failures that prevent the Python inspector from
+running retain pass-through handling; the frontmatter's `|| true` also covers shell startup
+errors. There is no `.off` file; operational changes require editing the agent frontmatter directly.
 
 This is defense in depth, not a shell sandbox: obfuscated `eval`, encoded payloads, unknown
 wrappers, and commands inside test scripts can bypass text inspection. The assigned verdict
@@ -282,6 +284,19 @@ path is absent from the hook input, so the restriction on writing only that file
 instruction-enforced; `echo`/`printf`/`tee` writes to another single file are not mechanically
 distinguishable. Run `bash tests/test-verifier-bash-guard.sh` to exercise the hook's deny/allow
 decisions and installed-path wiring without a live agent session.
+
+Known residual gaps are explicitly accepted under this defense-in-depth scope:
+
+- Explicit stdin shell invocation, such as `bash - <<< "rm target"`, can bypass heredoc/here-string
+  inspection. The unparenthesized declaration `function f { rm target; }; f` can also bypass inspection.
+- Interpreter one-liners (`perl -e`, `python -c`, `node -e`) and command wrapping through
+  `ssh host cmd`, `su -c`, `flock`, or `watch` remain outside reliable enforcement.
+- Known false positives remain: `env -S` may interpret a literal safe string as executable code;
+  `git branch --list -- "-D*"` may be misread as a deletion. Parsing failures are denied even if
+  the input is actually safe, including failures in speculative `env -S` inspection.
+
+These disclosed gaps do not authorize verifier mutations. The verdict-only writing instruction
+and the command policy still apply when the hook misses an operation.
 
 ## Tuning
 

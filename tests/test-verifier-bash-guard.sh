@@ -32,6 +32,7 @@ assert_exit_zero() {
 
 assert_deny() {
   local command="$1" label="${2:-DENY: $1}"
+  local reason_fragment="${3:-}"
   run_payload "$(make_payload "$command")"
   assert_exit_zero "$label"
   if ! printf '%s' "$RUN_OUTPUT" | python3 -c '
@@ -42,10 +43,16 @@ hook = json.load(sys.stdin)["hookSpecificOutput"]
 assert hook["hookEventName"] == "PreToolUse"
 assert hook["permissionDecision"] == "deny"
 assert hook["permissionDecisionReason"].strip()
-'; then
+if sys.argv[1]:
+    assert sys.argv[1] in hook["permissionDecisionReason"]
+' "$reason_fragment"; then
     fail "$label did not emit deny JSON with a reason: $RUN_OUTPUT"
   fi
   ok "$label"
+}
+
+assert_parse_deny() {
+  assert_deny "$1" "$2" 'could not confidently parse this command; denying by default'
 }
 
 assert_allow_payload() {
@@ -241,7 +248,7 @@ done
 assert_allow '[[ x =~ (rm|mv) ]]' 'ALLOW: conditional regex patterns are data'
 assert_allow '[[ "$(printf safe)" == safe ]]' 'ALLOW: harmless substitution in conditional'
 assert_allow "[[ '\$(rm x)' == literal ]]" 'ALLOW: single-quoted conditional data does not execute'
-assert_allow "env -S 'printf %s )'" 'ALLOW: split-string literal parenthesis is an argument'
+assert_parse_deny "env -S 'printf %s )'" 'DENY: split-string inspection failure is no longer swallowed'
 
 assert_allow $'case x in\n  rm|mv) true;;\n  *) true;;\nesac' 'ALLOW: multiline case patterns remain data'
 assert_allow $'cat <<\'EOF\'\nEO\\\nF\nrm -rf x\nEOF' 'ALLOW: quoted heredoc does not fold backslash-newline'
@@ -256,7 +263,21 @@ for payload in '{not json' '' 'null' '[]' '{}' \
 done
 assert_allow_payload "$(make_payload 'rm -rf x' Read)" 'ALLOW: non-Bash tool'
 assert_allow_payload "$(make_payload 'rm -rf x' BashOutput)" 'ALLOW: BashOutput tool'
-assert_allow 'echo "unterminated' 'ALLOW: shell parse error fails open'
+assert_parse_deny 'echo "unterminated' 'DENY: unclosed quote fails closed'
+assert_parse_deny 'echo "$(case x in x) printf safe;; esac)"; rm target' \
+  'DENY: FINAL nested case substitution fails closed'
+assert_parse_deny '(printf safe' 'DENY: FINAL unclosed group fails closed'
+assert_parse_deny 'cat >' 'DENY: FINAL missing redirect target fails closed'
+assert_parse_deny 'echo $(printf safe' 'DENY: unclosed command substitution fails closed'
+assert_parse_deny 'echo `printf safe' 'DENY: unclosed backtick fails closed'
+assert_parse_deny '[[ x == x' 'DENY: unfinished conditional fails closed'
+assert_parse_deny 'printf safe |' 'DENY: unfinished pipeline fails closed'
+assert_parse_deny 'cat <<EOF' 'DENY: missing heredoc body fails closed'
+assert_parse_deny 'env -S' 'DENY: missing split-string value fails closed'
+assert_parse_deny "env -S '\"unterminated'" 'DENY: unclosed split-string quote fails closed'
+assert_parse_deny 'env -u' 'DENY: missing wrapper option value fails closed'
+assert_parse_deny 'bash --rcfile' 'DENY: missing shell option value fails closed'
+assert_parse_deny 'bash -c' 'DENY: missing shell command string fails closed'
 
 mkdir -p "$TMP/state"
 touch "$TMP/state/verifier-bash-guard.off" "$TMP/state/poll-guard.off"

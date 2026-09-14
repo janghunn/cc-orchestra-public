@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Agent-local PreToolUse guard for verifier Bash calls. This is defense in depth,
 # not a shell sandbox or a verdict-path validator. No writable disable switch.
-# Like orch-poll-guard.sh, consume stdin JSON and fail open on parsing/runtime errors.
-# Registrations also use `|| true` to cover shell errors before this script runs.
+# Consume stdin JSON; failures while parsing/classifying a Bash command deny it.
+# Invalid/non-Bash events and external runtime failures retain their existing handling.
+# Registrations use `|| true` for shell errors before this script runs.
 set -uo pipefail
 
 payload="$(cat)"
@@ -98,6 +99,8 @@ def split_env(value):
         index += 1
     if started:
         parts.append("".join(word))
+    if quote:
+        raise ValueError("unclosed env split-string quote")
     return parts
 
 
@@ -122,7 +125,7 @@ def unwrap(words, split_codes=None):
                 consumed = 1
                 if option == "--split-string" or (split_option and not split_option[1]):
                     if index + 1 >= len(words):
-                        return []
+                        raise ValueError("missing env split-string value")
                     value = words[index + 1]
                     consumed = 2
                 else:
@@ -144,7 +147,10 @@ def unwrap(words, split_codes=None):
                     flag in option[1:] for flag in "vV"
                 ):
                     return []
-                index += 2 if option in WRAPPER_VALUES.get(wrapper, set()) else 1
+                takes_value = option in WRAPPER_VALUES.get(wrapper, set())
+                if takes_value and index + 1 >= len(words):
+                    raise ValueError("missing wrapper option value")
+                index += 2 if takes_value else 1
             else:
                 break
         if wrapper == "timeout" and index < len(words):
@@ -174,6 +180,8 @@ def shell_mode(words):
         if option in {"--help", "--version"}:
             return None, False
         if option in {"--rcfile", "--init-file"}:
+            if index >= len(words):
+                raise ValueError("missing shell startup-file option value")
             index += 1
             continue
         if option.startswith("--"):
@@ -196,11 +204,13 @@ def shell_mode(words):
                 command_string = True
             elif flag == "s":
                 stdin = enabled
+    if command_string and index >= len(words):
+        raise ValueError("missing shell command string")
     # Interactive shells ignore noexec; a later +n/+o noexec also restores execution.
     if noexec and not interactive:
         return None, False
     if command_string:
-        return (words[index] if index < len(words) else None), False
+        return words[index], False
     return None, stdin or index >= len(words)
 
 
@@ -510,6 +520,12 @@ def lex(command):
     pipelines.append(pipeline)
     if groups:
         raise ValueError("unclosed command group")
+    if conditional:
+        raise ValueError("unclosed conditional")
+    if pending:
+        raise ValueError("missing heredoc body")
+    if pipe_pending:
+        raise ValueError("incomplete pipeline")
     return pipelines, substitutions
 
 
@@ -517,13 +533,7 @@ def denied_verb(words):
     split_codes = []
     words = unwrap(words, split_codes)
     for code in split_codes:
-        try:
-            reason = inspect(code)
-        except ValueError:
-            # env arguments may contain literal shell metacharacters. If its
-            # shell-like scan is inapplicable, still check the split argv below
-            # and the remaining outer commands instead of aborting everything.
-            reason = None
+        reason = inspect(code)
         if reason:
             return reason
     if not words:
@@ -648,29 +658,43 @@ def inspect(command):
 
 try:
     event = json.load(sys.stdin)
-    if not isinstance(event, dict) or event.get("tool_name") != "Bash":
-        raise SystemExit(0)
-    tool_input = event.get("tool_input")
-    if not isinstance(tool_input, dict):
-        raise SystemExit(0)
-    command = tool_input.get("command")
-    if not isinstance(command, str):
-        raise SystemExit(0)
-    reason = inspect(command)
-    if reason:
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": (
-                    "Verifier Bash policy forbids " + reason + ". Run read-only inspection "
-                    "or the legitimate verification commands, and write only your verdict file. "
-                    "Report a forbidden verification command as a finding; do not bypass the guard."
-                ),
-            }
-        }))
 except Exception:
-    pass
+    # Event routing is separate from command classification. Preserve the existing
+    # contract for malformed events; no Bash command has been extracted here.
+    raise SystemExit(0)
+if not isinstance(event, dict) or event.get("tool_name") != "Bash":
+    raise SystemExit(0)
+tool_input = event.get("tool_input")
+if not isinstance(tool_input, dict):
+    raise SystemExit(0)
+command = tool_input.get("command")
+if not isinstance(command, str):
+    raise SystemExit(0)
+
+try:
+    reason = inspect(command)
+except Exception:
+    # Never turn a failed or incomplete command classification into permission.
+    # Include internal inspection errors as well as explicit lexer ValueErrors.
+    message = (
+        "Verifier Bash policy could not confidently parse this command; denying by default. "
+        "Report the parsing failure as a finding; do not bypass the guard."
+    )
+else:
+    if not reason:
+        raise SystemExit(0)
+    message = (
+        "Verifier Bash policy forbids " + reason + ". Run read-only inspection "
+        "or the legitimate verification commands, and write only your verdict file. "
+        "Report a forbidden verification command as a finding; do not bypass the guard."
+    )
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": message,
+    }
+}))
 ' 2>/dev/null || true
 
 exit 0
