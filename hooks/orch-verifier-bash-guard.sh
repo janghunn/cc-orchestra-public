@@ -23,7 +23,8 @@ GIT_MUTATIONS = {
     "commit", "push", "checkout", "switch", "reset", "merge", "rebase", "stash",
     "clean", "apply", "add", "config", "rm", "restore",
 }
-WRAPPERS = {"env", "command", "exec", "nohup", "nice", "ionice", "xargs", "time"}
+WRAPPERS = {"env", "command", "builtin", "exec", "nohup", "nice", "ionice", "xargs",
+            "time", "timeout", "setsid", "stdbuf"}
 WRAPPER_VALUES = {
     "env": {"-u", "--unset", "-C", "--chdir"},
     "exec": {"-a"},
@@ -33,6 +34,8 @@ WRAPPER_VALUES = {
               "--max-lines", "--max-args", "-P", "--max-procs", "-s", "--max-chars",
               "--process-slot-var"},
     "time": {"-f", "--format", "-o", "--output"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
 }
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=")
 REDIRECT = re.compile(r"(?:[0-9]+)?(<<<|<<-|<<|>>|>&|<&|<>|>\||&>>|&>|>|<)")
@@ -43,7 +46,62 @@ def basename(word):
     return word.rsplit("/", 1)[-1]
 
 
-def unwrap(words):
+def split_env(value):
+    """Split static GNU env -S words, including its non-shell escapes.
+
+    Environment-variable values remain unresolved, like other dynamic shell data.
+    No command is executed to obtain the resulting argument vector.
+    """
+    parts, word = [], []
+    quote = None
+    started = False
+    index = 0
+    escapes = {"f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+    while index < len(value):
+        char = value[index]
+        if not quote and char.isspace():
+            if started:
+                parts.append("".join(word))
+            word, started = [], False
+        elif not quote and char == "#" and not started:
+            break
+        elif char == "\\" and index + 1 < len(value):
+            escaped = value[index + 1]
+            if quote == chr(39) and escaped not in {chr(39), "\\"}:
+                word.append(char)
+                started = True
+                index += 1
+                continue
+            index += 1
+            if escaped == "c" and not quote:
+                break
+            if escaped == "_" and not quote:
+                if started:
+                    parts.append("".join(word))
+                word, started = [], False
+            else:
+                word.append(" " if escaped == "_" and quote != chr(39)
+                            else escapes.get(escaped, escaped) if quote != chr(39)
+                            else escaped)
+                started = True
+        elif char in (chr(39), "\""):
+            if not quote:
+                quote = char
+            elif quote == char:
+                quote = None
+            else:
+                word.append(char)
+            started = True
+        else:
+            word.append(char)
+            started = True
+        index += 1
+    if started:
+        parts.append("".join(word))
+    return parts
+
+
+def unwrap(words, split_codes=None):
     """Expose verbs behind common neutral prefixes without scanning ordinary arguments."""
     index = 0
     while index < len(words):
@@ -56,6 +114,25 @@ def unwrap(words):
         index += 1
         while index < len(words):
             option = words[index]
+            split_option = re.fullmatch(r"-[iv0]*S(.*)", option) if wrapper == "env" else None
+            if wrapper == "env" and (
+                split_option or option == "--split-string"
+                or option.startswith("--split-string=")
+            ):
+                consumed = 1
+                if option == "--split-string" or (split_option and not split_option[1]):
+                    if index + 1 >= len(words):
+                        return []
+                    value = words[index + 1]
+                    consumed = 2
+                else:
+                    value = split_option[1] if split_option else option.split("=", 1)[1]
+                if split_codes is not None:
+                    split_codes.append(value)
+                # Preserve the resulting verb for pipeline detection as well as
+                # checking the split-string payload as shell-like command text.
+                words = words[:index] + split_env(value) + words[index + consumed:]
+                continue
             if option == "--":
                 index += 1
                 break
@@ -70,6 +147,8 @@ def unwrap(words):
                 index += 2 if option in WRAPPER_VALUES.get(wrapper, set()) else 1
             else:
                 break
+        if wrapper == "timeout" and index < len(words):
+            index += 1  # The duration precedes the command, after timeout options.
     return words[index:]
 
 
@@ -125,9 +204,9 @@ def shell_mode(words):
     return None, stdin or index >= len(words)
 
 
-def substitution(command, start):
+def substitution(command, start, opener_length=2):
     """Consume a $(...), <(...), or >(...) unit without losing later commands."""
-    cursor = start + 2
+    cursor = start + opener_length
     depth = 1
     quote = None
     while cursor < len(command):
@@ -145,7 +224,7 @@ def substitution(command, start):
         elif char == ")":
             depth -= 1
             if depth == 0:
-                return command[start + 2:cursor], cursor + 1
+                return command[start + opener_length:cursor], cursor + 1
         cursor += 1
     raise ValueError("unclosed substitution")
 
@@ -170,8 +249,9 @@ def heredoc_substitutions(body):
         if body[index] == "\\":
             index += 2
         elif body.startswith("$(", index):
+            arithmetic = body.startswith("$((", index)
             code, index = substitution(body, index)
-            substitutions.append(code)
+            substitutions.extend(heredoc_substitutions(code) if arithmetic else [code])
         elif body[index] == "`":
             code, index = backtick(body, index)
             substitutions.append(code)
@@ -189,26 +269,51 @@ def lex(command):
     """
     pipelines = []
     pipeline = []
-    current = {"words": [], "heredocs": []}
+    current = {"words": [], "heredocs": [], "groups": []}
+    groups = []
+    case = None
+    conditional = False
     pending = []
     substitutions = []
     pipe_pending = False
     length = len(command)
     index = 0
 
-    def word(start):
+    def at_command_position():
+        return not current["groups"] and all(
+            value in PREFIXES or ASSIGNMENT.match(value) for value in current["words"]
+        )
+
+    def open_group(closer):
+        nonlocal pipelines, pipeline, current, pipe_pending, case
+        groups.append((closer, pipelines, pipeline, current, case))
+        pipelines, pipeline = [], []
+        current = {"words": [], "heredocs": [], "groups": []}
+        case = {"phase": "subject", "depth": 0, "seen": False} if closer == "esac" else None
+        pipe_pending = False
+
+    def close_group(closer):
+        nonlocal pipelines, pipeline, current, pipe_pending, case
+        if not groups or groups[-1][0] != closer:
+            raise ValueError("unmatched group terminator")
+        body = pipelines + [pipeline + [current]]
+        _, pipelines, pipeline, current, case = groups.pop()
+        current["groups"].append(body)
+        pipe_pending = False
+
+    def word(start, expand=True, data=False):
         cursor = start
         value = []
         quote = None
         while cursor < length:
             char = command[cursor]
-            if not quote and command[cursor:cursor + 2] in {"<(", ">("}:
+            if expand and not quote and command[cursor:cursor + 2] in {"<(", ">("}:
                 body, end = substitution(command, cursor)
                 substitutions.append(body)
                 value.append(command[cursor:end])
                 cursor = end
                 continue
-            if not quote and (char.isspace() or char in ";|&()<>"):
+            if not quote and (char.isspace() or (not data and char in ";|&()<>")):
                 break
             if char == "\\" and quote != chr(39):
                 if cursor + 1 < length:
@@ -225,13 +330,14 @@ def lex(command):
                     quote = None
                     cursor += 1
                     continue
-            if quote != chr(39) and command.startswith("$(", cursor):
+            if expand and quote != chr(39) and command.startswith("$(", cursor):
                 body, end = substitution(command, cursor)
-                substitutions.append(body)
+                substitutions.extend(heredoc_substitutions(body)
+                                     if command.startswith("$((", cursor) else [body])
                 value.append(command[cursor:end])
                 cursor = end
                 continue
-            if quote != chr(39) and char == "`":
+            if expand and quote != chr(39) and char == "`":
                 body, end = backtick(command, cursor)
                 substitutions.append(body)
                 value.append(command[cursor:end])
@@ -250,7 +356,7 @@ def lex(command):
                 pipeline.append(current)
                 pipelines.append(pipeline)
                 pipeline = []
-                current = {"words": [], "heredocs": []}
+                current = {"words": [], "heredocs": [], "groups": []}
             index += 1
             for delimiter, strip_tabs, quoted, owner in pending:
                 body = []
@@ -260,6 +366,17 @@ def lex(command):
                         end = length
                     line = command[index:end]
                     index = min(end + 1, length)
+                    # Bash folds an unescaped backslash-newline before testing an
+                    # unquoted heredoc delimiter, including across multiple lines.
+                    while not quoted and end < length and (
+                        len(line) - len(line.rstrip("\\"))
+                    ) % 2:
+                        next_end = command.find("\n", index)
+                        if next_end < 0:
+                            next_end = length
+                        line = line[:-1] + command[index:next_end]
+                        end = next_end
+                        index = min(end + 1, length)
                     candidate = line.lstrip("\t") if strip_tabs else line
                     if candidate == delimiter:
                         break
@@ -280,6 +397,55 @@ def lex(command):
             end = command.find("\n", index)
             index = end if end >= 0 else length
             continue
+        if conditional:
+            if command.startswith("]]", index):
+                conditional = False
+                index += 2
+            else:
+                _, index = word(index, data=True)
+            continue
+        # Case subjects/patterns are data. Only the body after a pattern-closing
+        # parenthesis occupies command positions; nested case blocks get frames.
+        if case and case["phase"] != "body":
+            if case["phase"] == "pattern" and char in "|()":
+                if char == "(" and case["seen"]:
+                    case["depth"] += 1
+                elif char == ")":
+                    if case["depth"]:
+                        case["depth"] -= 1
+                    else:
+                        case["phase"] = "body"
+                index += 1
+                continue
+            value, end = word(index)
+            if end == index:
+                raise ValueError("unsupported case syntax")
+            raw = command[index:end]
+            if case["phase"] == "subject":
+                case["phase"] = "in"
+            elif case["phase"] == "in" and raw == "in":
+                case["phase"] = "pattern"
+            elif case["phase"] == "pattern" and raw == "esac" and not case["seen"]:
+                close_group("esac")
+            else:
+                case["seen"] = True
+            index = end
+            continue
+        if command.startswith("((", index) and (
+            at_command_position() or current["words"] == ["for"]
+        ):
+            body, index = substitution(command, index, opener_length=1)
+            substitutions.extend(heredoc_substitutions(body))
+            current["words"].append("((arithmetic))")
+            continue
+        if char == "(":
+            open_group(")")
+            index += 1
+            continue
+        if char == ")":
+            close_group(")")
+            index += 1
+            continue
         redirect = (None if command[index:index + 2] in {"<(", ">("}
                     else REDIRECT.match(command, index))
         if redirect:
@@ -287,46 +453,86 @@ def lex(command):
             index = redirect.end()
             while index < length and command[index] in " \t":
                 index += 1
-            target, end = word(index)
+            is_heredoc = redirect.group(1) in {"<<", "<<-"}
+            target, end = word(index, expand=not is_heredoc)
             if end == index:
                 raise ValueError("missing redirect target")
-            if redirect.group(1) in {"<<", "<<-"}:
-                quoted = any(char in command[index:end] for char in (chr(39), "\"", "\\"))
+            if is_heredoc:
+                delimiter_syntax = command[index:end].replace("\\\n", "")
+                quoted = any(char in delimiter_syntax for char in (chr(39), "\"", "\\"))
                 pending.append((target, redirect.group(1) == "<<-", quoted, current))
             elif redirect.group(1) == "<<<":
                 current["heredocs"].append(target)
             index = end
             continue
-        if char in ";|&()":
+        if char in ";|&":
             operator = char
-            if command[index:index + 2] in {"&&", "||", "|&", ";;"}:
+            if command[index:index + 3] == ";;&":
+                operator = ";;&"
+            elif command[index:index + 2] in {"&&", "||", "|&", ";;", ";&"}:
                 operator = command[index:index + 2]
             pipeline.append(current)
-            current = {"words": [], "heredocs": []}
+            current = {"words": [], "heredocs": [], "groups": []}
             pipe_pending = operator in {"|", "|&"}
             if operator not in {"|", "|&"}:
                 pipelines.append(pipeline)
                 pipeline = []
+            if case and operator in {";;", ";&", ";;&"}:
+                case.update(phase="pattern", depth=0, seen=False)
             index += len(operator)
             continue
         value, end = word(index)
         if end == index:
             raise ValueError("unsupported shell token")
-        current["words"].append(value)
+        raw = command[index:end]
+        if raw == "[[" and at_command_position():
+            conditional = True
+            current["words"].append(raw)
+        elif raw == "case" and at_command_position():
+            open_group("esac")
+        elif raw in {"if", "while", "until", "for", "select"} and at_command_position():
+            open_group("fi" if raw == "if" else "done")
+            if raw in {"for", "select"}:
+                current["words"].append(raw)  # Loop variable/list words are not commands.
+        elif raw in {"fi", "done"} and at_command_position():
+            close_group(raw)
+        elif raw == "esac" and case and at_command_position():
+            close_group("esac")
+        elif raw == "{" and (at_command_position() or current["groups"]):
+            open_group("}")
+        elif raw == "}" and groups and groups[-1][0] == "}" and at_command_position():
+            close_group("}")
+        else:
+            current["words"].append(value)
         pipe_pending = False
         index = end
     pipeline.append(current)
     pipelines.append(pipeline)
+    if groups:
+        raise ValueError("unclosed command group")
     return pipelines, substitutions
 
 
 def denied_verb(words):
-    words = unwrap(words)
+    split_codes = []
+    words = unwrap(words, split_codes)
+    for code in split_codes:
+        try:
+            reason = inspect(code)
+        except ValueError:
+            # env arguments may contain literal shell metacharacters. If its
+            # shell-like scan is inapplicable, still check the split argv below
+            # and the remaining outer commands instead of aborting everything.
+            reason = None
+        if reason:
+            return reason
     if not words:
         return None
     verb, args = basename(words[0]), words[1:]
     if verb in DESTRUCTIVE or verb.startswith("mkfs."):
         return verb
+    if verb == "eval":
+        return inspect(" ".join(args))
     code, _ = shell_mode(words)
     if code is not None:
         reason = inspect(code)
@@ -378,32 +584,66 @@ def denied_verb(words):
     return None
 
 
+def stage_words(part):
+    """A compound stage retains the executable names inside its grouped commands."""
+    words = unwrap(part["words"])
+    result = [words] if words else []
+    bodies = list(part["groups"])
+    code, _ = shell_mode(words)
+    if words and basename(words[0]) == "eval":
+        code = " ".join(words[1:])
+    if code is not None:
+        bodies.append(lex(code)[0])
+    for body in bodies:
+        for pipeline in body:
+            for child in pipeline:
+                result.extend(stage_words(child))
+    return result
+
+
+def stage_heredocs(part):
+    result = list(part["heredocs"])
+    for body in part["groups"]:
+        for pipeline in body:
+            for child in pipeline:
+                result.extend(stage_heredocs(child))
+    return result
+
+
+def inspect_pipelines(pipelines):
+    for pipeline in pipelines:
+        verbs = [stage_words(part) for part in pipeline]
+        names = [{basename(words[0]) for words in stage} for stage in verbs]
+        shell_stdin = [any(shell_mode(words)[1] for words in stage) for stage in verbs]
+        for index, part in enumerate(pipeline):
+            reason = denied_verb(part["words"])
+            if reason:
+                return reason
+            for body in part["groups"]:
+                reason = inspect_pipelines(body)
+                if reason:
+                    return reason
+            downloads = names[index] & {"curl", "wget"}
+            if downloads and any(
+                stage & SHELLS for stage in names[index + 1:]
+            ):
+                return sorted(downloads)[0] + " piped to a shell"
+            # A heredoc belongs to its command, or flows through a pipe to a shell.
+            if any(shell_stdin[index:]):
+                for body in stage_heredocs(part):
+                    reason = inspect(body)
+                    if reason:
+                        return reason
+    return None
+
+
 def inspect(command):
     pipelines, substitutions = lex(command)
     for body in substitutions:
         reason = inspect(body)
         if reason:
             return reason
-    for pipeline in pipelines:
-        verbs = [unwrap(part["words"]) for part in pipeline]
-        names = [basename(words[0]) if words else "" for words in verbs]
-        shell_stdin = [shell_mode(words)[1] for words in verbs]
-        for index, part in enumerate(pipeline):
-            words = verbs[index]
-            reason = denied_verb(words)
-            if reason:
-                return reason
-            if names[index] in {"curl", "wget"} and any(
-                name in SHELLS for name in names[index + 1:]
-            ):
-                return names[index] + " piped to a shell"
-            # A heredoc belongs to its command, or flows through a pipe to a shell.
-            if any(shell_stdin[index:]):
-                for body in part["heredocs"]:
-                    reason = inspect(body)
-                    if reason:
-                        return reason
-    return None
+    return inspect_pipelines(pipelines)
 
 
 try:
