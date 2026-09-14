@@ -17,6 +17,16 @@ This instruction explicitly authorizes delegation to the configured orchestra ag
    executable shell input. Resolve the user's slot-addressed messages through this registry.
    Send follow-ups to the actual ID; do not create a replacement agent and pretend it has the
    old context. On resumed sessions verify agent availability before reassigning.
+   Use the exact seven-column schema below: the worktree and session guards parse these
+   positions. Keep `lead-` in the slot, the full returned agent ID in column 2, the exact Git
+   branch name without annotations in column 4, and the task artifact directory in column 5.
+   Use RUNNING while active, then PASS, FAIL, BLOCKED, CLOSED or IDLE as appropriate. Put
+   explanatory prose outside the table; never rename/reorder columns or invent status labels.
+
+   | slot | agentId | task | branch | dir | status | last update |
+   |---|---|---|---|---|---|---|
+   | lead-alpha | <full returned ID> | <task> | <exact branch> | .orchestra/<NN>-<slug>/ | RUNNING | <timestamp> |
+
 4. Use native agent completion events and wait tools. Do not create shell polling loops
    against event logs. Forward steering promptly, preserve lead context, and report real
    blockers. Close completed worker/gate threads to release capacity.
