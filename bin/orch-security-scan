@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Advisory scan of full files or added diff lines; 0 = clean/skipped, 1 = findings.
+set -uo pipefail
+
+findings=0
+# Generic assignments exclude common placeholder markers; AWS ids have no exclusions.
+secret_pattern="(^|[^[:alnum:]_])(key|token|secret|password|api[_-]?key)[\"']?[[:space:]]*[:=][[:space:]]*[\"'][a-z0-9_/+=-]{20,}[\"']"
+placeholder_pattern='example|xxx|changeme|your_|redacted|dummy|placeholder|<[a-z_]+>|\$\{|todo'
+# The documented permission-bypass CLI flag is intentionally not a phrase match.
+instruction_pattern='always allow|auto-approve|auto approve|without confirmation|without asking|no need to ask|never prompt|skip the confirmation|auto-run|auto run|no confirmation needed'
+# Only JSON permission strings, including deny entries; installer pipes are out of scope.
+shell_pattern='"Bash\((\*|bash:\*|sh:\*|zsh:\*|\*:\*)\)"'
+
+scannable() {
+  case "$1" in *.md|*.json|*.conf|*.sh) return 0 ;; *) return 1 ;; esac
+}
+
+warn() {
+  printf 'SECWARN: %s:%s: %s -- %s\n' "$1" "$2" "$3" "${4:0:200}"
+  findings=$((findings + 1))
+}
+
+scan_line() {
+  local file="$1" number="$2" line="$3" lower="${3,,}"
+  local excerpt="$line"
+  if [[ "$line" =~ AKIA[0-9A-Z]{16} ]] ||
+     { [[ "$lower" =~ $secret_pattern ]] && ! [[ "$lower" =~ $placeholder_pattern ]]; }; then
+    # Do not copy a detected credential into terminal output or gate artifacts.
+    excerpt='[redacted: secret-shaped literal]'
+    warn "$file" "$number" hardcoded-secret "$excerpt"
+  fi
+  if [[ "$lower" =~ $instruction_pattern ]]; then
+    warn "$file" "$number" auto-run-instruction "$excerpt"
+  fi
+  if [[ "$line" =~ $shell_pattern ]]; then
+    warn "$file" "$number" broad-shell-allowlist "$excerpt"
+  fi
+}
+
+scan_files() {
+  local file line number
+  for file in "$@"; do
+    scannable "$file" || continue
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+      printf 'SECURITY SCAN: cannot read %s; skipping\n' "$file"
+      continue
+    fi
+    number=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      number=$((number + 1))
+      scan_line "$file" "$number" "$line"
+    done < "$file"
+  done
+}
+
+# Decode Git's quoted patch paths without evaluating any path as shell syntax.
+decode_path() {
+  local encoded="$1" char escape
+  decoded_path=""
+  if [[ "$encoded" != \"*\" ]]; then
+    decoded_path="${encoded%$'\t'}"
+    return
+  fi
+  encoded="${encoded:1:${#encoded}-2}"
+  while [ -n "$encoded" ]; do
+    char="${encoded:0:1}"; encoded="${encoded:1}"
+    if [ "$char" = '\' ]; then
+      if [[ "$encoded" =~ ^[0-7]{3} ]]; then
+        printf -v char '%b' "\\${encoded:0:3}"
+        encoded="${encoded:3}"
+      else
+        escape="${encoded:0:1}"; encoded="${encoded:1}"
+        case "$escape" in
+          '"'|'\') char="$escape" ;;
+          *) printf -v char '%b' "\\$escape" ;;
+        esac
+      fi
+    fi
+    decoded_path+="$char"
+  done
+}
+
+scan_diff() {
+  local repo="$1" base="$2" head="$3" patch line file="" number=0 in_hunk=0 decoded_path
+  shift 3
+  if ! patch="$(git -C "$repo" -c core.quotePath=false diff --no-ext-diff --no-textconv \
+      --no-color --src-prefix=a/ --dst-prefix=b/ -U0 "$base" "$head" "$@" 2>/dev/null)"; then
+    echo 'SECURITY SCAN: git diff unavailable; skipping'
+    return 0
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" == 'diff --git '* ]]; then
+      file=""; in_hunk=0
+    elif [[ "$line" =~ ^@@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,[0-9]+)?\ @@ ]]; then
+      number="${BASH_REMATCH[2]}"; in_hunk=1
+    elif [ "$in_hunk" = 0 ] && [[ "$line" == '+++ '* ]]; then
+      decode_path "${line#+++ }"
+      file="${decoded_path#b/}"
+    elif [ "$in_hunk" = 1 ]; then
+      case "$line" in
+        +*)
+          if scannable "$file"; then scan_line "$file" "$number" "${line:1}"; fi
+          number=$((number + 1))
+          ;;
+        ' '*) number=$((number + 1)) ;;
+      esac
+    fi
+  done <<< "$patch"
+}
+
+scan_repo() {
+  local repo="$1" base merge_base
+  if git -C "$repo" show-ref --verify --quiet refs/heads/main 2>/dev/null; then
+    base=refs/heads/main
+  elif git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main 2>/dev/null; then
+    base=refs/remotes/origin/main
+  else
+    echo 'SECURITY SCAN: no git base ref found; skipping'
+    return 0
+  fi
+  if ! merge_base="$(git -C "$repo" merge-base "$base" HEAD 2>/dev/null)" || [ -z "$merge_base" ]; then
+    echo 'SECURITY SCAN: no git merge base found; skipping'
+    return 0
+  fi
+  scan_diff "$repo" "$merge_base" HEAD
+}
+
+usage() {
+  echo 'usage: orch-security-scan --files <file>... | --diff <base> <head> [-- <pathspec>...] | <repo-dir>' >&2
+  exit 2
+}
+
+case "${1:-}" in
+  --files)
+    shift
+    [ "$#" -gt 0 ] || usage
+    scan_files "$@"
+    ;;
+  --diff)
+    shift
+    [ "$#" -ge 2 ] || usage
+    base="$1"; head="$2"; shift 2
+    { [ "$#" = 0 ] || [ "$1" = -- ]; } || usage
+    scan_diff . "$base" "$head" "$@"
+    ;;
+  -*) usage ;;
+  *)
+    [ "$#" = 1 ] || usage
+    scan_repo "$1"
+    ;;
+esac
+
+[ "$findings" = 0 ]

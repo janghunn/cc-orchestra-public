@@ -148,6 +148,18 @@ effort. `build-roster-runtime.sh` generates all 16 slot/profile combinations, an
 guard never rewrites the `route-lead-*` namespace. Usage changes therefore choose among already
 cached agent types rather than rewriting definitions.
 
+`orch-summary-check` also prints a separate advisory security scan of added lines in committed
+changes from the current branch's merge base with local `main` (or `origin/main`) to `HEAD`.
+Run it from the task worktree, even when the executable is installed in another checkout or
+the task artifacts are stored in the orchestrator's checkout. Outside a Git checkout, it falls
+back to the repository containing the task directory; it never scans the installation by default.
+It checks `.md`, `.json`, `.conf`, and `.sh` files for secret-shaped literals, instructions to
+bypass confirmation, and broad Bash permission strings. Findings are warn-only and never change
+PASS/FAIL or gate error/warning counts, including with `--strict`; unavailable Git bases are
+reported as skipped, not clean. Secret-bearing lines are redacted from diagnostics. To scan
+full on-disk files, run `bin/orch-security-scan --files <file>...` (exit 0 for
+no findings, 1 for findings).
+
 Codex model and effort are resolved automatically on each new `codex-run` invocation:
 
 ```text
