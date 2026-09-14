@@ -12,12 +12,12 @@ git_token='(^|[^[:alnum:]_]|\\[nrt])git($|[^[:alnum:]_])'
 python3 - "$state_dir" 3<<< "$payload" 2>/dev/null <<'PYTHON' || true
 import datetime
 import fcntl
+import fnmatch
 import json
 import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -261,6 +261,11 @@ PROTECTED = {"main", "master", "develop", "trunk"}
 
 
 def resolve_path(value, cwd):
+    if value == "~" or value.startswith("~/"):
+        home = os.environ.get("HOME")
+        if not home:
+            return None
+        value = str(Path(home) / value[2:])
     if cwd is None or not value or any(ch in value for ch in ("$", "`", "~", "*", "?", "[")):
         return None
     return (Path(cwd) / value).resolve()
@@ -307,8 +312,13 @@ def invocations(command, cwd):
             args = words[1:]
             if args and args[0] == "--":
                 args = args[1:]
-            running = (resolve_path(args[0], running) if len(args) == 1 and
-                       not args[0].startswith("-") else None)
+            target = (resolve_path(args[0], running) if len(args) == 1 and
+                      not args[0].startswith("-") else None)
+            if target is None:
+                running = None
+            elif target.is_dir():
+                running = target
+            # A missing/non-directory target makes Bash cd/pushd fail, retaining its cwd.
             continue
         if words[0] == "popd" or first[0][0] in "({":
             running = None
@@ -385,7 +395,7 @@ def protected_push(args):
     index = 0
     while index < len(args):
         arg = args[index]
-        if arg in ("--all", "--mirror", "--tags"):
+        if arg in ("--all", "--mirror"):
             return True
         if arg == "--repo":
             remote_option = True
@@ -411,7 +421,7 @@ def protected_push(args):
     for ref in refs:
         destination = ref.lstrip("+").split(":")[-1]
         destination = destination.removeprefix("refs/heads/")
-        if destination in PROTECTED:
+        if any(fnmatch.fnmatch(protected, destination) for protected in PROTECTED):
             return True
         if destination == "HEAD" or not destination or any(ch in destination for ch in ("$", "`", "*", "?", "[")):
             unresolved = True

@@ -154,6 +154,20 @@ check allow 'cd to own worktree from shared main' "$REPO" "cd '$OWN' && git comm
 check deny 'cd to other worktree' "$OWN" "cd '$OTHER' && git commit"
 check deny 'second Git invocation tracked' "$OWN" "git status && cd '$OTHER' && git commit"
 check deny 'pushd tracks target' "$OWN" "pushd '$OTHER'; git commit"
+for operation in cd pushd; do
+  check deny "failed $operation keeps shared checkout" "$REPO" "$operation '$TMP/missing'; git commit" lead-charlie R1
+  check allow "failed $operation keeps own worktree" "$OWN" "$operation '$TMP/missing'; git commit"
+  check allow "successful $operation enters own worktree" "$REPO" "$operation '$OWN'; git commit"
+done
+printf 'not a directory\n' > "$TMP/not-directory"
+check deny 'cd to regular file keeps shared checkout' "$REPO" "cd '$TMP/not-directory'; git commit" lead-charlie R1
+HOME="$TMP" check deny 'tilde path enters protected checkout' "$OWN" 'cd ~/repo && git commit' lead-charlie R1
+HOME="$TMP" check allow 'tilde path enters own worktree' "$REPO" 'cd ~/repo/.orchestra/wt/lead-charlie && git commit'
+HOME="$REPO" check deny 'bare tilde enters protected checkout' "$OWN" 'cd ~ && git commit' lead-charlie R1
+HOME="$OWN" check allow 'bare tilde enters own worktree' "$REPO" 'cd ~ && git commit'
+HOME="$TMP" check deny 'pushd expands tilde path' "$OWN" 'pushd ~/repo; git commit' lead-charlie R1
+HOME="$TMP" check deny 'git -C expands tilde path' "$OWN" 'git -C ~/repo commit' lead-charlie R1
+check allow 'named-user tilde remains unresolvable' "$REPO" 'cd ~otheruser/repo && git commit'
 for command in 'git -C $UNSET_VAR commit' 'git --git-dir=/x commit' 'git --work-tree=/x commit' 'cd - && git commit' 'cd && git commit' 'cd $UNSET_VAR && git commit' 'GIT_DIR=/x git commit'; do
   check allow "unresolvable: $command" "$REPO" "$command"
 done
@@ -168,8 +182,16 @@ check allow 'explicit push with --repo=remote' "$REPO" 'git push --repo=origin o
 check deny 'bare push from main' "$REPO" 'git push' lead-charlie R1
 check deny 'explicit main push from main' "$REPO" 'git push origin main' lead-charlie R1
 check deny 'refspec targeting main' "$REPO" 'git push origin orch/12-c:refs/heads/main' lead-charlie R1
-for command in 'git push origin main' 'git push origin HEAD:main' 'git push origin orch/12-c:refs/heads/main' 'git push origin +main' 'git push --all' 'git push --mirror' 'git push --tags'; do
+for command in 'git push origin main' 'git push origin HEAD:main' 'git push origin orch/12-c:refs/heads/main' 'git push origin +main' 'git push --all' 'git push --mirror'; do
   check deny "protected push from task branch: $command" "$OWN" "$command" lead-charlie R1
+done
+check allow 'tag-only push from own task worktree' "$OWN" 'git push --tags'
+check deny 'tags flag does not exempt an explicit protected branch' "$OWN" 'git push --tags origin main' lead-charlie R1
+for refspec in 'refs/heads/*:refs/heads/*' '*' 'refs/heads/*' 'refs/heads/*:refs/heads/m*'; do
+  check deny "protected wildcard destination: $refspec" "$OWN" "git push origin '$refspec'" lead-charlie R1
+done
+for refspec in 'orch/*' 'releases/*' 'refs/heads/*:refs/heads/orch/*' 'refs/heads/*:refs/heads/releases/*'; do
+  check allow "non-protected wildcard destination: $refspec" "$OWN" "git push origin '$refspec'"
 done
 check allow 'explicit task push from task branch' "$OWN" 'git push -u origin orch/12-c'
 check allow 'bare push from task branch' "$OWN" 'git push'

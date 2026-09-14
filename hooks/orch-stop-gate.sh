@@ -6,7 +6,8 @@ state_dir="${CC_ORCH_STATE_DIR:-${HOME:-}/.claude/orchestra-state}"
 payload="$(cat)"
 [ -n "$payload" ] || exit 0
 repo_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-python3 - "$state_dir" "$repo_dir" 3<<< "$payload" <<'PYTHON' || true
+# Keep intentional warnings on fd 4; suppress interpreter startup errors on stderr.
+python3 - "$state_dir" "$repo_dir" 3<<< "$payload" 4>&2 2>/dev/null <<'PYTHON' || true
 import datetime
 import fcntl
 import json
@@ -172,7 +173,8 @@ def warn(event, status, why, task=None):
     command = shlex.join(["orch-summary-check", "--strict", str(task) if task else "<unknown>"])
     message = f"orch-stop-gate: {status} was claimed but orch-summary-check --strict could not be run ({why}). Verify manually: {command}"
     print(json.dumps({"systemMessage": message}))
-    print(message, file=sys.stderr)
+    with os.fdopen(os.dup(4), "w") as warning_stderr:
+        print(message, file=warning_stderr)
     journal(event, "orch-stop-gate", "warn", message)
 
 
@@ -186,15 +188,15 @@ def main(event):
         message = last_assistant(event.get("agent_transcript_path"))
     except Exception:
         return  # With no readable transcript there is no observable claim.
-    claim = re.search(r"^\[?[A-Za-z0-9 _-]*\]?\s*STATUS:\s*(PASS|FAIL|BLOCKED)\b", message, re.M)
+    claim = re.search(r"^\[?[A-Za-z0-9_-]*\]?\s*STATUS:\s*(PASS|FAIL|BLOCKED)\b", message, re.M)
     if not claim or not re.search(r"^GATES:", message, re.M):
         return
     status, task = claim[1], None
     try:
         cwd = event.get("cwd")
         registry = None
+        checkout, common = None, None
         if isinstance(cwd, str) and cwd:
-            checkout, common = None, None
             try:
                 info = git(cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD", "--git-common-dir").splitlines()
                 if len(info) == 3:
@@ -208,14 +210,20 @@ def main(event):
             row = next((row for row in rows if row["slot"] == slot), None)
         if row and row["dir"]:
             task = (registry.parent.parent / row["dir"]).resolve()
-        else:
+        elif registry is not None:
+            warn(event, status, "registry has no task directory for this lead")
+            return
+        elif checkout is not None:
             artifact = re.search(r"^ARTIFACTS:\s*(.+)$", message[claim.start():], re.M)
             if artifact:
                 candidate = Path(artifact[1].strip())
                 if not candidate.is_absolute():
                     candidate = Path(cwd) / candidate if isinstance(cwd, str) and cwd else None
-                if candidate is not None and candidate.is_dir() and (candidate / "brief.md").is_file():
-                    task = candidate.resolve()
+                if candidate is not None:
+                    candidate = candidate.resolve()
+                    repo_root = checkout.resolve()
+                    if (candidate == repo_root or repo_root in candidate.parents) and candidate.is_dir() and (candidate / "brief.md").is_file():
+                        task = candidate
         if task is None:
             warn(event, status, "task directory could not be resolved")
             return

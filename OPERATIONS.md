@@ -280,10 +280,12 @@ The guard classifies `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `rese
 `-f/-D/-m/-M`, and `tag` with `-f/-d` as ref moves; and `push` separately. It denies only:
 
 - **R1:** a lead/dev index write or bare/unresolved-ref push from `main`, `master`, `develop`, or
-  `trunk`. Pushes explicitly targeting any of those protected destinations, or using `--all`,
-  `--mirror`, or `--tags`, are denied regardless of the checked-out branch. R1 allows an explicit
-  non-protected push refspec, a bare push from a task branch, and switching away from a base
-  branch to create a task branch.
+  `trunk`. Pushes explicitly targeting any of those protected destinations, or using `--all`
+  or `--mirror`, are denied regardless of the checked-out branch. Wildcard destinations are
+  protected only when they can match a protected branch: `refs/heads/*` and `*` do, while
+  `orch/*` and `releases/*` do not. R1 allows an explicit non-protected push refspec, bare and
+  tag-only (`--tags`) pushes from task branches, and switching away from a base branch to create
+  a task branch. Non-protected wildcard pushes from task branches remain allowed.
 - **R2:** a known lead mutating a checkout on another active lead's registered branch.
 - **R3:** a known lead mutating another active slot's `.orchestra/wt/<slot>` checkout.
 - **R4:** a known lead mutating the registry-owning shared checkout while at least two lead rows
@@ -293,19 +295,25 @@ The guard classifies `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `rese
 The registry `dir` is an artifact directory, resolved against the repository root, not ownership
 of a checkout. Branch ownership uses the checkout HEAD and registry branch; Git worktree metadata
 also locates the shared registry from linked checkouts. Each invocation has its own target:
-`cd`/`pushd` and `git -C` are tracked through command chains. Quoted prose, comments, and heredoc
-bodies are inert. Unknown targets such as `cd -`, unexpanded variables, or explicit
+`cd`/`pushd` and `git -C` are tracked through command chains. A missing or non-directory
+`cd`/`pushd` target leaves the modeled cwd unchanged, matching Bash's failed directory change.
+Leading `~/` and bare `~` resolve through `$HOME`; `~user` remains unresolvable.
+Quoted prose, comments, and heredoc bodies are inert. Unknown targets such as `cd -`, unexpanded variables, or explicit
 `--git-dir`/`--work-tree` overrides fail open. Read-only/unclassified commands and missing or
 malformed registries do not block. Complex shell evaluation is not a complete shell interpreter.
 
 `hooks/orch-stop-gate.sh` is registered on **SubagentStop**, with matcher `(route-)?lead-.*`;
 `Stop` is for the main session. It checks the last assistant transcript message only when it
 contains a `STATUS: PASS`, `FAIL`, or `BLOCKED` line (optionally prefixed with a lead label) and a
-`GATES:` line. Ordinary mid-task messages do not run a checker. Any truthy `stop_hook_active`
+`GATES:` line. Prose such as “I will report the STATUS: PASS when done” does not claim a result.
+Ordinary mid-task messages do not run a checker. Any truthy `stop_hook_active`
 value (including boolean `true`, string `"true"`, or numeric `1`) bypasses the gate to prevent a
 stop loop. The registry row selected by agent ID, then slot, supplies the task directory even if
-`ARTIFACTS:` names another task. Only without a registry task does an
-existing `ARTIFACTS:` directory containing `brief.md` qualify as a fallback.
+`ARTIFACTS:` names another task. An `ARTIFACTS:` fallback is considered only when no registry
+can be found at all. If a registry exists without a task row for this lead, the hook warns and
+never validates an unrelated artifact directory. The fallback must be an existing directory
+containing `brief.md` whose resolved path stays inside the Git repository root derived from
+payload `cwd`; an unknown repository root or an outside path, including a symlink escape, warns.
 
 The checker is resolved through `CC_ORCH_SUMMARY_CHECK` (an executable path for operators/tests),
 then the hook's own repository `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`,
@@ -313,8 +321,9 @@ then `PATH`. It runs with `--strict <task-dir>`: exit 0 allows silently; exit 1 
 first 1,500 bytes of checker output, the exact rerun command, and the off-switch. An unresolved
 task/checker, exit 2, or execution failure allows with a `systemMessage` warning, the same warning
 on stderr, and a journal record. An absent/unreadable transcript has no observable claim and
-allows silently. A fallback directory's `brief.md` check is structural validation, not proof
-that the task belongs to the reporting lead.
+allows silently. Repository containment and `brief.md` checks are structural validation, not
+proof that the fallback task belongs to the reporting lead. Missing Python fails open silently;
+intentional gate warnings still reach stderr, stdout JSON, and the journal.
 
 Both hooks always exit 0; decisions travel in JSON. Disable them independently with:
 

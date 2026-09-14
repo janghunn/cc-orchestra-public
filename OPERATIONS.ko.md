@@ -350,9 +350,12 @@ orchestrator 호출은 평가를 건너뜁니다.
 
 - **R1:** lead/dev가 `main`, `master`, `develop`, `trunk`에서 index를 변경하거나 대상이
   생략되었거나 확정되지 않은 push를 실행하면 차단합니다. 이 보호 branch를 대상으로 명시한
-  push와 `--all`, `--mirror`, `--tags` push는 현재 checkout branch와 무관하게 차단합니다.
-  보호 대상이 아닌 refspec을 명시한 push, 작업 branch에서의 bare push, 작업 branch를
-  만들기 위한 switch는 R1에서 허용합니다.
+  push와 `--all`, `--mirror` push는 현재 checkout branch와 무관하게 차단합니다. Wildcard
+  대상도 보호 branch 이름과 일치할 수 있을 때만 보호 대상으로 봅니다. `refs/heads/*`와
+  `*`는 해당하지만 `orch/*`, `releases/*`는 해당하지 않습니다. 보호 대상이 아닌 refspec을
+  명시한 push, 작업 branch에서의 bare push와 tag 전용 `--tags` push, 작업 branch를 만들기
+  위한 switch는 R1에서 허용합니다. 작업 branch에서 보호 대상이 아닌 wildcard push도
+  계속 허용합니다.
 - **R2:** slot이 확인된 lead가 다른 active lead의 등록 branch에 있는 checkout을 변경하면
   차단합니다.
 - **R3:** slot이 확인된 lead가 다른 active slot의 `.orchestra/wt/<slot>` checkout을
@@ -364,7 +367,10 @@ orchestrator 호출은 평가를 건너뜁니다.
 Registry의 `dir`는 artifact 디렉터리이며 저장소 root 기준으로 해석합니다. Checkout
 소유권은 현재 HEAD와 등록 branch, slot 경로로 판단합니다. Git worktree metadata를 통해
 분리된 checkout에서도 공유 registry를 찾습니다. 명령 체인의 `cd`/`pushd`와 `git -C`를
-추적해 각 Git 호출의 대상을 따로 평가합니다. 따옴표 안의 설명, 주석, heredoc 본문은
+추적해 각 Git 호출의 대상을 따로 평가합니다. `cd`/`pushd` 대상이 없거나 디렉터리가
+아니면 Bash의 실패한 디렉터리 이동처럼 기존 cwd를 유지합니다. 선두의 `~/`와 단독 `~`는
+`$HOME`으로 확장하며 `~user`는 계속 확정할 수 없는 대상으로 취급합니다.
+따옴표 안의 설명, 주석, heredoc 본문은
 명령으로 취급하지 않습니다. `cd -`, 확장되지 않은 변수, `--git-dir`/`--work-tree` 등으로
 대상을 확정할 수 없거나 registry가 없거나 잘못된 경우에는 허용합니다. 읽기 전용 또는
 분류되지 않은 명령도 허용합니다. 복잡한 shell 문법 전체를 해석하는 parser는 아닙니다.
@@ -373,11 +379,16 @@ Registry의 `dir`는 artifact 디렉터리이며 저장소 root 기준으로 해
 `Stop`은 main session용 event입니다. 마지막 assistant transcript 메시지에
 `STATUS: PASS`, `FAIL`, `BLOCKED` 행과 `GATES:` 행이 모두 있을 때만 검사합니다. STATUS
 앞의 lead label은 허용하며 일반적인 작업 중간 보고는 checker를 실행하지 않습니다.
+`I will report the STATUS: PASS when done`처럼 앞으로 보고할 내용을 설명하는 문장도
+결과 claim으로 취급하지 않습니다.
 `stop_hook_active`가 truthy이면 반복 차단을 막기 위해 즉시 허용합니다. Boolean `true`뿐
 아니라 문자열 `"true"`와 숫자 `1`도 포함합니다. Task 디렉터리는
 registry의 agent ID 일치 행, slot 일치 행 순으로 선택하며 `ARTIFACTS:`가 다른 task를
-가리켜도 registry를 우선합니다. Registry에서 task를 찾지 못했을 때만 `ARTIFACTS:`의
-실제 디렉터리에 `brief.md`가 있는지 확인해 fallback으로 사용합니다.
+가리켜도 registry를 우선합니다. Registry 자체를 찾지 못한 경우에만 `ARTIFACTS:`를
+fallback으로 검토합니다. Registry가 있는데 이 lead의 task 행이 없으면 경고하며 다른
+artifact 디렉터리를 검사하지 않습니다. Fallback은 `brief.md`가 있는 실제 디렉터리여야
+하며, 해석한 경로가 payload `cwd`에서 찾은 Git 저장소 root 안에 있어야 합니다. 저장소
+root를 알 수 없거나 symlink 등을 통해 root 밖으로 나가는 경로이면 경고합니다.
 
 Checker는 `CC_ORCH_SUMMARY_CHECK`의 실행 파일 경로, hook 자신의 저장소에 있는
 `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`, `PATH` 순서로 찾습니다.
@@ -386,7 +397,9 @@ exit 0이면 조용히 허용하고, exit 1이면 checker 출력의 처음 1,500
 명령, off-switch 경로를 포함해 차단합니다. Task/checker를 찾지 못하거나 exit 2 또는
 실행 오류가 발생하면 `systemMessage`, stderr, journal에 경고를 남기고 허용합니다.
 Transcript가 없거나 읽을 수 없으면 확인 가능한 claim이 없으므로 조용히 허용합니다.
-Fallback의 `brief.md` 존재 확인만으로 task 소유권까지 증명하지는 않습니다.
+저장소 내부 경로와 `brief.md` 확인만으로 fallback task의 소유권까지 증명하지는 않습니다.
+Python이 없으면 오류 출력 없이 허용하며, 의도적인 gate 경고는 계속 stderr, stdout JSON,
+journal에 전달합니다.
 
 두 hook 모두 exit 0을 반환하며 차단 여부는 JSON으로 전달합니다. 각각 다음과 같이
 비활성화하고 journal을 확인할 수 있습니다.

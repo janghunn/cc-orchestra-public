@@ -24,6 +24,29 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 bash -n "$HOOK"
 ok 'hook shell syntax'
 
+# Real Git root for ARTIFACTS containment checks, built without writing Git commands.
+python3 - "$REPO" <<'PY'
+import hashlib, sys, zlib
+from pathlib import Path
+dot = Path(sys.argv[1]) / '.git'
+for sub in ('objects', 'refs/heads', 'refs/tags'):
+    (dot / sub).mkdir(parents=True, exist_ok=True)
+(dot / 'config').write_text('[core]\nrepositoryformatversion = 0\nbare = false\n')
+def obj(kind, data):
+    raw = kind.encode() + b' ' + str(len(data)).encode() + b'\0' + data
+    sha = hashlib.sha1(raw).hexdigest()
+    path = dot / 'objects' / sha[:2] / sha[2:]
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(zlib.compress(raw))
+    return sha
+tree = obj('tree', b'')
+commit = obj('commit', (f'tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n'
+                        'committer Fixture <fixture@example.invalid> 1 +0000\n\nFixture\n').encode())
+(dot / 'refs/heads/main').write_text(commit + '\n')
+(dot / 'HEAD').write_text('ref: refs/heads/main\n')
+PY
+git -C "$REPO" rev-parse --show-toplevel >/dev/null
+
 printf 'RISK: trivial\n' > "$GOOD/brief.md"
 printf '# Plan\n' > "$GOOD/plan.md"
 cat > "$GOOD/summary.md" <<'SUMMARY'
@@ -72,7 +95,7 @@ with open(sys.argv[1], 'w') as out:
 PY
 }
 make_payload() {
-  python3 - "$REPO" "$TRANSCRIPT" "${1:-route-lead-charlie-critical}" "${2:-false}" "${3:-cccccccc1234}" <<'PY'
+  python3 - "${4:-$REPO}" "$TRANSCRIPT" "${1:-route-lead-charlie-critical}" "${2:-false}" "${3:-cccccccc1234}" <<'PY'
 import json, sys
 print(json.dumps({'hook_event_name': 'SubagentStop', 'cwd': sys.argv[1], 'agent_transcript_path': sys.argv[2],
                   'agent_type': sys.argv[3], 'stop_hook_active': json.loads(sys.argv[4]), 'agent_id': sys.argv[5]}))
@@ -136,7 +159,14 @@ transcript 'Implementation is running; waiting for the background lane.'
 check allow 'ordinary mid-task prose never invokes checker' no
 transcript 'STATUS: PASS'
 check allow 'STATUS without GATES never invokes checker' no
+transcript $'I will report the STATUS: PASS when done.\nGATES: not yet run'
+check allow 'prospective report prose never invokes checker' no
+transcript $'Note that the template requires a STATUS: PASS line.\nGATES: line follows it.'
+check allow 'template explanation prose never invokes checker' no
+transcript $'STATUS: PASS\nGATES: codex-verify PASS'
+check block 'bare real STATUS claim still validates' yes
 transcript "$CLAIM"
+check block 'labelled real STATUS claim still validates' yes
 check allow 'stop_hook_active loop protection' no route-lead-charlie-critical true
 check allow 'string stop_hook_active loop protection' no route-lead-charlie-critical '"true"'
 check allow 'numeric stop_hook_active loop protection' no route-lead-charlie-critical 1
@@ -149,6 +179,24 @@ check block 'repo-relative registry dir uses registry root' yes
 rm "$REPO/.orchestra/REGISTRY.md"
 transcript "$CLAIM"$'\nARTIFACTS: '"$BAD"
 check block 'ARTIFACTS fallback with brief' yes
+transcript "$CLAIM"$'\nARTIFACTS: '"$GOOD"
+check allow 'passing ARTIFACTS inside repo without registry' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
+registry '.orchestra/failing-task' lead-alpha aaaaaaaa
+check warn 'registry without this lead rejects stale passing ARTIFACTS' no
+rm "$REPO/.orchestra/REGISTRY.md"
+mkdir -p "$TMP/outside-task" "$TMP/repo-sibling"
+cp "$GOOD/brief.md" "$GOOD/plan.md" "$GOOD/summary.md" "$TMP/outside-task/"
+cp "$GOOD/brief.md" "$GOOD/plan.md" "$GOOD/summary.md" "$TMP/repo-sibling/"
+ln -s "$TMP/outside-task" "$REPO/.orchestra/outside-link"
+for path in "$TMP/outside-task" "$TMP/repo-sibling" "$REPO/.orchestra/outside-link"; do
+  transcript "$CLAIM"$'\nARTIFACTS: '"$path"
+  check warn 'ARTIFACTS outside repo root is rejected' no
+done
+transcript "$CLAIM"$'\nARTIFACTS: '"$BAD"
+run_payload "$(make_payload route-lead-charlie-critical false cccccccc1234 "$GOOD")"
+assert_output block 'nested cwd resolves Git root for ARTIFACTS' yes
+run_payload "$(make_payload route-lead-charlie-critical false cccccccc1234 "$TMP")"
+assert_output warn 'unresolvable repo root rejects ARTIFACTS' no
 registry
 transcript "$CLAIM"$'\nARTIFACTS: '"$GOOD"
 check block 'registry overrides different passing ARTIFACTS' yes
@@ -179,6 +227,15 @@ RUN_OUTPUT="$(printf '%s' "$(make_payload)" | PATH="$TMP/fakebin" CC_ORCH_SUMMAR
 RUN_STATUS=$?
 set -e
 assert_output warn 'missing checker and no fallback warns' no
+# Absence of Python must remain silent, while the normal warn cases above retain stderr.
+rm "$TMP/fakebin/python3"
+payload="$(make_payload)"
+rm -f "$MARKER"
+set +e
+RUN_OUTPUT="$(printf '%s' "$payload" | PATH="$TMP/fakebin" "$HOOK" 2>"$TMP/stderr")"
+RUN_STATUS=$?
+set -e
+assert_output allow 'missing Python fails open without startup stderr' no
 export TEST_CHECKER_MODE=usage
 check warn 'checker exit 2 warns' yes
 export TEST_CHECKER_MODE=crash

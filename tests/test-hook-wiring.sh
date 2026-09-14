@@ -109,7 +109,15 @@ python3 - "$ROOT" <<'PY'
 import json, re, subprocess, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-old = subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:guardrails.json'], text=True)
+base = 'HEAD'
+for ref in ('refs/heads/main', 'refs/remotes/origin/main'):
+    resolved = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', ref + '^{commit}'], capture_output=True, text=True)
+    if resolved.returncode:
+        continue
+    ancestor = subprocess.run(['git', '-C', str(root), 'merge-base', 'HEAD', ref], capture_output=True, text=True)
+    base = ancestor.stdout.strip() if ancestor.returncode == 0 else resolved.stdout.strip()
+    break
+old = subprocess.check_output(['git', '-C', str(root), 'show', base + ':guardrails.json'], text=True)
 new = (root / 'guardrails.json').read_text()
 a, b = json.loads(old), json.loads(new)
 assert a['hooks']['UserPromptSubmit'] == b['hooks']['UserPromptSubmit']
@@ -118,13 +126,13 @@ assert old[old.index('  "permissions":'):] == new[new.index('  "permissions":'):
 start = old.index('    "UserPromptSubmit":')
 block = old[start:old.index('\n  },', start)]
 assert block in new
-old_installer = subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:install.sh'], text=True)
+old_installer = subprocess.check_output(['git', '-C', str(root), 'show', base + ':install.sh'], text=True)
 installer = (root / 'install.sh').read_text()
 def runtime(text): return text[text.index('install_runtime_hook() {'):text.index('\n}\n', text.index('install_runtime_hook() {')) + 3]
 assert runtime(old_installer) == runtime(installer)
 assert re.findall(r'^  link .*$', old_installer, re.M) == re.findall(r'^  link .*$', installer, re.M)
 PY
-ok 'existing prompt hook, permissions, runtime installer function and link inventory remain byte-identical'
+ok 'existing prompt hook, permissions, runtime installer function and link inventory match the base (HEAD fallback if unavailable)'
 
 [ -x "$ROOT/hooks/orch-worktree-guard.sh" ] && [ -x "$ROOT/hooks/orch-stop-gate.sh" ] || fail 'hook executable bits missing'
 ok 'both hooks exist and are executable'
