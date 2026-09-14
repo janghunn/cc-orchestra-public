@@ -373,6 +373,134 @@ hook event와 Python 검사기 자체가 실행되지 못하는 외부 오류는
 이러한 한계의 공개는 verifier의 변경 작업을 허용한다는 뜻이 아닙니다. Hook이 작업을 놓쳐도
 verdict 파일만 쓰라는 지시와 명령 정책은 그대로 적용됩니다.
 
+## 런타임 안전 hook
+
+설치 시 독립적인 안전 hook 두 개를 user settings와 session guardrails에 등록합니다.
+`bash install.sh --safety-hooks-only`는 이 등록만 병합하며 symlink 설치, 실행 권한 변경,
+systemd 호출은 수행하지 않습니다. `CC_ORCH_SETTINGS`로 settings 경로를 지정할 수 있으며,
+기본값은 `$HOME/.claude/settings.json`입니다. 기존의 관련 없는 항목을 보존하고 checkout
+경로가 바뀌면 해당 hook command만 현재 경로로 갱신합니다. 등록 command의 `|| true`는
+유지해야 합니다. Timeout은 `PreToolUse` 10초, `SubagentStop` 30초입니다. 저장소의
+`guardrails.json`은 기존 `/home/janghun/cc-orchestra/hooks/` 경로를 사용하므로 다른 위치에
+설치한 경우 그 경로를 조정하십시오.
+
+`hooks/orch-worktree-guard.sh`는 Bash의 Git 명령과 기존 `.orchestra/REGISTRY.md`를
+비교합니다. 상태가 비어 있지 않고 정확히 `PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`,
+`UNASSIGNED` 중 하나가 아닌 lead 행을 active로 봅니다. `PASS (worktree)`는 active입니다.
+호출자 식별은 active 행의 `agentId` 일치를 우선합니다. 전체 값이 같거나, 짧은 쪽이 8자
+이상인 접두사 관계이면 일치합니다. 그다음 `(route-)?lead-(alpha|bravo|charlie|delta)`와
+선택적인 `light`, `normal`, `critical`, `critical-xhigh` 접미사, 또는
+`dev(-opus)?-<양의 정수>` 형식을 인식합니다. 식별되지 않은 호출자와 일반적인
+orchestrator 호출은 평가를 건너뜁니다.
+
+`commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `am`, `apply`, `add`, `rm`,
+`mv`, `stash`, `restore`를 index 변경으로 분류합니다. `checkout`, `switch`,
+`branch -f/-D/-m/-M`, `tag -f/-d`는 ref 이동이며 `push`는 별도 분류입니다. 차단 규칙은
+다음 네 가지입니다.
+
+- **R1:** lead/dev가 `main`, `master`, `develop`, `trunk`에서 index를 변경하거나 대상이
+  생략되었거나 확정되지 않은 push를 실행하면 차단합니다. 이 보호 branch를 대상으로 명시한
+  push와 `--all`, `--mirror` push는 현재 checkout branch와 무관하게 차단합니다. Wildcard
+  대상도 보호 branch 이름과 일치할 수 있을 때만 보호 대상으로 봅니다. `refs/heads/*`와
+  `*`는 해당하지만 `orch/*`, `releases/*`는 해당하지 않습니다. 보호 대상이 아닌 refspec을
+  명시한 push, 작업 branch에서의 bare push와 tag 전용 `--tags` push, 작업 branch를 만들기
+  위한 switch는 R1에서 허용합니다. 작업 branch에서 보호 대상이 아닌 wildcard push도
+  계속 허용합니다.
+- **R2:** slot이 확인된 lead가 다른 active lead의 등록 branch에 있는 checkout을 변경하면
+  차단합니다.
+- **R3:** slot이 확인된 lead가 다른 active slot의 `.orchestra/wt/<slot>` checkout을
+  변경하면 차단합니다.
+- **R4:** active lead 행이 둘 이상인데 slot이 확인된 lead가 registry를 소유한 공유
+  checkout을 변경하면 차단합니다. 메시지에 다른 slot과
+  `git worktree add <repo>/.orchestra/wt/<slot> -b <your branch>` 명령을 안내합니다.
+
+Registry의 `dir`는 artifact 디렉터리이며 저장소 root 기준으로 해석합니다. Checkout
+소유권은 현재 HEAD와 등록 branch, slot 경로로 판단합니다. Git worktree metadata를 통해
+분리된 checkout에서도 공유 registry를 찾습니다. Branch를 바꾸는 `checkout`/`switch`
+이후에는 해당 segment에서 바뀐 branch를 기준으로 평가합니다. 해석한 checkout root를 키로
+사용하므로 `cd`와 `git -C`로 같은 checkout에 접근해도 변경 상태를 공유합니다.
+`checkout -b/-B`, `switch -c/-C`는 새 branch 이름을 사용하고, 일반 branch 인자는 실제
+local `refs/heads/`로 확인된 경우에만 반영합니다. 파일 checkout, detached SHA, 모호한
+형식은 branch 모델을 바꾸지 않습니다. 단독 in-place lead가 한 호출에서 작업 branch를
+만들고 commit하는 것은 허용하지만, `develop`으로 이동한 뒤 commit하면 R1이 차단합니다.
+공유 checkout 충돌 규칙은 계속 적용됩니다.
+
+작업 디렉터리와 effective branch 변경에는 하나의 조건부 실행 규칙을 적용합니다.
+`&&` 또는 `||` 뒤의 `cd`/`pushd`나 branch를 바꾸는 `checkout`/`switch`는 이전 값과 새
+값을 모두 후보로 유지합니다. 첫 segment나 `;` 또는 개행 뒤의 변경은 무조건 실행되는
+것으로 보고 해당 후보를 대체합니다. 이후 Git 호출은 모든 cwd 후보와 각 checkout의
+모든 branch 후보 조합을 평가하며, 하나라도 규칙을 위반하면 해당 규칙을 명시해 차단합니다.
+해석할 수 없는 조건부 변경은 새 후보를 추가하지 않습니다. 따라서
+`false && git switch -c orch/new; git commit`으로 보호 branch를 숨길 수 없지만,
+무조건 실행되는 `git switch -c orch/new && git commit`과
+`cd <own-worktree> && git commit`의 정상 작업은 계속 허용합니다. 디렉터리 대상이 없거나
+디렉터리가 아니면 Bash의 실패한 이동처럼 기존 cwd를 유지합니다. 선두의 `~/`와 단독 `~`는
+`$HOME`으로 확장하며 `~user`는 계속 확정할 수 없는 대상으로 취급합니다.
+따옴표 안의 설명, 주석, heredoc 본문은
+명령으로 취급하지 않습니다. `cd -`, 확장되지 않은 변수, `--git-dir`/`--work-tree` 등으로
+대상을 확정할 수 없거나 registry가 없거나 잘못된 경우에는 허용합니다. 읽기 전용 또는
+분류되지 않은 명령도 허용합니다. 복잡한 shell 문법 전체를 해석하는 parser는 아닙니다.
+
+`hooks/orch-stop-gate.sh`는 matcher `(route-)?lead-.*`인 **SubagentStop**에 등록합니다.
+`Stop`은 main session용 event입니다. 마지막 assistant transcript 메시지에
+`STATUS: PASS`, `FAIL`, `BLOCKED` 행과 `GATES:` 행이 모두 있을 때만 검사합니다. STATUS
+앞의 lead label은 허용하며 일반적인 작업 중간 보고는 checker를 실행하지 않습니다.
+`I will report the STATUS: PASS when done`처럼 앞으로 보고할 내용을 설명하는 문장도
+결과 claim으로 취급하지 않습니다.
+`stop_hook_active`가 truthy이면 반복 차단을 막기 위해 즉시 허용합니다. Boolean `true`뿐
+아니라 문자열 `"true"`와 숫자 `1`도 포함합니다. Task 디렉터리는
+registry의 agent ID 일치 행, slot 일치 행 순으로 선택하며 `ARTIFACTS:`가 다른 task를
+가리켜도 registry를 우선합니다. Registry 자체를 찾지 못한 경우에만 `ARTIFACTS:`를
+fallback으로 검토합니다. Registry가 있는데 이 lead의 task 행이 없으면 경고하며 다른
+artifact 디렉터리를 검사하지 않습니다. Fallback은 `brief.md`가 있는 실제 디렉터리여야
+하며, 해석한 경로가 payload `cwd`에서 찾은 Git 저장소 root 안에 있어야 합니다. 저장소
+root를 알 수 없거나 symlink 등을 통해 root 밖으로 나가는 경로이면 경고합니다.
+
+Checker는 `CC_ORCH_SUMMARY_CHECK`의 실행 파일 경로, hook 자신의 저장소에 있는
+`bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`, `PATH` 순서로 찾습니다.
+Override는 운영 점검과 테스트에 사용할 수 있습니다. `--strict <task-dir>`로 실행하고
+해당 task의 `summary.md` STATUS 행도 읽으며 `[lead-x]` 접두사를 허용합니다. Exit 0이면
+transcript와 summary의 상태가 같을 때 조용히 허용하고, 다르거나 기록된 상태를 읽을 수
+없으면 경고합니다. Exit 1에서는 transcript가 `PASS`를 주장할 때만 차단합니다. Summary가
+`BLOCKED`나 `FAIL`인데 transcript가 `PASS`인 경우에도 반드시 차단하며 checker 출력의 처음
+1,500바이트, 정확한 재실행 명령, off-switch 경로를 제공합니다. Transcript가 `BLOCKED`
+또는 `FAIL`이면 차단하지 않습니다. 실제 gate 실패나 summary 부재는 checker 출력을 담은
+경고로 전달하여 정직한 실패 보고와 escalation을 끝낼 수 있게 합니다. Task/checker를 찾지
+못하거나 exit 2 또는 실행 오류가 발생한 경우도 `systemMessage`, stderr, journal에 경고를
+남기고 허용합니다.
+Transcript가 없거나 읽을 수 없으면 확인 가능한 claim이 없으므로 조용히 허용합니다.
+저장소 내부 경로와 `brief.md` 확인만으로 fallback task의 소유권까지 증명하지는 않습니다.
+Python이 없으면 오류 출력 없이 허용하며, 의도적인 gate 경고는 계속 stderr, stdout JSON,
+journal에 전달합니다.
+
+두 hook 모두 exit 0을 반환하며 차단 여부는 JSON으로 전달합니다. 각각 다음과 같이
+비활성화하고 journal을 확인할 수 있습니다.
+
+```bash
+state_dir="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}"
+touch "$state_dir/worktree-guard.off"
+touch "$state_dir/stop-gate.off"
+# 다시 활성화하려면 해당 .off 파일을 삭제합니다.
+tail -n 30 "$state_dir/safety-hooks.log"
+```
+
+Journal 경로는 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`입니다.
+실제로 평가한 Git 호출과 감지한 gate claim에만 ISO 시각, hook/event, 호출자 정보,
+판정(`allow`, `deny`, `block`, `warn`, `skip`), 한 줄 사유를 기록합니다. Fast path는
+기록하지 않습니다. Bash payload에 독립된 `git` 토큰과 변경 키워드가 모두 있지 않으면
+Python이나 Git을 시작하기 전에 반환합니다. 각 행은 크기를 제한한 단일 append로 씁니다.
+파일이 2 MiB를 넘을 때만
+배타적 trim lock을 얻어 약 1 MiB를 임시 파일과 atomic rename으로 보존합니다. Append와
+교체도 동기화하여 교체된 inode에 기록이 남아 사라지는 상황을 막습니다. Trim lock이
+사용 중이면 이번 정리는 건너뜁니다.
+
+제한 사항: Claude Code 2.1.270의 문서상 `SubagentStop` payload는 이 저장소에서 아직 실측하지
+않았습니다. `PreToolUse`의 subagent identity는 실측했지만 stop event의 identity와
+transcript 전달은 실제 세션에서 확인해야 합니다. Gate claim 이후 위 명령으로 journal을
+확인하십시오. 기록이 없으면 지원되지 않는 payload, hook 미호출, off-switch 등을 확인해야
+합니다. `SubagentStop`에서 `systemMessage`가 표시되는지도 미확인 상태이므로 stderr와
+journal에도 경고를 보존합니다.
+
 ## 설정 튜닝
 
 라우팅 정책을 조정하려면 `budget-policy.conf`를 수정합니다.
