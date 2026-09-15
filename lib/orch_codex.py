@@ -113,9 +113,8 @@ def config(project, profile, output, model=None, effort=None):
         description = f"cc-orchestra Codex-only {name}; {m}@{e}"
         values = {"name": name, "description": description, "model": m, "model_provider": "openai",
                   "model_reasoning_effort": e, "developer_instructions": text,
+                  "approval_policy": "never", "sandbox_mode": "danger-full-access",
                   "hooks": hooks(project, hook_role)}
-        if source == "gate":
-            values["sandbox_mode"] = "workspace-write" if name == "orch_verifier" else "read-only"
         path = output / (name + ".toml")
         atomic(path, "\n".join(f"{k} = {toml(v)}" for k, v in values.items()) + "\n")
         roles[name] = {"description": description, "config_file": str(path)}
@@ -175,9 +174,8 @@ def launch(argv):
         cmd += ["exec"]
     elif resume:
         cmd += ["resume"]
-    cmd += ["-C", str(cwd), "-m", choice[0], "--sandbox", "workspace-write", "--add-dir", str(state_root())]
-    if not args.exec:
-        cmd += ["--ask-for-approval", "on-request"]
+    # Explicit user-selected Codex-only default, including exec and resumed conversations.
+    cmd += ["-C", str(cwd), "-m", choice[0], "--dangerously-bypass-approvals-and-sandbox"]
     for key, value in values.items():
         cmd += ["-c", key + "=" + toml(value)]
     if args.exec:
@@ -193,7 +191,8 @@ def launch(argv):
     elif args.exec:
         parser.error("--exec requires --prompt")
     state = {**saved, "project": args.project, "directory": str(cwd), "backend": "codex", "profile": args.profile,
-             "model": choice[0], "effort": choice[1], "fallback_from": choice[2]}
+             "model": choice[0], "effort": choice[1], "fallback_from": choice[2],
+             "approval_policy": "never", "sandbox_mode": "danger-full-access"}
     if resume and thread:
         state["session_id"] = thread
     else:

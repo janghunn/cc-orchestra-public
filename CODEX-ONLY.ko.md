@@ -108,11 +108,25 @@ Codex 전용 진입점의 기본 상태 디렉터리는 `~/.local/state/cc-orche
 
 ## 설정과 검증 범위
 
+Codex 전용 모드는 기본적으로 `--dangerously-bypass-approvals-and-sandbox`로 실행한다.
+Tier 1의 새 실행·resume·비대화형 실행과 독립 `codex-run-codex` lane에 모두 적용하며,
+native 하위 역할도 `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`를
+사용한다. CLI 실행 승인창과 샌드박스 격리를 생략하며, 프로세스는 현재 OS 사용자의
+권한으로 실행된다. 작업 소유권·검증 역할·gate 규칙은 계속 적용된다.
+
+이미 실행 중인 세션의 실행 인자는 자동으로 바뀌지 않는다. 적용하려면 해당 세션의
+작업을 저장한 뒤 재시작한다. 아래 `work`는 자신이 만든 세션 이름으로 바꾼다.
+
+```bash
+cc-orch-codex session stop work
+cc-orch-codex session restart work
+```
+
 역할 TOML과 manifest는 상태 디렉터리의 `codex-projects/<name>/roles/`에 생성된다.
 사용자 `~/.codex/config.toml`과 프로젝트 `.codex` 파일은 수정하지 않는다. 실행별 설정에
 역할과 native hook을 추가한다. 공식 문서상 기존 hook과 실행별 hook은 함께 로드된다.
-새 hook은 CLI의 `/hooks`에서 내용을 검토하고 신뢰해야 동작할 수 있다. 런처는 sandbox나
-hook 신뢰 절차를 우회하지 않는다. 대화형 session ID 저장도 SessionStart hook에 의존한다.
+새 hook은 CLI의 `/hooks`에서 내용을 검토하고 신뢰해야 동작할 수 있다. Hook 신뢰 검토는
+실행 승인과 별개이며 자동으로 우회하지 않는다. 대화형 session ID 저장도 SessionStart hook에 의존한다.
 Claude Remote Control 대신 tmux attach/SSH로 Codex 터미널에 접속한다.
 
 `bash tests/test-codex-only.sh`는 가짜 provider와 tmux로 전용 설치, Astra 고정, resume,

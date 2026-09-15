@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -89,9 +90,32 @@ path.write_text(json.dumps(state))
         self.assertEqual({v["model"] for v in manifest.values()}, {"gpt-6-astra"})
         self.assertEqual(manifest["orch_auditor"]["effort"], "max")
         self.assertEqual(manifest["orch_mechanical"]["effort"], "medium")
-        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", s["command"])
+        self.assert_unrestricted(s["command"])
+        for role_file in (self.state / "codex-projects/sample/roles").glob("*.toml"):
+            role = tomllib.loads(role_file.read_text())
+            self.assertEqual(role["approval_policy"], "never")
+            self.assertEqual(role["sandbox_mode"], "danger-full-access")
+            self.assertIn("hooks", role)
         self.assertFalse((self.cwd / ".codex").exists())
         self.assertFalse((self.state / "codex-projects/sample/project.json").exists())
+
+    def assert_unrestricted(self, command):
+        self.assertEqual(command.count("--dangerously-bypass-approvals-and-sandbox"), 1)
+        self.assertNotIn("--sandbox", command)
+        self.assertNotIn("--ask-for-approval", command)
+        self.assertNotIn("--dangerously-bypass-hook-trust", command)
+
+    def test_execution_policy_applies_to_actual_new_exec_and_resume_arguments(self):
+        for options in [[], ["--resume", "saved"], ["--exec", "--prompt", "Read only"],
+                        ["--exec", "--resume", "saved", "--prompt", "Continue"]]:
+            self.launch(*options)
+            command = json.loads((self.base / "codex-args.json").read_text())
+            self.assert_unrestricted(command)
+            if command[0] == "exec" and "resume" in command:
+                self.assertLess(command.index("--dangerously-bypass-approvals-and-sandbox"), command.index("resume"))
+        saved = json.loads((self.state / "codex-projects/sample/project.json").read_text())
+        self.assertEqual(saved["approval_policy"], "never")
+        self.assertEqual(saved["sandbox_mode"], "danger-full-access")
 
     def test_alias_dispatch_and_explicit_non_astra_rejected(self):
         out = self.run_cmd([ROOT / "bin/cc-orch-runtime", "--backend", "codex", "--dry-run", "other", self.cwd])
@@ -172,15 +196,26 @@ path.write_text(json.dumps(state))
     def test_worker_cli_routes_only_astra_even_fast_or_mechanical(self):
         task = self.task()
         env = dict(self.env, CC_ORCH_BACKEND="codex")
-        for mode, extra in [("implement", []), ("implement", ["--mech"]), ("review", ["--fast"]), ("verify", ["--critical"])]:
+        for mode, extra in [("implement", []), ("implement", ["--mech"]), ("review", ["--fast"]),
+                            ("verify", ["--critical"]), ("intake", ["Map scope"]),
+                            ("investigate", ["Locate owner"]), ("plan-review", [])]:
             text = self.run_cmd([ROOT / "bin/codex-run-runtime", mode, self.cwd, task, *extra, "--dry-run"], env=env)
             self.assertIn("gpt-6-astra", text)
             self.assertIn("model_provider=", text)
             self.assertIn("openai", text)
             self.assertIn("agents.enabled=false", text)
             self.assertIn("Do not delegate to subagents", text)
+            self.assertIn("--dangerously-bypass-approvals-and-sandbox", text)
+            self.assertNotIn("--sandbox ", text)
             self.assertNotIn("-m gpt-5.6", text)
         self.run_cmd([ROOT / "bin/codex-run-runtime", "implement", self.cwd, task, "--model", "sol", "--dry-run"], expected=2, env=env)
+
+    def test_hybrid_worker_keeps_its_existing_sandbox_policy(self):
+        task = self.task()
+        for mode, sandbox in [("implement", "workspace-write"), ("review", "read-only")]:
+            out = self.run_cmd([ROOT / "bin/codex-run", mode, self.cwd, task, "--model", "astra", "--dry-run"])
+            self.assertIn("--sandbox " + sandbox, out)
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", out)
 
     def test_worker_failures_block_without_model_or_provider_fallback(self):
         task = self.task()
@@ -199,6 +234,7 @@ path.write_text(json.dumps(state))
             args = json.loads((self.base / "error-args.json").read_text())
             self.assertIn('model_provider="openai"', args)
             self.assertIn("agents.enabled=false", args)
+            self.assert_unrestricted(args)
             self.assertIn("gpt-6-astra", args)
             self.assertFalse((self.base / "CLAUDE_CALLED").exists())
         self.assertEqual((self.base / "error-calls").read_text().count("call"), 3)
@@ -254,6 +290,9 @@ path.write_text(json.dumps(state))
     def test_managed_backend_switch_keeps_worktree_and_artifacts(self):
         command = [ROOT / "bin/cc-orch-codex", "session"]
         self.run_cmd([*command, "new", "sample", self.cwd, "--project-name", "demo", "--model", "astra", "--effort", "max", "--inplace", "--no-attach"])
+        initial = json.loads((self.base / "tmux-state.json").read_text())["ccorch-codex-sample"]
+        self.run_cmd(["bash", "-c", initial])
+        self.assert_unrestricted(json.loads((self.base / "codex-args.json").read_text()))
         artifact = self.task() / "keep.txt"
         artifact.write_text("existing user work")
         self.run_cmd([*command, "switch", "sample", "--backend", "hybrid", "--no-attach"])
@@ -270,6 +309,13 @@ path.write_text(json.dumps(state))
         resumed = json.loads((self.base / "tmux-state.json").read_text())["ccorch-codex-sample"]
         self.assertIn("--model astra --effort max", resumed)
         self.assertIn("--resume saved", resumed)
+        self.run_cmd(["bash", "-c", resumed])
+        self.assert_unrestricted(json.loads((self.base / "codex-args.json").read_text()))
+        self.run_cmd([*command, "stop", "sample"])
+        self.run_cmd([*command, "restart", "sample", "--no-attach"])
+        restarted = json.loads((self.base / "tmux-state.json").read_text())["ccorch-codex-sample"]
+        self.run_cmd(["bash", "-c", restarted])
+        self.assert_unrestricted(json.loads((self.base / "codex-args.json").read_text()))
 
     def test_switch_missing_target_keeps_session(self):
         command = [ROOT / "bin/cc-orch-codex", "session"]

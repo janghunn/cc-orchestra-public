@@ -22,8 +22,8 @@
 #     explicit model choice. Resume never falls back: it continues the recorded thread model; pass
 #     --model sol to move a thread.
 #   - Failure classes get distinct exit codes lead prompts can react to deterministically.
-#   - The dangerous flags (--dangerously-bypass-approvals-and-sandbox, danger-full-access)
-#     simply do not exist here.
+#   - Codex-only mode explicitly skips execution approvals and CLI sandboxing at the user's
+#     request; hybrid lanes retain their per-mode sandbox policy.
 #
 # Flag order matters and is easy to get wrong by hand (measured on codex-cli 0.144.4):
 # exec-level flags must come BEFORE the `resume` subcommand —
@@ -504,10 +504,14 @@ build_cmd() {
     CMD+=(-c "service_tier=\"$CODEX_FAST_MODE_SERVICE_TIER\"" -c "features.fast_mode=true")
   fi
   CMD+=(--json -o "$ARTIFACT")
-  case "$MODE" in
-    implement|resume|verify) CMD+=(--sandbox workspace-write --add-dir "$TASK_DIR") ;;
-    *)                       CMD+=(--sandbox read-only) ;;
-  esac
+  if [ "${CC_ORCH_BACKEND:-claude}" = codex ]; then
+    CMD+=(--dangerously-bypass-approvals-and-sandbox)
+  else
+    case "$MODE" in
+      implement|resume|verify) CMD+=(--sandbox workspace-write --add-dir "$TASK_DIR") ;;
+      *)                       CMD+=(--sandbox read-only) ;;
+    esac
+  fi
   # subcommand LAST: exec-level flags are not accepted after `resume`
   [ "$MODE" = "resume" ] && CMD+=(resume "$TID")
   CMD+=("$PROMPT")
