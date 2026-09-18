@@ -44,12 +44,16 @@ def main(names):
                 if not match:
                     raise ValueError(f"cannot determine {name} version")
                 return match.group()
-            installed = version()
+            try:
+                installed = version()
+            except (ValueError, OSError, subprocess.SubprocessError):
+                # Repair an interrupted npm installation instead of treating it as current.
+                installed = "unavailable"
             if installed != latest:
                 print(f"cc-orch: updating {name} {installed} -> {latest}", file=sys.stderr, flush=True)
                 subprocess.run([npm, "install", "-g", package + "@" + latest,
                                 "--no-audit", "--no-fund", "--fetch-retries=0",
-                                "--fetch-timeout=20000"], check=True, timeout=300,
+                                "--fetch-timeout=20000"], check=True, timeout=1800,
                                stdout=sys.stderr)
                 if version() != latest:
                     raise ValueError(f"{name} still resolves to a different version after update")

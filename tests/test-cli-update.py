@@ -85,6 +85,12 @@ pathlib.Path(os.environ['TEST_BASE'],'tmux-created').touch()
         self.assertNotEqual(self.run_update('codex').returncode, 0)
         self.assertNotIn('install', (self.base / 'calls').read_text())
 
+    def test_unreadable_installed_version_is_repaired(self):
+        (self.modules / '@openai/codex/version').unlink()
+        result = self.run_update('codex')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.modules / '@openai/codex/version').read_text(), '2.0.0')
+
     def test_failed_preflight_does_not_create_session(self):
         result = subprocess.run([str(ROOT / 'bin/cc-orch-session'), 'new', 'test', str(self.base),
                                  '--inplace', '--backend', 'hybrid', '--no-attach'],
