@@ -239,4 +239,5 @@ if [[ $USE_RC -eq 1 ]]; then
   args+=(--remote-control "orch-${PROJECT_NAME}")
 fi
 
+python3 "$ORCH_HOME/bin/orch-cli-update" claude codex
 exec claude "${args[@]}" "$@"

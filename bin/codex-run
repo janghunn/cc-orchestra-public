@@ -526,6 +526,7 @@ if [ "$DRY" = "1" ]; then
 fi
 
 # --- run ---------------------------------------------------------------------------------
+python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/orch-cli-update" codex || exit 2
 # stdin MUST be /dev/null: with a piped-but-open stdin, codex exec waits for EOF to append a
 # <stdin> block even when a prompt argument was given ("Reading additional input from stdin...")
 # — measured hang under the agent harness.

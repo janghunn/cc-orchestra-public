@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CC_ORCH_CLI_AUTO_UPDATE=0 # Fake providers: no network or package mutation.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -24,7 +25,7 @@ ok "runtime shell syntax"
 
 HARNESS="$TMP/harness"
 mkdir -p "$HARNESS/bin" "$HARNESS/hooks" "$HARNESS/lib" "$TMP/state" "$TMP/home/.claude"
-cp "$ROOT/bin/cc-orch-runtime" "$ROOT/bin/cc-orch-session" "$ROOT/bin/codex-run-runtime" \
+cp "$ROOT/bin/cc-orch-runtime" "$ROOT/bin/cc-orch-session" "$ROOT/bin/orch-cli-update" "$ROOT/bin/codex-run-runtime" \
    "$ROOT/bin/orch-model-guard-runtime" "$HARNESS/bin/"
 cp "$ROOT/hooks/orch-runtime-context.sh" "$ROOT/hooks/orch-statusline.sh" "$HARNESS/hooks/"
 cp "$ROOT/budget-policy.conf" "$ROOT/build-roster-runtime.sh" "$HARNESS/"

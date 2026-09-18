@@ -28,7 +28,7 @@ class CodexOnly(unittest.TestCase):
         self.state = self.base / "state"
         self.bin = self.base / "bin"
         self.bin.mkdir()
-        self.env = dict(os.environ, CC_ORCH_STATE_DIR=str(self.state), CC_ORCH_CODEX_CATALOG_CHECK="0",
+        self.env = dict(os.environ, CC_ORCH_CLI_AUTO_UPDATE="0", CC_ORCH_STATE_DIR=str(self.state), CC_ORCH_CODEX_CATALOG_CHECK="0",
                         PATH=str(self.bin) + os.pathsep + os.environ["PATH"], TEST_BASE=str(self.base),
                         CC_ORCH_STOP_GRACE_SECONDS="0")
         self.env.pop("CC_ORCH_BACKEND", None)

@@ -648,6 +648,13 @@ export CC_ORCH_WORKTREE_ROOT=/fast-disk/cc-orch-worktrees
 
 # Claude Code Remote Control
 
+세션 생성·재시작 시 Claude Code와 Codex CLI의 npm `latest` 버전을 확인한다.
+업데이트가 있으면 설치와 버전 검증이 끝난 뒤 세션을 시작하며, 조회나 설치에 실패하면
+시작하지 않는다. Codex-only는 Codex만 확인하고, backend 전환은 기존 세션을 중단하기
+전에 대상 CLI를 확인한다. 현재 npm global prefix의 CLI 설치를 지원한다.
+실행 중인 프로세스는 자동 재시작하지 않는다. 오프라인 재현·가짜 provider 테스트에서는
+`CC_ORCH_CLI_AUTO_UPDATE=0`으로 검사를 명시적으로 생략할 수 있다.
+
 `cc-orch`는 기본적으로 Remote Control을 켠다.
 
 ```text

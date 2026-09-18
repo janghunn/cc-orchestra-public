@@ -78,6 +78,12 @@ load_session() {
 
 tmux_has() { "$TMUX_BIN" has-session -t "$1" >/dev/null 2>&1; }
 
+check_cli_updates() {
+  local providers=(codex)
+  [ "$1" = codex ] || providers=(claude codex)
+  python3 "$REPO_DIR/bin/orch-cli-update" "${providers[@]}" || die 'CLI update failed; session was not started'
+}
+
 quote_cmd() {
   local out="" arg q
   for arg in "$@"; do printf -v q '%q' "$arg"; out="${out}${out:+ }$q"; done
@@ -149,6 +155,8 @@ cmd_new() {
   valid_name "$launch_name" || die "derived launcher name '$launch_name' is invalid; shorten --project-name/name"
   tmux_has "$tmux_name" && die "tmux session '$tmux_name' already exists"
 
+  check_cli_updates "$backend"
+
   if [ "$use_worktree" = 1 ]; then
     current_branch="$(git -C "$repo" symbolic-ref --short -q HEAD 2>/dev/null)"
     base="${base:-${current_branch:-HEAD}}"
@@ -218,6 +226,7 @@ cmd_restart() {
   load_session "$name"
   tmux_has "$TMUX_SESSION" && die "session '$NAME' is already running"
   [ -d "$WORKDIR" ] || die "working directory no longer exists: $WORKDIR"
+  check_cli_updates "$BACKEND"
   LAUNCHER="$REPO_DIR/bin/cc-orch-runtime"
   if [ "$BACKEND" = codex ]; then LAUNCHER="$REPO_DIR/bin/cc-orch-codex"; fi
   launch=("$LAUNCHER" --profile "$PROFILE")
@@ -281,6 +290,7 @@ cmd_switch() {
     die "active lead records remain; finish/save their work first, or use --force after checking those tasks"
   fi
   # Provider processes cannot share conversation IDs. Carry durable artifacts across providers.
+  check_cli_updates "$target"
   previous="$BACKEND"
   HANDOFF="$WORKDIR/.orchestra/BACKEND-HANDOFF.md"
   mkdir -p "$(dirname "$HANDOFF")" || die 'cannot create handoff directory; current session kept'

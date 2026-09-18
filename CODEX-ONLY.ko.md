@@ -108,6 +108,14 @@ Codex 전용 진입점의 기본 상태 디렉터리는 `~/.local/state/cc-orche
 
 ## 설정과 검증 범위
 
+세션 생성·재시작·backend 전환 전에 npm `latest` 버전을 조회하고 새 버전이 있으면
+업데이트 완료 후 실행한다. Hybrid는 Claude Code와 Codex, Codex-only는 Codex만 확인한다.
+독립 CLI 실행과 Codex worker 실행에도 적용한다. 현재 PATH의 CLI가 같은 npm global
+prefix에서 설치된 경우를 지원하며, 확인·업데이트 실패 시 구버전으로 실행하지 않는다.
+동시 업데이트는 잠금으로 직렬화한다. `--dry-run`은 업데이트하지 않는다.
+오프라인 재현/가짜 provider 테스트에만 `CC_ORCH_CLI_AUTO_UPDATE=0`으로 끌 수 있다.
+이미 실행 중인 프로세스는 재시작 전까지 해당 실행 버전을 유지한다.
+
 Codex 전용 모드는 기본적으로 `--dangerously-bypass-approvals-and-sandbox`로 실행한다.
 Tier 1의 새 실행·resume·비대화형 실행과 독립 `codex-run-codex` lane에 모두 적용하며,
 native 하위 역할도 `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`를

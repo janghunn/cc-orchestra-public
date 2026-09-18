@@ -161,6 +161,8 @@ def launch(argv):
     saved = json.loads(saved_path.read_text()) if saved_path.exists() else {}
     if saved.get("directory") and saved["directory"] != str(cwd):
         parser.error("project name is already bound to a different directory; choose another name")
+    if not args.dry_run:
+        subprocess.run([sys.executable, str(ROOT / "bin/orch-cli-update"), "codex"], check=True)
     choice, values = config(args.project, args.profile, project_dir / "roles", args.model, args.effort)
     cmd = [os.environ.get("CODEX_BIN", "codex")]
     resume = args.resume or ("saved" if args.reload else None)

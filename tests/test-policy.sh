@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export CC_ORCH_CLI_AUTO_UPDATE=0 # Fake providers: no network or package mutation.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
