@@ -55,3 +55,23 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
   code — that specific shape is the one this harness's parser got wrong more than once, and it is
   cheap to check for by hand before trusting a "looks like it matches" read. See the
   `orch-acceptance-criteria` skill for the authoring-side version of this rule.
+
+### Codex verify sandbox cannot bind loopback sockets
+- **Observed:** `codex-run verify` runs under `--sandbox workspace-write`, which denies
+  `socket.bind(("127.0.0.1", 0))` (`PermissionError: [Errno 1]`). A test suite built on a local
+  mock HTTP server therefore errors on every case and the verdict comes back INCONCLUSIVE, three
+  rounds in a row, even though the same suite passes for the lead and for the Opus verifier.
+- **Where:** `.orchestra/01-jev-advisory` (`tests/test-jev.py`, rounds 1-3).
+- **Lesson:** when a suite needs a listening socket, also ship a socket-free in-process transport
+  runner covering the same behaviours, and let the loopback class skip with an explicit, printed
+  reason when `bind` is denied (keep it mandatory in your own run and the Opus verifier's). Plan
+  for it in Phase B rather than discovering it at the gate.
+
+### Installer link list is pinned by a test
+- **Observed:** `tests/test-hook-wiring.sh` compares `install_repo()`'s `link` lines against the
+  merge base and allows only three named additions, so adding a `~/.local/bin` link for a new
+  `bin/` tool fails that suite. The whole-repo symlink at `~/.claude/orchestra` already exposes
+  every `bin/*` script (as with `bin/orch-security-scan`).
+- **Where:** `.orchestra/01-jev-advisory` (Phase A1 audit, plan.md Amendments).
+- **Lesson:** a new `bin/` tool needs no installer change; document it as
+  `~/.claude/orchestra/bin/<tool>` instead of touching `install.sh`.

@@ -259,6 +259,11 @@ because one task is critical.
 If the user named a specific remote repository, put its URL on the `REMOTE:` line. Otherwise
 leads use whatever `origin` already exists, and fall back to local-only commits if there is none.
 
+Optionally, before assigning, run `~/.claude/orchestra/bin/orch-jev lint-brief <brief.md>` and
+`~/.claude/orchestra/bin/orch-jev risk <brief.md>` (hybrid mode only; advisory and fail-open) and
+weigh any `JEV:` lines as one more input to your own judgment — never copy them into the brief's
+Risk section or treat them as a decision.
+
 ### 4. Assign
 One `Agent` call per task, using the risk-selected type above. Keep the prompt short — the brief
 carries the detail:

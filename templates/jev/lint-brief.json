@@ -1,0 +1,8 @@
+{
+  "type": "noul",
+  "instructions": "Look at acceptance item {n} in the state. Can this criterion be settled by running a named command or by reading a specific, observable output or file? Answer yes only if the item names, or clearly implies, the concrete command or observation.",
+  "criteria": {
+    "true": "The item names a concrete command, test, file, or observable output that decides pass or fail.",
+    "false": "The item is a goal, quality, or feeling with no named command or observable to check."
+  }
+}
