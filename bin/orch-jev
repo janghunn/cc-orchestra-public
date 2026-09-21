@@ -32,6 +32,7 @@ WS_CLASS = r"[ \t\r\n\x0b\x0c\x1c-\x1f\x85\xa0\u2028\u2029\u200b\ufeff]"
 WS = WS_CLASS + "*"
 ASSIGNMENT = r'''(key|token|secret|password|api[_-]?key|passwd|bearer|authorization)["']?''' + WS + r"[:=]" + WS
 GENERIC = re.compile(r"(^|[^A-Za-z0-9_])" + ASSIGNMENT + r'''["']?''' + WS + r"([A-Za-z0-9_/+=.-]{20,})", SECRET_FLAGS)
+ASSEMBLED = re.compile(ASSIGNMENT + r'''["']?''' + WS + r"([A-Za-z0-9_/+=.-]{20,})", SECRET_FLAGS)
 SOURCE_ASSIGNMENT = re.compile(ASSIGNMENT, SECRET_FLAGS)
 PLACEHOLDER = re.compile(r"example|xxx|changeme|your_|redacted|dummy|placeholder|<[a-z_]+>|\$\{|todo", SECRET_FLAGS)
 AWS = re.compile(r"AKIA[0-9A-Z]{16}", SECRET_FLAGS)
@@ -149,9 +150,19 @@ def load_template(command):
 
 
 def secret_shaped(text):
-    views = [text, *TERMINATORS.split(text), *text.split("\n"), re.sub(WS_CLASS, "", text)]
-    return any(AWS.search(segment) or BEARER.search(segment) or PEM.search(segment)
-               or (GENERIC.search(segment) and not PLACEHOLDER.search(segment)) for segment in views)
+    lines = text.split("\n")
+    stripped_lines = [re.sub(WS_CLASS, "", line) for line in lines]
+    stripped = re.sub(WS_CLASS, "", text)
+    views = [text, *lines, *TERMINATORS.split(text), stripped]
+    if any(AWS.search(segment) or BEARER.search(segment) or PEM.search(segment) for segment in views):
+        return True
+    if any((GENERIC.search(line) or GENERIC.search(compact)) and not PLACEHOLDER.search(line)
+           for line, compact in zip(lines, stripped_lines)):
+        return True
+    if any("\n" in match.group(0) for match in GENERIC.finditer(text)):
+        return True
+    return (sum(1 for _ in ASSEMBLED.finditer(stripped))
+            > sum(1 for line in stripped_lines for _ in ASSEMBLED.finditer(line)))
 
 
 def secret_source_name(name):

@@ -811,8 +811,40 @@ class JevBehaviour:
             self.assertNotIn("skipped", self.invoke(command, path).stdout)
         self.assertEqual(len(self.server.requests), 3)
 
+    def test_placeholder_does_not_suppress_cross_line(self):
+        value = "a1b2c3d4" * 4
+        cases = (
+            ('This is an example.\ntoken =\n"' + value + '"\n', "*"),
+            ('# todo\ntoken = "' + value + '"\n', "2"),
+            ('example\ntoken = "' + value[:16] + "\n" + value[16:] + '"\n', "*"),
+            ('placeholder\ntoken\u00a0=\r"' + value + '"\n', "2"),
+        )
+        for number, (text, line) in enumerate(cases):
+            path = self.fixture(f"cross-line-placeholder-{number}.md", text)
+            for command in ("lint-brief", "risk", "scan"):
+                with self.subTest(case=number, command=command):
+                    self.server.requests.clear()
+                    output = self.invoke(command, path).stdout
+                    self.assertEqual(output, f"JEV: skipped — secret-shaped literal ({path}:{line})\n")
+                    self.assertEqual(self.server.requests, [])
+                    for start in range(len(value) - 7):
+                        self.assertNotIn(value[start:start + 8], output + json.dumps(self.server.requests))
+        placeholders = ['TOKEN="' + value + '" # ' + marker for marker in
+                        ("example", "xxx", "changeme", "your_", "redacted", "dummy",
+                         "placeholder", "<sample_name>", "$" + "{", "todo")]
+        placeholders += ['secret = "' + "changeme_replace_this_value" + '"',
+                         'example: token = "' + value + '"']
+        for number, text in enumerate(placeholders):
+            path = self.fixture("single-line-placeholder.md", "## Acceptance\n1. Read " + text + "\n")
+            for command in ("lint-brief", "risk", "scan"):
+                with self.subTest(placeholder=number, command=command):
+                    self.server.requests.clear()
+                    self.assertNotIn("skipped", self.invoke(command, path).stdout)
+                    self.assertEqual(len(self.server.requests), 1)
+
     def test_detector_views(self):
         value = "a1b2c3d4" * 4
+        self.assertTrue(jev.secret_shaped('This is an example.\ntoken =\n"' + value + '"\n'))
         for name in ("key", "TOKEN", "secret", "password", "API-Key", "passwd", "bearer", "authorization"):
             for quote in ("", '"', "'"):
                 self.assertTrue(jev.secret_shaped(name + " = " + quote + value))
@@ -826,7 +858,8 @@ class JevBehaviour:
                 self.assertTrue(jev.secret_shaped(text))
         for separator in ("\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e",
                           "\x85", "\u2028", "\u2029"):
-            self.assertTrue(jev.secret_shaped("example" + separator + 'token = "' + value + '"'))
+            self.assertEqual(jev.secret_shaped("example" + separator + 'token = "' + value + '"'),
+                             "\n" in separator)
 
     def test_cross_line_secret_diagnostic(self):
         value = "a1b2c3d4" * 4
