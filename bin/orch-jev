@@ -27,9 +27,17 @@ DEFAULTS = {
 }
 TIERS = ("trivial", "low", "normal", "critical")
 RESPONSE_MAX_BYTES = 1_048_576
-SECRET_GENERIC = re.compile(r'''(^|[^\w])(key|token|secret|password|api[_-]?key)["']?\s*[:=]\s*["'][a-z0-9_/+=-]{20,}["']''')
-PLACEHOLDER = re.compile(r"example|xxx|changeme|your_|redacted|dummy|placeholder|<[a-z_]+>|\$\{|todo")
-AWS = re.compile(r"AKIA[0-9A-Z]{16}")
+SECRET_FLAGS = re.ASCII | re.IGNORECASE
+WS_CLASS = r"[ \t\r\n\x0b\x0c\x1c-\x1f\x85\xa0\u2028\u2029\u200b\ufeff]"
+WS = WS_CLASS + "*"
+ASSIGNMENT = r'''(key|token|secret|password|api[_-]?key|passwd|bearer|authorization)["']?''' + WS + r"[:=]" + WS
+GENERIC = re.compile(r"(^|[^A-Za-z0-9_])" + ASSIGNMENT + r'''["']?''' + WS + r"([A-Za-z0-9_/+=.-]{20,})", SECRET_FLAGS)
+SOURCE_ASSIGNMENT = re.compile(ASSIGNMENT, SECRET_FLAGS)
+PLACEHOLDER = re.compile(r"example|xxx|changeme|your_|redacted|dummy|placeholder|<[a-z_]+>|\$\{|todo", SECRET_FLAGS)
+AWS = re.compile(r"AKIA[0-9A-Z]{16}", SECRET_FLAGS)
+BEARER = re.compile(r"bearer" + WS + r"[A-Za-z0-9_./+=-]{16,}", SECRET_FLAGS)
+PEM = re.compile(r"-----BEGIN[ A-Z]*PRIVATE KEY-----", SECRET_FLAGS)
+TERMINATORS = re.compile(r"\r\n|\r|\n|\x0b|\x0c|\x1c|\x1d|\x1e|\x85|\u2028|\u2029")
 RISK_ANCHOR = re.compile(r"^\s*(-\s*)?RISK:\s*\**([a-z]*)")
 USAGE = "usage: orch-jev lint-brief <brief.md> | risk <brief.md> | scan <file>... | - | --help"
 
@@ -139,9 +147,29 @@ def load_template(command):
     return None
 
 
-def has_secret_shape(line):
-    lower = line.lower()
-    return bool(AWS.search(line) or (SECRET_GENERIC.search(lower) and not PLACEHOLDER.search(lower)))
+def secret_shaped(text):
+    views = [text, *TERMINATORS.split(text), *text.split("\n"), re.sub(WS_CLASS, "", text)]
+    return any(AWS.search(segment) or BEARER.search(segment) or PEM.search(segment)
+               or (GENERIC.search(segment) and not PLACEHOLDER.search(segment)) for segment in views)
+
+
+def secret_source_name(name):
+    # Filename prefixes (including xxx) must not hide an attached assignment.
+    return secret_shaped(name) or any(secret_shaped(name[match.start():])
+                                     for match in SOURCE_ASSIGNMENT.finditer(name))
+
+
+def state_strings(state):
+    # Check strings before JSON quoting as well as the exact serialized state.
+    if isinstance(state, str):
+        yield state
+    elif isinstance(state, dict):
+        for name, value in state.items():
+            yield name
+            yield from state_strings(value)
+    elif isinstance(state, list):
+        for value in state:
+            yield from state_strings(value)
 
 
 def strip_fences(text):
@@ -189,7 +217,10 @@ def risk_state(text):
 
 def chunks(text, source, cap):
     result, buffer, size, first, last = [], [], 0, 1, 1
-    for number, line in enumerate(text.splitlines(keepends=True), 1):
+    lines = text.split("\n")
+    for number, line in enumerate(lines, 1):
+        if number < len(lines):
+            line += "\n"
         if buffer and size + len(line.encode()) > cap:
             result.append({"source": source, "lines": f"{first}-{last}", "text": "".join(buffer)})
             buffer, size = [], 0
@@ -235,23 +266,25 @@ def trim_state(command, state, cap):
 
 def prepare(command, sources, policy, template):
     items, state, declared, reason = [], None, None, "empty"
+    positions = []
     for position, path in enumerate(sources, 1):
-        source = display_name("<stdin>" if command == "scan" and path == "-" else path)
-        if command == "scan" and has_secret_shape(source):
+        if secret_source_name(str(path)) or secret_source_name(display_name(path)):
             emit(f"JEV: skipped — secret-shaped literal (argument {position}: source name)")
             reason = "secret-shaped"
             continue
+        source = display_name("<stdin>" if command == "scan" and path == "-" else path)
         try:
             if command == "scan" and path == "-":
                 raw = sys.stdin.buffer.read().decode("utf-8", errors="replace") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
             else:
-                raw = Path(path).read_text(encoding="utf-8", errors="replace")
+                with Path(path).open(encoding="utf-8", errors="replace", newline="") as stream:
+                    raw = stream.read()
         except (OSError, ValueError, UnicodeError):
             emit(f"JEV: skipped — cannot read {source}")
             reason = "unreadable"
             continue
-        hit = next((n for n, line in enumerate(raw.splitlines(), 1) if has_secret_shape(line)), None)
-        if hit is not None:
+        if secret_shaped(raw):
+            hit = next((n for n, line in enumerate(raw.split("\n"), 1) if secret_shaped(line)), "*")
             emit(f"JEV: skipped — secret-shaped literal ({source}:{hit})")
             reason = "secret-shaped"
             continue
@@ -270,7 +303,7 @@ def prepare(command, sources, policy, template):
                     items[-1]["text"] += " " + line.strip()
             if not items:
                 emit("JEV: lint — no numbered acceptance items found")
-                return None, {}, None, "no-items"
+                return None, {}, None, "no-items", {}
             state = {"acceptance": items, "verification": section(text, "Verification")}
         else:
             parts = chunks(raw, source, policy["SCAN_CHUNK_BYTES"])
@@ -280,15 +313,14 @@ def prepare(command, sources, policy, template):
             elif not parts:
                 emit(f"JEV: scan — {source}: empty")
             else:
-                for part in parts:
-                    part["source_index"] = position
+                positions.extend([position] * len(parts))
                 items.extend(parts)
     if command == "scan":
         if not items:
-            return None, {}, None, reason
+            return None, {}, None, reason, {}
         state = {"chunks": items}
     elif state is None:
-        return None, {}, None, reason
+        return None, {}, None, reason, {}
     if command != "risk":
         cap = policy["LINT_MAX_ITEMS" if command == "lint-brief" else "SCAN_MAX_CHUNKS"]
         if len(items) > cap:
@@ -301,14 +333,15 @@ def prepare(command, sources, policy, template):
     state = trim_state(command, state, policy["MAX_STATE_BYTES"])
     if state_size(state) > policy["MAX_STATE_BYTES"] or not (state.strip() if command == "risk" else items):
         emit("JEV: skipped — nothing to send after truncation")
-        return None, {}, declared, "truncation"
+        return None, {}, declared, "truncation", {}
     questions = {"tier": template} if command == "risk" else {}
     for n, item in enumerate(items, 1):
         label = item["item"] if command == "lint-brief" else item["id"]
         token = "{n}" if command == "lint-brief" else "{chunk}"
         questions[f"q{n}" if command == "lint-brief" else label] = dict(
             template, instructions=template["instructions"].replace(token, label))
-    return state, questions, declared, None
+    chunk_sources = {item["id"]: position for item, position in zip(items, positions)}
+    return state, questions, declared, None, chunk_sources
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -337,6 +370,8 @@ def request_attempt(request, timeout, questions):
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         with opener.open(request, timeout=timeout) as response:
+            if response.status != 200:
+                return f"http {response.status}", None
             body = bytearray()
             while True:
                 remaining = timeout - (time.monotonic() - start)
@@ -409,7 +444,7 @@ def journal(record):
         pass
 
 
-def results(command, state, answers, declared, policy):
+def results(command, state, answers, declared, policy, chunk_sources):
     if command == "risk":
         choice, confidence = answers["tier"]["choice"], answers["tier"]["confidence"]
         if declared is None:
@@ -429,7 +464,7 @@ def results(command, state, answers, declared, policy):
         sources = {}
         for chunk in state["chunks"]:
             value, source = answers[chunk["id"]]["noul"], chunk["source"]
-            position = chunk["source_index"]
+            position = chunk_sources[chunk["id"]]
             sources[position] = (source, max(value, sources.get(position, (source, 0))[1]))
             if value >= policy["SCAN_THRESHOLD"]:
                 emit(f"JEV: scan — {source}:{chunk['lines']} possible agent-directed instruction (p={value:.2f})")
@@ -469,12 +504,19 @@ def main(argv) -> int:
             template = load_template(command)
             unavailable = None if template is not None else "template"
         if unavailable is None:
-            state, questions, declared, skipped = prepare(command, argv[1:], policy, template)
+            state, questions, declared, skipped, chunk_sources = prepare(command, argv[1:], policy, template)
             if state is None:
                 record["outcome"] = "skipped:" + skipped
                 return 0
             record["questions"] = len(questions)
             start = time.monotonic()
+            if (any(secret_shaped(text) for text in state_strings(questions))
+                    or secret_shaped(json.dumps(questions, ensure_ascii=False))
+                    or any(secret_shaped(text) for text in state_strings(state))
+                    or secret_shaped(json.dumps(state, ensure_ascii=False))):
+                record["outcome"] = "skipped:secret-shaped"
+                emit("JEV: skipped — secret-shaped literal (after transformation)")
+                return 0
             outcome, payload = call_jev(policy, key, state, questions)
             record.update(attempts=policy.attempts, latency_ms=int((time.monotonic() - start) * 1000))
             if outcome == "ok":
@@ -482,7 +524,7 @@ def main(argv) -> int:
                 for field in ("input_tokens", "output_tokens"):
                     value = usage.get(field) if isinstance(usage, dict) else None
                     record[field] = value if type(value) is int else None
-                results(command, state, payload["answers"], declared, policy)
+                results(command, state, payload["answers"], declared, policy, chunk_sources)
             else:
                 unavailable = outcome
         if unavailable is not None:
