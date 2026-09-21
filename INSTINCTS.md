@@ -75,3 +75,14 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
 - **Where:** `.orchestra/01-jev-advisory` (Phase A1 audit, plan.md Amendments).
 - **Lesson:** a new `bin/` tool needs no installer change; document it as
   `~/.claude/orchestra/bin/<tool>` instead of touching `install.sh`.
+
+### `codex-run implement` carries no instruction text; a detached observer sees only codex.log/.codex-session
+- **Observed:** a brief assumed `codex-run implement` is handed task text (like `investigate`/`intake`
+  do) and forbade reading files; argv is only mode, workdir, task-dir and flags, and the spec is
+  `<task-dir>/plan.md`/`brief.md` read by Codex itself. Separately, `codex.log` lines carry no lane or
+  pid, so a detached process can only attribute a call's attempts by a pre-dispatch byte offset plus
+  mode/workdir/timestamp, and same-second same-workdir calls stay ambiguous.
+- **Where:** `.orchestra/03-jev-codex-shadow` (Phase A1 audit; gate rounds 2-3).
+- **Lesson:** before writing an acceptance criterion about "the text a tool is given", open the tool's
+  argument parser; and when a side process must correlate with `codex-run` without changing it, snapshot
+  `codex.log`'s size before dispatch and record an explicit attribution class instead of assuming exact.

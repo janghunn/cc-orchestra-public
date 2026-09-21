@@ -1,0 +1,5 @@
+{
+  "type": "noul",
+  "instructions": "The state is a task brief for a coding agent. Give the probability that implementing it correctly requires extended, non-local reasoning: holding many constraints from different parts of the brief and the codebase in mind at once.",
+  "criteria": {"true": "Extended, non-local reasoning is required.", "false": "Local, step-by-step work suffices."}
+}
