@@ -50,7 +50,8 @@ def emit(line):
 
 
 def display_name(name):
-    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]|RISK:|RISK AMENDED", "?", str(name))[:120]
+    name = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]|RISK:|RISK AMENDED", "?", str(name))
+    return name[:60] + "…" + name[-59:] if len(name) > 120 else name
 
 
 def state_dir():
@@ -194,10 +195,10 @@ def strip_fences(text):
 def section(text, name):
     lines, active = [], False
     for line in text.splitlines():
-        if re.match(r"^##\s+" + name + r"\b", line):
-            active = True
-        elif active and line.startswith("## "):
+        if active and line.startswith("## "):
             break
+        elif re.match(r"^##\s+" + name + r"\b", line):
+            active = True
         elif active:
             lines.append(line)
     return "\n".join(lines)

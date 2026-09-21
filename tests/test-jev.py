@@ -470,6 +470,26 @@ class JevBehaviour:
         for fence in ("````\n```\n~~~\n```` trailing\nhidden\n`````\n", "~~~\nhidden\n~~~~\n", "```\nunclosed\n"):
             self.assertEqual(jev.strip_fences("visible\n" + fence), "visible\n")
 
+    def test_section_stops_at_repeated_header(self):
+        for repeated in ("Acceptance", "Verification"):
+            with self.subTest(repeated=repeated):
+                text = "## Acceptance\n1. Run true.\n"
+                if repeated == "Acceptance":
+                    text += "## Acceptance\n2. Read second-section-marker.\n"
+                text += "## Verification\ntrue\n"
+                if repeated == "Verification":
+                    text += "## Verification\nsecond-verification-marker\n"
+                path = self.fixture("repeated-header.md", text)
+                self.server.requests.clear()
+                self.invoke("lint-brief", path)
+                self.assertEqual(len(self.server.requests), 1)
+                body = self.server.requests[0]["body"]
+                self.assertEqual(list(body["questions"]), ["q1"])
+                self.assertEqual(body["state"]["acceptance"], [{"item": "1", "text": "Run true."}])
+                self.assertEqual(body["state"]["verification"], "true")
+                self.assertNotIn("second-section-marker", json.dumps(body))
+                self.assertNotIn("second-verification-marker", json.dumps(body))
+
     def test_t6_risk_and_summary_parser(self):
         self.server.values = {"tier": {"choice": "critical", "confidence": 0.95}}
         suggestion = self.invoke("risk", self.brief).stdout
@@ -563,10 +583,13 @@ class JevBehaviour:
     def test_t7_scan_declaration_names(self):
         self.server.values = {"c1": {"noul": 0.1}}
         for name, sanitized in (("RISK AMENDED notes.md", "? notes.md"),
-                                ("RISK: RISK AMENDED notes.md", "? ? notes.md")):
+                                ("RISK: RISK AMENDED notes.md", "? ? notes.md"),
+                                ("RISK AMENDED " + "x" * 130 + "-notes.md", "? " + "x" * 130 + "-notes.md")):
             with self.subTest(name=name):
                 path = self.fixture(name, "Safe content.\n")
-                display = str(self.fixtures / sanitized)[:120]
+                display = str(self.fixtures / sanitized)
+                if len(display) > 120:
+                    display = display[:60] + "…" + display[-59:]
                 output = self.invoke("scan", path).stdout
                 self.assertEqual(output, f"JEV: scan — {display}: no chunk over threshold (max p=0.10)\n")
                 self.assertNotIn("output guard", output)
@@ -578,11 +601,11 @@ class JevBehaviour:
                 self.assertNotIn("output guard", output)
 
     def test_t7_scan_colliding_names(self):
-        prefix = "x" * 130
-        first = self.fixture(prefix + "-first.md", "First safe content.\n")
-        second = self.fixture(prefix + "-second.md", "Second safe content.\n")
-        display = str(first)[:120]
-        self.assertEqual(display, str(second)[:120])
+        prefix, suffix = "x" * 80, "y" * 59 + ".md"
+        first = self.fixture(prefix + "-first-" + suffix, "First safe content.\n")
+        second = self.fixture(prefix + "-second-" + suffix, "Second safe content.\n")
+        display = str(first)[:60] + "…" + str(first)[-59:]
+        self.assertEqual(display, str(second)[:60] + "…" + str(second)[-59:])
         self.server.values = {"c1": {"noul": 0.95}, "c2": {"noul": 0.1}}
         output = self.invoke("scan", first, second).stdout
         self.assertEqual(output, f"JEV: scan — {display}:1-1 possible agent-directed instruction (p=0.95)\n"
@@ -595,6 +618,22 @@ class JevBehaviour:
         output = self.invoke("scan", first, second).stdout
         self.assertEqual(output, f"JEV: scan — {display}: no chunk over threshold (max p=0.20)\n"
                                 f"JEV: scan — {display}: no chunk over threshold (max p=0.40)\n")
+
+    def test_t7_scan_distinct_basenames(self):
+        prefix = "x" * 130
+        first = self.fixture(prefix + "-first.md", "First safe content.\n")
+        second = self.fixture(prefix + "-second.md", "Second safe content.\n")
+        displays = [str(path)[:60] + "…" + str(path)[-59:] for path in (first, second)]
+        self.assertNotEqual(*displays)
+        self.server.values = {"c1": {"noul": 0.1}, "c2": {"noul": 0.1}}
+        output = self.invoke("scan", first, second).stdout
+        self.assertEqual(output, "".join(f"JEV: scan — {name}: no chunk over threshold (max p=0.10)\n"
+                                         for name in displays))
+        sources = [chunk["source"] for chunk in self.server.requests[0]["body"]["state"]["chunks"]]
+        self.assertEqual(sources, displays)
+        self.assertTrue(all(len(name) == 120 for name in sources))
+        for length in (119, 120):
+            self.assertEqual(jev.display_name("x" * length), "x" * length)
 
     def test_t7_lf_chunk_lines(self):
         self.write_policy(JEV_SCAN_CHUNK_BYTES=4)
@@ -802,7 +841,7 @@ class JevBehaviour:
 
     def test_display_name_rechecked(self):
         value = "a1b2c3d4" * 4
-        path = self.fixture('token = "' + value + '"' + "-" * 130 + "changeme.md", self.brief.read_text())
+        path = self.fixture('token = "' + value + '"' + "-" * 30 + "changeme" + "-" * 130 + ".md", self.brief.read_text())
         self.assertFalse(jev.secret_shaped(str(path)))
         self.assertTrue(jev.secret_shaped(jev.display_name(path)))
         for command in ("lint-brief", "risk", "scan"):
