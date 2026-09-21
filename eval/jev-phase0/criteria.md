@@ -47,8 +47,9 @@ is positive when any reason has that category. Its negatives are clean briefs
 plus amended briefs with no reason in that category. Only a section's own
 amendment heading selects and classifies its body, ending at the next heading.
 Mid-task/process amendment sections contribute no reasons. Enumerated amendment
-sections emit their items without a heading/preamble reason; prose-only sections
-emit one reason. Empty or punctuation-only reasons are discarded.
+sections emit their items and preceding substantive prose paragraphs as separate
+reasons. Empty, punctuation-only or heading-restatement preambles are discarded;
+prose-only sections emit one reason. Empty or punctuation-only reasons are discarded.
 
 Both independent label sets must cover the full reason worklist with verbatim
 evidence spans and the worklist's `reason_sha256` content hash. Every supplied

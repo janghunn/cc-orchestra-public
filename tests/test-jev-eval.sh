@@ -351,10 +351,13 @@ def risk_tests():
 def secret_tests():
     literal = "AbCdEf0123456789" * 2
     aws = "AKIA" + "0123456789ABCDEF"
+    nul_line = 'token\x00= "abcdefghijklmnopqrstuvwxyz012345"'
     cases = [(aws, True), ("example " + aws, True), (aws.lower(), False),
              ('secret = "' + literal + '"', True),
              ('secret = "' + literal + '" # placeholder', False),
-             ('secret = "' + literal + "'", True)]
+             ('secret = "' + literal + "'", True),
+             (nul_line, True), (nul_line.replace('\x00', ''), True),
+             (nul_line + ' # placeholder', False)]
     cases.extend(('token' + ws + '= "' + literal + '"', True) for ws in " \t\v\f\r")
     for i, (line, expected) in enumerate(cases):
         path = TMP / f"secret-case-{i}.conf"
@@ -380,6 +383,13 @@ def secret_tests():
         stats = run_eval.execute(run_eval.requests_for(records, [], "lint"), mode="mock",
                                  cache=TMP / "cr-cache", out=TMP / "cr-out.jsonl")
     assert stats["skipped_secret_shaped"] == 1
+    assert secrets.scan_record("first\x00line\nsecond\x00line\n" + nul_line) == (True, 3)
+    assert secrets.scan_record("first\x00line\n" + nul_line + " # placeholder") == (False, None)
+    with patch.object(adapter, "lint_brief", side_effect=AssertionError("NUL privacy gate bypassed")):
+        stats = run_eval.execute([{"id": "nul", "task": "lint", "text": "first\n" + nul_line}],
+                                 mode="mock", cache=TMP / "nul-cache", out=TMP / "nul-out.jsonl")
+    assert stats["skipped_secret_shaped"] == 1 and stats["adapter_calls"] == 0
+    assert common.read_jsonl(TMP / "nul-out.jsonl")[0]["first_hit_line_no"] == 2
 
 
 def cache_tests():
@@ -524,7 +534,7 @@ def root_config_tests():
 
 def amendment_extraction_tests():
     root = TMP / "amendment-boundaries"
-    plan = ("# Plan (round 2)\n## Amendments\nThis preamble is not a separate reason.\n"
+    plan = ("# Plan (round 2)\n## Amendments\nAmendments\n"
             "1. First audit correction.\n2. Second audit correction.\n3. Third audit correction.\n"
             "### Implementation details\n- Unrelated implementation work.\n"
             "## Orchestrator notes\n- Unrelated operational instructions.\n"
@@ -537,6 +547,31 @@ def amendment_extraction_tests():
     assert [kind for kind, _ in builder.amendment_sections(plan)] == ["audit", "process"]
     for excluded in ("Unrelated implementation", "Unrelated operational", "New instructions"):
         assert excluded not in record["plan_amendment_text"]
+    sentence = "The brief cites a path that does not exist, so acceptance 2 is unmeetable."
+    reproduction = ("# Plan\n## Amendments (Phase A1 brief audit)\n" + sentence +
+                    "\n- evidence: foo.py:10\n- evidence: bar.py:20\n")
+    directory = task(root, "preamble", summary="BRIEF AUDIT: amended (see plan)\n", plan=reproduction)
+    record = builder.task_record(root, directory)
+    assert len(record["reasons"]) == 4
+    assert [reason["text"] for reason in record["reasons"]] == [
+        "(see plan)", sentence, "evidence: foo.py:10", "evidence: bar.py:20"]
+    assert record["reasons"][1]["source_line"] == 3
+    items = "1. First audit correction.\n2. Second audit correction.\n3. Third audit correction.\n"
+    for preamble in ("", " \t\n", "---\n...\n", "Amendments\n",
+                     "Amendments (Phase A1 brief audit)\n",
+                     "**AMENDMENTS (Phase A1 brief audit).**\n",
+                     "Amendments\nAmendments (Phase A1 brief audit)\n"):
+        directory = task(root, "heading-only", summary="BRIEF AUDIT: amended\n",
+                         plan="## Amendments (Phase A1 brief audit)\n" + preamble + items)
+        record = builder.task_record(root, directory)
+        assert len(record["reasons"]) == 3
+        assert [reason["text"] for reason in record["reasons"]] == [
+            "First audit correction.", "Second audit correction.", "Third audit correction."]
+    directory = task(root, "multiple-paragraphs", summary="BRIEF AUDIT: amended\n",
+                     plan="## Amendments\nAmendments\n\n" + sentence +
+                     "\n\nThe verification command is absent.\n- evidence: foo.py:10\n")
+    assert [reason["text"] for reason in builder.task_record(root, directory)["reasons"]] == [
+        sentence, "The verification command is absent.", "evidence: foo.py:10"]
     prose = "## Amendment: unclear acceptance\nThe acceptance statement has no observable outcome.\n"
     directory = task(root, "prose", summary="BRIEF AUDIT: amended\n", plan=prose)
     record = builder.task_record(root, directory)
@@ -556,6 +591,7 @@ def amendment_extraction_tests():
     assert [r["text"] for r in record["reasons"]] == [
         "Independent audit correction.", "Another audit correction."]
     for empty in ("## Amendments\n", "## Amendments\n---\n...\n",
+                  "## Amendments\nAmendments (Phase A1 brief audit)\n",
                   "## Amendments\n1. ---\n2. !!!\n3. \n"):
         directory = task(root, "empty", summary="BRIEF AUDIT: amended (---)\n", plan=empty)
         assert builder.task_record(root, directory)["reasons"] == []

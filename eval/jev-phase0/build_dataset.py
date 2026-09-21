@@ -103,14 +103,36 @@ def amendment_sections(plan):
 
 
 def amendment_reasons(lines):
-    """Use list items alone, or a single heading-and-prose reason without a list."""
+    """Keep substantive preamble paragraphs alongside items, but not bare headings."""
     body = lines[1:]
+    title = HEADING.match(lines[0][1]).group(2)
     first_item = next((index for index, (_, text) in enumerate(body) if ITEM.match(text)), None)
+    preamble = body if first_item is None else body[:first_item]
+
+    def normalized(text):
+        return " ".join(re.findall(r"[^\W_]+", text.casefold()))
+
+    title_words = normalized(title)
+    paragraphs, current, start = [], [], None
+    for number, text in preamble:
+        words = normalized(text)
+        heading_only = words == title_words or re.fullmatch(
+            r"amendments?(?: phase a1)?(?: brief audit)?", words)
+        if not words or heading_only:
+            if current:
+                paragraphs.append((start, " ".join(current)))
+                current, start = [], None
+            continue
+        if start is None:
+            start = number
+        current.append(text.strip())
+    if current:
+        paragraphs.append((start, " ".join(current)))
+
     if first_item is not None:
-        candidates = split_items(body[first_item:])
-    elif any(character.isalnum() for _, text in body for character in text):
-        title = HEADING.match(lines[0][1]).group(2)
-        text = " ".join([title, *(text.strip() for _, text in body if text.strip())])
+        candidates = paragraphs + split_items(body[first_item:])
+    elif paragraphs:
+        text = " ".join([title, *(text for _, text in paragraphs)])
         candidates = [(lines[0][0], text)]
     else:
         candidates = []

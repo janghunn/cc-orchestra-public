@@ -13,6 +13,8 @@ PLACEHOLDER_RE = re.compile(
 
 
 def is_secret_shaped(line):
+    # Bash read discards NUL bytes without treating them as line separators.
+    line = line.replace("\x00", "")
     low = line.lower()
     return bool(AWS_RE.search(line) or
                 (SECRET_RE.search(low) and not PLACEHOLDER_RE.search(low)))

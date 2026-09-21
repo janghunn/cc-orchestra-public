@@ -52,8 +52,9 @@ sets must cover all reasons. Only headings containing `amendment` select plan
 sections; each section ends at the next heading. A section's own heading decides
 whether it is an audit amendment or a mid-task/process amendment. Structural
 ancestor headings never affect that decision. Process amendment sections are
-excluded from reasons. Enumerated sections emit their items without a separate
-heading or preamble reason; prose-only sections emit one reason. Disagreements
+excluded from reasons. Enumerated sections emit their items and preceding
+substantive prose paragraphs as separate reasons. Empty, punctuation-only or
+heading-restatement preambles are discarded; prose-only sections emit one reason. Disagreements
 retain both labels and become ambiguous. Final labels preserve source path and line.
 Copy each worklist entry's `reason_sha256` unchanged into both independent label
 files. Ingestion and scoring compare it with the SHA-256 hash of the current
