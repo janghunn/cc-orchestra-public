@@ -1,0 +1,10 @@
+{
+  "type": "choice",
+  "instructions": "The state is a task brief for a coding agent. Choose the review tier this task deserves.",
+  "criteria": {
+    "trivial": "Comments, prose, documentation, or a config value with no branching or behavioural change; or running already-working code to produce an artifact judged by eye.",
+    "low": "Docs, comments, or pure configuration with a small, well-understood behavioural effect.",
+    "normal": "Ordinary feature or fix with new logic, tests, and edge cases.",
+    "critical": "Core algorithms, data-loss surfaces, security or credential handling, public API shape, concurrency, or anything the user asked to treat carefully."
+  }
+}

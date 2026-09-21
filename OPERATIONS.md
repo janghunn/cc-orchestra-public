@@ -194,6 +194,56 @@ CC_ORCH_AUTO_ROUTE=0 codex-run ...
 export CC_ORCH_AUTO_ROUTE=0
 ```
 
+## Jev advisory sidecar (optional, hybrid mode only)
+
+`orch-jev` adds a third-model advisory signal from TypeSafe AI's Jev. Invoke it explicitly;
+it is never a gate and never edits task files. Humans and agents decide how to use its advice.
+The installed checkout exposes it at `~/.claude/orchestra/bin/orch-jev`; from a checkout,
+use `bin/orch-jev`. Python 3's standard library is sufficient.
+
+```bash
+export TYPESAFE_API_KEY=<your-key>
+# Alternatively, put the key in <state>/jev.key, then chmod 600 <state>/jev.key.
+~/.claude/orchestra/bin/orch-jev lint-brief <brief.md>
+~/.claude/orchestra/bin/orch-jev risk <brief.md>
+~/.claude/orchestra/bin/orch-jev scan <file>...
+~/.claude/orchestra/bin/orch-jev scan - <file>  # stdin and files may be combined
+```
+
+`<state>` is `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}`. The environment key takes
+precedence; an empty value falls back to `jev.key`. A key file with group/other permissions is
+ignored with a warning; use `chmod 600`. Unreadable key files also fail open. The client never
+copies the key into output, logs, or generated files.
+
+`lint-brief` sends numbered Acceptance items and the Verification section, asking one question
+per item. `risk` sends the brief with its Risk section, tier declarations, and DEEP REASONING
+lines removed. `scan` sends text chunks with source names and line ranges in one shared request.
+Only named input files or stdin are read, alongside the policy, question template, and key file.
+Every source is checked for secret-shaped literals before truncation: a matching source is
+skipped in full. Size and item/chunk limits bound what leaves the machine, with explicit notes.
+The default limits are 24,000 serialized state bytes, 20 items, and 24 chunks of 4,000 bytes.
+
+The destination is `https://api.typesafe.ai`: one HTTPS POST per invocation, with at most one
+retry. Redirects and other hosts are refused; loopback endpoints are permitted for offline tests.
+All advisory outcomes exit 0; invalid command arguments exit 2. Failures print
+`JEV: unavailable — <class>`. Classes include disabled, codex-only backend, config, no key,
+template, auth, validation, rate limit, overloaded, redirect, other HTTP status, timeout, network,
+malformed response, and schema. Retriable failures use at most two timeout periods plus 0.5 s
+backoff (default timeout 6 s, roughly 12.5 s total); other failures return immediately.
+
+Every output line starts with `JEV:`. `risk` only suggests a higher tier with sufficient
+confidence; its lines never form a tier declaration. Do not paste Jev output into a `RISK:` line.
+`scan` supplements the existing regex security scanner; its advice cannot replace that check.
+`jev-policy.conf` controls enablement, timeout, thresholds, caps, and journaling. It is read at
+runtime and is outside `orch-policy-rev`; the model must be pinned to `jev-X.Y.Z` (default
+`jev-1.13.0`). Question wording lives under `templates/jev/`.
+
+`<state>/jev.log` is a mode-600 metadata-only journal: time, command, outcome, attempts, latency,
+model, question count, and token usage. It contains no input text, source names, answers, or key;
+set `JEV_JOURNAL=0` to disable it. Journal failures do not affect the advisory result.
+Codex-only mode does not use it: `cc-orch-codex` sessions set `CC_ORCH_BACKEND=codex`, and the
+tool refuses to call out.
+
 ## What changes without reload
 
 The following are read at each dispatch or invocation and apply immediately:

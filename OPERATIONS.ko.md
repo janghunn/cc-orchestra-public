@@ -240,6 +240,57 @@ dispatch=codex-sparing
 
 이 판단도 단순 사용률이 아니라 리셋까지 남은 시간을 포함한 headroom을 사용합니다.
 
+## Jev 자문 사이드카 (선택 사항, hybrid 모드 전용)
+
+`orch-jev`는 TypeSafe AI의 Jev를 통해 세 번째 모델의 자문 신호를 제공합니다.
+명시적으로 호출할 때만 동작하며 gate가 아니고 작업 파일을 수정하지 않습니다.
+판단은 사람과 agent가 내립니다. 설치 후 경로는 `~/.claude/orchestra/bin/orch-jev`이며,
+checkout 안에서는 `bin/orch-jev`를 사용합니다. Python 3 표준 라이브러리만 필요합니다.
+
+```bash
+export TYPESAFE_API_KEY=<your-key>
+# 파일을 쓰려면 <state>/jev.key에 키를 넣고 chmod 600 <state>/jev.key를 실행합니다.
+~/.claude/orchestra/bin/orch-jev lint-brief <brief.md>
+~/.claude/orchestra/bin/orch-jev risk <brief.md>
+~/.claude/orchestra/bin/orch-jev scan <file>...
+~/.claude/orchestra/bin/orch-jev scan - <file>  # stdin과 파일을 함께 지정할 수 있습니다.
+```
+
+`<state>`는 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}`입니다. 환경 변수의 키가
+우선이며 빈 값이면 `jev.key`를 확인합니다. group/other 권한이 있는 키 파일은 경고 후
+무시하므로 `chmod 600`을 적용합니다. 읽을 수 없는 키 파일도 fail-open 처리합니다.
+클라이언트는 키를 출력, 로그, 생성 파일에 복사하지 않습니다.
+
+`lint-brief`는 Acceptance의 번호 항목과 Verification 섹션을 전송하고 항목마다 질문합니다.
+`risk`는 Risk 섹션, 등급 선언, DEEP REASONING 줄을 제거한 brief를 전송합니다.
+`scan`은 텍스트 chunk, source 이름, 줄 범위를 하나의 요청으로 전송합니다.
+입력은 지정한 파일 또는 stdin만 읽으며, 설정·질문 template·키 파일도 별도로 읽습니다.
+자르기 전에 각 원본 전체에서 secret 형태의 literal을 검사하고, 발견된 source 전체를
+제외합니다. 크기와 항목/chunk 상한을 적용한 경우 명시적인 note를 출력합니다.
+기본 상한은 직렬화한 state 24,000 bytes, 항목 20개, 4,000 bytes chunk 24개입니다.
+
+목적지는 `https://api.typesafe.ai`이며 호출당 HTTPS POST 하나와 최대 한 번의 재시도를
+사용합니다. redirect와 다른 host는 거부하며 offline test용 loopback endpoint만 예외입니다.
+자문 결과와 오류는 exit 0, 잘못된 명령 인자는 exit 2입니다. 실패 시
+`JEV: unavailable — <class>`를 출력합니다. class는 disabled, codex-only backend, config,
+no key, template, auth, validation, rate limit, overloaded, redirect, 기타 HTTP status,
+timeout, network, malformed response, schema입니다. 재시도 대상은 timeout 두 번과
+0.5 s backoff 이내로 처리합니다. 기본 timeout 6 s이면 총 약 12.5 s이며,
+재시도 대상이 아닌 오류는 즉시 반환합니다.
+
+모든 출력 줄은 `JEV:`로 시작합니다. `risk`는 confidence가 충분할 때 더 높은 등급만
+제안하며 등급 선언을 만들지 않습니다. Jev 출력을 `RISK:` 줄에 붙여 넣지 마세요.
+`scan`은 기존 정규식 security scanner를 보완하며 해당 검사를 대체하지 않습니다.
+`jev-policy.conf`에서 활성화, timeout, 임계값, 상한, journal을 조정합니다. 호출 시마다
+읽으며 `orch-policy-rev`에 포함되지 않습니다. 모델은 `jev-X.Y.Z`로 고정해야 하고
+기본값은 `jev-1.13.0`입니다. 질문 문구는 `templates/jev/`에 있습니다.
+
+`<state>/jev.log`는 mode 600의 metadata 전용 journal입니다. 시간, 명령, 결과, 시도 횟수,
+latency, model, 질문 수, token 사용량만 남기며 입력 본문, source 이름, 답변, 키는 없습니다.
+`JEV_JOURNAL=0`으로 끌 수 있고 journal 기록 실패는 자문 결과에 영향을 주지 않습니다.
+Codex-only 모드는 사용하지 않습니다. `cc-orch-codex` 세션은 `CC_ORCH_BACKEND=codex`를
+설정하며, 이때 도구는 외부 호출을 거부합니다.
+
 ## reload 없이 즉시 반영되는 항목
 
 다음 값은 각 dispatch 또는 호출 시점마다 다시 읽으므로 바로 반영됩니다.

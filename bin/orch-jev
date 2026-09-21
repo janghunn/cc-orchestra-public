@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""Explicit, fail-open Jev advice for hybrid orchestra sessions."""
+import datetime
+import fcntl
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import stat
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+REPO_DIR = Path(__file__).resolve().parent.parent
+DEFAULTS = {
+    "JEV_ENABLED": "1", "JEV_MODEL": "jev-1.13.0",
+    "JEV_ENDPOINT": "https://api.typesafe.ai/v1/systemone",
+    "JEV_TIMEOUT_SECONDS": 6.0, "JEV_MAX_STATE_BYTES": 24000,
+    "JEV_LINT_MAX_ITEMS": 20, "JEV_LINT_THRESHOLD": 0.5,
+    "JEV_RISK_MIN_CONFIDENCE": 0.6, "JEV_SCAN_CHUNK_BYTES": 4000,
+    "JEV_SCAN_MAX_CHUNKS": 24, "JEV_SCAN_THRESHOLD": 0.7, "JEV_JOURNAL": "1",
+}
+TIERS = ("trivial", "low", "normal", "critical")
+RESPONSE_MAX_BYTES = 1_048_576
+SECRET_GENERIC = re.compile(r'''(^|[^\w])(key|token|secret|password|api[_-]?key)["']?\s*[:=]\s*["'][a-z0-9_/+=-]{20,}["']''')
+PLACEHOLDER = re.compile(r"example|xxx|changeme|your_|redacted|dummy|placeholder|<[a-z_]+>|\$\{|todo")
+AWS = re.compile(r"AKIA[0-9A-Z]{16}")
+RISK_ANCHOR = re.compile(r"^\s*(-\s*)?RISK:\s*\**([a-z]*)")
+USAGE = "usage: orch-jev lint-brief <brief.md> | risk <brief.md> | scan <file>... | - | --help"
+
+
+def emit(line):
+    if (not line.startswith("JEV: ") or "RISK:" in line or "RISK AMENDED" in line
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 or c in "\u2028\u2029" for c in line)):
+        line = "JEV: unavailable — output guard"
+    print(line)
+
+
+def display_name(name):
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]|RISK:", "?", str(name))[:120]
+
+
+def state_dir():
+    return Path(os.environ.get("CC_ORCH_STATE_DIR") or Path.home() / ".claude/orchestra-state")
+
+
+class Policy:
+    def __init__(self):
+        self.values = dict(DEFAULTS)
+        try:
+            text = Path(os.environ.get("CC_ORCH_JEV_POLICY") or REPO_DIR / "jev-policy.conf").read_text()
+        except (OSError, UnicodeError):
+            text = ""
+        for line in text.splitlines():
+            match = re.fullmatch(r"\s*([A-Z_]+)\s*=\s*(.*?)\s*", line)
+            if not match or match[1] not in DEFAULTS:
+                continue
+            name, value = match.groups()
+            parsed = re.fullmatch(r'''(?:"([^"\n]*)"|'([^'\n]*)'|([^\s'"#]*))(?:\s+#.*)?''', value)
+            if not parsed:
+                if name in ("JEV_MODEL", "JEV_ENDPOINT"):
+                    self.values[name] = ""
+                continue
+            value = next(v for v in parsed.groups() if v is not None)
+            default = DEFAULTS[name]
+            try:
+                if isinstance(default, int):
+                    value = int(value)
+                    valid = value >= 1
+                elif isinstance(default, float):
+                    value = float(value)
+                    valid = 0 < value <= 15 if name == "JEV_TIMEOUT_SECONDS" else 0 <= value <= 1
+                else:
+                    valid = True
+                self.values[name] = value if valid else default
+            except ValueError:
+                self.values[name] = default
+        self.model = self.values["JEV_MODEL"]
+        self.timeout = self.values["JEV_TIMEOUT_SECONDS"]
+        self.attempts = 0
+
+    def __getitem__(self, key):
+        return self.values["JEV_" + key]
+
+    def valid(self):
+        try:
+            endpoint = self["ENDPOINT"]
+            url = urllib.parse.urlsplit(endpoint)
+            return bool(re.fullmatch(r"jev-\d+\.\d+\.\d+", self.model)
+                        and not any(ord(c) <= 32 or ord(c) == 127 for c in endpoint)
+                        and url.username is None and url.password is None
+                        and "?" not in endpoint and "#" not in endpoint
+                        and (url.port is None or 0 < url.port <= 65535)
+                        and ((url.scheme == "https" and url.hostname == "api.typesafe.ai")
+                             or (url.scheme in ("http", "https")
+                                 and url.hostname in ("127.0.0.1", "localhost", "::1"))))
+        except ValueError:
+            return False
+
+
+def read_key():
+    value = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    if value:
+        return value
+    try:
+        path = state_dir() / "jev.key"
+        info = path.stat()
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o077:
+            emit(f"JEV: warning — jev.key ignored (mode 0{mode:o} permits group/other access; chmod 600 it)")
+        elif not stat.S_ISREG(info.st_mode):
+            emit("JEV: warning — jev.key unreadable; ignored")
+        else:
+            return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError):
+        emit("JEV: warning — jev.key unreadable; ignored")
+    return ""
+
+
+def load_template(command):
+    try:
+        directory = Path(os.environ.get("CC_ORCH_JEV_TEMPLATES") or REPO_DIR / "templates/jev")
+        template = json.loads((directory / (command + ".json")).read_text(encoding="utf-8"))
+        expected = "choice" if command == "risk" else "noul"
+        if (isinstance(template, dict) and template.get("type") == expected
+                and isinstance(template.get("instructions"), str)
+                and (expected != "choice" or (isinstance(template.get("criteria"), dict)
+                                             and set(template["criteria"]) == set(TIERS)))):
+            return template
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return None
+
+
+def has_secret_shape(line):
+    lower = line.lower()
+    return bool(AWS.search(line) or (SECRET_GENERIC.search(lower) and not PLACEHOLDER.search(lower)))
+
+
+def strip_fences(text):
+    fence, length, result = "", 0, []
+    if "\0" in text:
+        return ""
+    for line in text.splitlines(keepends=True):
+        match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if match:
+            run = match[1]
+            if not fence:
+                fence, length = run[0], len(run)
+                continue
+            if run[0] == fence and len(run) >= length and not line[match.end():].strip():
+                fence = ""
+                continue
+        if not fence:
+            result.append(line)
+    return "".join(result)
+
+
+def section(text, name):
+    lines, active = [], False
+    for line in text.splitlines():
+        if re.match(r"^##\s+" + name + r"\b", line):
+            active = True
+        elif active and line.startswith("## "):
+            break
+        elif active:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def risk_state(text):
+    result, in_risk = [], False
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^##\s+Risk\b", line):
+            in_risk = True
+        elif line.startswith("## "):
+            in_risk = False
+        if not in_risk and not RISK_ANCHOR.match(line) and not line.startswith("DEEP REASONING:"):
+            result.append(line)
+    return "".join(result)
+
+
+def chunks(text, source, cap):
+    result, buffer, size, first, last = [], [], 0, 1, 1
+    for number, line in enumerate(text.splitlines(keepends=True), 1):
+        if buffer and size + len(line.encode()) > cap:
+            result.append({"source": source, "lines": f"{first}-{last}", "text": "".join(buffer)})
+            buffer, size = [], 0
+        for char in line:
+            width = len(char.encode())
+            if width > cap:
+                return None  # No codepoint-preserving split can satisfy this cap.
+            if size + width > cap:
+                result.append({"source": source, "lines": f"{first}-{last}", "text": "".join(buffer)})
+                buffer, size = [], 0
+            if not buffer:
+                first = number
+            buffer.append(char)
+            size, last = size + width, number
+    if buffer:
+        result.append({"source": source, "lines": f"{first}-{last}", "text": "".join(buffer)})
+    return result
+
+
+def state_size(state):
+    return len(json.dumps(state, ensure_ascii=False).encode())
+
+
+def trim_state(command, state, cap):
+    before = state_size(state)
+    while state_size(state) > cap:
+        if command == "risk":
+            if not state:
+                break
+            state = "".join(state.splitlines(keepends=True)[:-1])
+        elif command == "lint-brief" and state["verification"]:
+            state["verification"] = "\n".join(state["verification"].splitlines()[:-1])
+        else:
+            items = state["acceptance" if command == "lint-brief" else "chunks"]
+            if not items:
+                break
+            items.pop()
+    after = state_size(state)
+    if after != before:
+        emit(f"JEV: note — state truncated to {after} of {before} bytes")
+    return state
+
+
+def prepare(command, sources, policy, template):
+    items, state, declared, reason = [], None, None, "empty"
+    for path in sources:
+        source = display_name("<stdin>" if command == "scan" and path == "-" else path)
+        try:
+            if command == "scan" and path == "-":
+                raw = sys.stdin.buffer.read().decode("utf-8", errors="replace") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
+            else:
+                raw = Path(path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError, UnicodeError):
+            emit(f"JEV: skipped — cannot read {source}")
+            reason = "unreadable"
+            continue
+        hit = next((n for n, line in enumerate(raw.splitlines(), 1) if has_secret_shape(line)), None)
+        if hit is not None:
+            emit(f"JEV: skipped — secret-shaped literal ({source}:{hit})")
+            reason = "secret-shaped"
+            continue
+        if command == "risk":
+            match = next((RISK_ANCHOR.match(line) for line in strip_fences(raw).splitlines()
+                          if RISK_ANCHOR.match(line)), None)
+            declared = match[2] if match and match[2] in TIERS else None
+            state = risk_state(raw)
+        elif command == "lint-brief":
+            text = strip_fences(raw)
+            for line in section(text, "Acceptance").splitlines():
+                match = re.match(r"^\s*(\d+)[.)]\s+(.*)", line)
+                if match:
+                    items.append({"item": match[1], "text": match[2]})
+                elif items and line.strip():
+                    items[-1]["text"] += " " + line.strip()
+            if not items:
+                emit("JEV: lint — no numbered acceptance items found")
+                return None, {}, None, "no-items"
+            state = {"acceptance": items, "verification": section(text, "Verification")}
+        else:
+            parts = chunks(raw, source, policy["SCAN_CHUNK_BYTES"])
+            if parts is None:
+                emit(f"JEV: skipped — chunk cap smaller than a codepoint ({source})")
+                reason = "chunk-cap"
+            elif not parts:
+                emit(f"JEV: scan — {source}: empty")
+            else:
+                items.extend(parts)
+    if command == "scan":
+        if not items:
+            return None, {}, None, reason
+        state = {"chunks": items}
+    elif state is None:
+        return None, {}, None, reason
+    if command != "risk":
+        cap = policy["LINT_MAX_ITEMS" if command == "lint-brief" else "SCAN_MAX_CHUNKS"]
+        if len(items) > cap:
+            kind = "acceptance items" if command == "lint-brief" else "chunks"
+            emit(f"JEV: note — {len(items)} {kind} found; only the first {cap} were sent")
+            del items[cap:]
+        if command == "scan":
+            for n, item in enumerate(items, 1):
+                item["id"] = f"c{n}"
+    state = trim_state(command, state, policy["MAX_STATE_BYTES"])
+    if state_size(state) > policy["MAX_STATE_BYTES"] or not (state.strip() if command == "risk" else items):
+        emit("JEV: skipped — nothing to send after truncation")
+        return None, {}, declared, "truncation"
+    questions = {"tier": template} if command == "risk" else {}
+    for n, item in enumerate(items, 1):
+        label = item["item"] if command == "lint-brief" else item["id"]
+        token = "{n}" if command == "lint-brief" else "{chunk}"
+        questions[f"q{n}" if command == "lint-brief" else label] = dict(
+            template, instructions=template["instructions"].replace(token, label))
+    return state, questions, declared, None
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def valid_response(payload, questions):
+    if not isinstance(payload, dict) or not isinstance(payload.get("model"), str) or not isinstance(payload.get("answers"), dict):
+        return False
+    for name, question in questions.items():
+        answer = payload["answers"].get(name)
+        if not isinstance(answer, dict) or answer.get("type") != question["type"]:
+            return False
+        field = "noul" if question["type"] == "noul" else "confidence"
+        value = answer.get(field)
+        if type(value) not in (int, float) or not 0 <= value <= 1:
+            return False
+        if field == "confidence" and (not isinstance(answer.get("choice"), str) or answer["choice"] not in TIERS):
+            return False
+    return True
+
+
+def call_jev(policy, key, state, questions):
+    request = urllib.request.Request(policy["ENDPOINT"],
+        data=json.dumps({"state": state, "model": policy.model, "questions": questions}, ensure_ascii=False).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                 "Accept": "application/json", "User-Agent": "cc-orchestra-orch-jev"}, method="POST")
+    opener = urllib.request.build_opener(NoRedirect())
+    for attempt in range(2):
+        policy.attempts = attempt + 1
+        start, delay, retry = time.monotonic(), 0.5, False
+        try:
+            with opener.open(request, timeout=policy.timeout) as response:
+                body = bytearray()
+                while True:
+                    remaining = policy.timeout - (time.monotonic() - start)
+                    if remaining <= 0:
+                        raise TimeoutError
+                    try:
+                        response.fp.raw._sock.settimeout(remaining)
+                    except (AttributeError, OSError):
+                        pass
+                    # read1 returns after one buffered/socket read, including a slow drip.
+                    part = response.read1(65536)
+                    if time.monotonic() - start > policy.timeout:
+                        raise TimeoutError
+                    body.extend(part)
+                    if len(body) > RESPONSE_MAX_BYTES:
+                        return "malformed response", None
+                    if not part or response.fp is None:
+                        break
+            try:
+                payload = json.loads(body)
+            except (ValueError, UnicodeError, RecursionError):
+                return "malformed response", None
+            return ("ok", payload) if valid_response(payload, questions) else ("schema", None)
+        except urllib.error.HTTPError as error:
+            code = error.code
+            error.close()
+            kind = {401: "auth", 403: "auth", 422: "validation", 429: "rate limit", 529: "overloaded"}.get(code)
+            kind = "redirect" if 300 <= code < 400 else kind
+            outcome = f"{kind} (HTTP {code})" if kind else f"http {code}"
+            retry = code in (429, 529)
+        except (TimeoutError, socket.timeout):
+            outcome, retry, delay = "timeout", True, 0
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, UnicodeError) as error:
+            timeout = isinstance(getattr(error, "reason", None), (TimeoutError, socket.timeout))
+            outcome, retry, delay = ("timeout", True, 0) if timeout else ("network", True, 0.5)
+        if not retry or attempt == 1:
+            return outcome, None
+        time.sleep(delay)
+
+
+def journal(record):
+    try:
+        directory = state_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        with os.fdopen(os.open(directory / "jev.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+def results(command, state, answers, declared, policy):
+    if command == "risk":
+        choice, confidence = answers["tier"]["choice"], answers["tier"]["confidence"]
+        if declared is None:
+            emit(f"JEV: risk — no tier declared in brief; jev picks {choice} (confidence {confidence:.2f}); advisory only")
+        elif TIERS.index(choice) > TIERS.index(declared) and confidence >= policy["RISK_MIN_CONFIDENCE"]:
+            emit(f"JEV: risk — declared {declared}; jev suggests {choice} (confidence {confidence:.2f}); advisory only, the brief is unchanged")
+        else:
+            emit(f"JEV: risk — declared {declared}; no escalation suggested (jev: {choice}, confidence {confidence:.2f})")
+    elif command == "lint-brief":
+        values = [answers[f"q{n}"]["noul"] for n in range(1, len(state["acceptance"]) + 1)]
+        for item, value in zip(state["acceptance"], values):
+            if value < policy["LINT_THRESHOLD"]:
+                emit(f"JEV: lint — item {item['item']} may not be checkable (p={value:.2f})")
+        if min(values) >= policy["LINT_THRESHOLD"]:
+            emit(f"JEV: lint — all {len(values)} acceptance items look checkable (min p={min(values):.2f})")
+    else:
+        sources = {}
+        for chunk in state["chunks"]:
+            value, source = answers[chunk["id"]]["noul"], chunk["source"]
+            sources[source] = max(value, sources.get(source, 0))
+            if value >= policy["SCAN_THRESHOLD"]:
+                emit(f"JEV: scan — {source}:{chunk['lines']} possible agent-directed instruction (p={value:.2f})")
+        for source, value in sources.items():
+            if value < policy["SCAN_THRESHOLD"]:
+                emit(f"JEV: scan — {source}: no chunk over threshold (max p={value:.2f})")
+
+
+def main(argv) -> int:
+    help_requested = len(argv) == 1 and argv[0] in ("--help", "-h", "help")
+    valid_args = bool(argv and argv[0] in ("lint-brief", "risk", "scan") and len(argv) >= 2
+                      and (argv[0] == "scan" or len(argv) == 2))
+    command = "help" if help_requested else argv[0] if valid_args else "usage"
+    policy = None
+    record = dict(timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(), subcommand=command,
+                  outcome="ok", attempts=0, latency_ms=None, model=DEFAULTS["JEV_MODEL"], questions=0,
+                  input_tokens=None, output_tokens=None)
+    try:
+        policy = Policy()
+        record["model"] = policy.model
+        if help_requested:
+            record["outcome"] = "skipped:help"
+            for line in (USAGE, "key sources: TYPESAFE_API_KEY or <state>/jev.key (mode 600)",
+                         "lines: lint, risk, scan, note, warning, skipped, unavailable",
+                         "advisory only; exit 0 on every outcome except usage errors", "not used in Codex-only mode"):
+                emit("JEV: " + line)
+            return 0
+        if not valid_args:
+            record["outcome"] = "skipped:usage"
+            print(USAGE, file=sys.stderr)
+            return 2
+        unavailable = ("disabled" if policy["ENABLED"] != "1" else
+                       "codex-only backend" if os.environ.get("CC_ORCH_BACKEND") == "codex" else
+                       "config" if not policy.valid() else None)
+        if unavailable is None:
+            key = read_key()
+            unavailable = None if key else "no key"
+        if unavailable is None:
+            template = load_template(command)
+            unavailable = None if template is not None else "template"
+        if unavailable is None:
+            state, questions, declared, skipped = prepare(command, argv[1:], policy, template)
+            if state is None:
+                record["outcome"] = "skipped:" + skipped
+                return 0
+            record["questions"] = len(questions)
+            start = time.monotonic()
+            outcome, payload = call_jev(policy, key, state, questions)
+            record.update(attempts=policy.attempts, latency_ms=int((time.monotonic() - start) * 1000))
+            if outcome == "ok":
+                usage = payload.get("usage")
+                for field in ("input_tokens", "output_tokens"):
+                    value = usage.get(field) if isinstance(usage, dict) else None
+                    record[field] = value if type(value) is int else None
+                results(command, state, payload["answers"], declared, policy)
+            else:
+                unavailable = outcome
+        if unavailable is not None:
+            record["outcome"] = "disabled" if unavailable == "disabled" else "unavailable:" + unavailable
+            emit("JEV: unavailable — " + unavailable)
+        return 0
+    except Exception:
+        record["outcome"] = "unavailable:internal error"
+        emit("JEV: unavailable — internal error")
+        return 0
+    finally:
+        if policy is None or policy["JOURNAL"] != "0":
+            journal(record)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
