@@ -317,8 +317,9 @@ The report re-applies the current policy mapping to stored raw answers without c
 It prints counts and rates only: agreement, lower/higher suggestions, skipped/unavailable
 reasons, and failures/retries per suggested tier. Comparisons require `observation=exact`
 and known suggested/final pairs; failure/retry rates use only exact observations with a known
-exit. Other records count as unobserved. Buckets with fewer than 10 such observations are
-marked `fewer than 10 records`. It ends with `counts only — this report draws no conclusion.`
+exit. Other records count as unobserved. Buckets with fewer than 10 records are marked
+` — fewer than 10 records`; those with fewer than 10 exact observations with a known exit are
+marked ` — fewer than 10 observed`. Both markers may appear. It ends with `counts only — this report draws no conclusion.`
 
 Coverage is limited to the facade: direct core `bin/codex-run` calls and Codex-only dispatch
 produce no shadow record. With shadow enabled, `resume`, explicit
@@ -326,6 +327,8 @@ produce no shadow record. With shadow enabled, `resume`, explicit
 are recorded as `skipped:resume`, `skipped:explicit-flags`, `skipped:dry-run`, or
 `skipped:withheld`, without a Jev call or execution observation. Disabled or unavailable
 automatic routing is recorded as `skipped:no-route`. Other modes are not recorded.
+A worker started with malformed arguments (for example an invalid `--lane` name or an empty
+task dir) records `skipped:invalid-args` without calling Jev.
 
 ## What changes without reload
 

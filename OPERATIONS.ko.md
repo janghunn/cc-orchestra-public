@@ -365,7 +365,9 @@ Shadow 경로는 `jev.log`에 기록하지 않습니다.
 일치, 더 낮거나 높은 제안, skipped/unavailable 사유, 제안 tier별 실패·재시도의 건수와
 비율만 출력합니다. 비교에는 `observation=exact`이고 제안·최종 pair가 모두 있는 기록을,
 실패·재시도 비율에는 exact이고 exit가 알려진 기록만 사용합니다. 나머지는 unobserved로
-집계합니다. 이렇게 관찰된 기록이 10개 미만인 bucket에는 `fewer than 10 records`를 표시하며
+집계합니다. Bucket의 전체 기록이 10개 미만이면 ` — fewer than 10 records`를,
+exact이고 exit가 알려진 기록이 10개 미만이면 ` — fewer than 10 observed`를 표시합니다.
+두 표시는 함께 나타날 수 있습니다.
 마지막 줄은 `counts only — this report draws no conclusion.`입니다.
 
 대상은 facade 경로로 한정됩니다. Core `bin/codex-run` 직접 호출과 Codex-only dispatch는
@@ -374,6 +376,8 @@ shadow record를 만들지 않습니다. Shadow가 켜져 있을 때 `resume`, �
 각각 `skipped:resume`, `skipped:explicit-flags`, `skipped:dry-run`, `skipped:withheld`로
 기록하며 Jev 호출과 실행 관찰은 하지 않습니다. 자동 라우팅이 꺼져 있거나 사용할 수 없으면
 `skipped:no-route`로 기록합니다. 다른 모드는 기록하지 않습니다.
+잘못된 인자(예: 유효하지 않은 `--lane` 이름이나 빈 task dir)로 시작된 worker는
+Jev를 호출하지 않고 `skipped:invalid-args`로 기록합니다.
 
 ## reload 없이 즉시 반영되는 항목
 

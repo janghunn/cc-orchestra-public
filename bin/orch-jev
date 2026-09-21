@@ -507,7 +507,18 @@ SHADOW_KEYS = (
     "final_fast_mode", "final_fallback_from", "attempts", "observation", "explicit_flags",
     "pressure", "codex_exit", "duration_ms", "jev_latency_ms", "jev_attempts", "input_tokens", "truncated",
 )
-SHADOW_PAIR = re.compile(r"^([a-z0-9.-]+)@(low|medium|high|xhigh|max|ultra)$")
+SHADOW_TYPES = {
+    **dict.fromkeys(("timestamp", "id", "lane", "mode", "status", "observation"), (str,)),
+    **dict.fromkeys(("thread_id", "jev_model", "difficulty", "suggested_model", "suggested_effort",
+                     "suggested_reason", "initial_model", "initial_effort", "final_model",
+                     "final_effort", "final_fallback_from", "pressure"), (str, type(None))),
+    **dict.fromkeys(("attempts", "jev_attempts"), (int,)),
+    **dict.fromkeys(("codex_exit", "duration_ms", "jev_latency_ms", "input_tokens"), (int, type(None))),
+    **dict.fromkeys(("difficulty_confidence", "reasoning"), (float, int, type(None))),
+    **dict.fromkeys(("explicit_flags", "truncated"), (bool,)),
+    **dict.fromkeys(("initial_fast_mode", "final_fast_mode"), (bool, type(None))),
+}
+SHADOW_PAIR = re.compile(r"^([a-z0-9.-]{1,64})@(low|medium|high|xhigh|max|ultra)$")
 CODEX_LOG_LINE = re.compile(
     r"^(\S+)  (\S+)\s+(\S+?)(?:\+fast-mode)?(?: \(fallback-from:(\S+)\))?  exit=(-?\d+)  (.*)$")
 EFFORT_RANK = {name: n for n, name in enumerate(("low", "medium", "high", "xhigh", "max", "ultra"))}
@@ -536,7 +547,9 @@ def append_shadow(policy, record):
         line = (json.dumps(record, ensure_ascii=True) + "\n").encode()
         path = shadow_log_path(policy)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
         try:
             os.fchmod(fd, 0o600)
         except OSError:
@@ -568,7 +581,10 @@ def diagnose(correlation_id, status):
         directory.mkdir(parents=True, exist_ok=True)
         line = (f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')}  "
                 f"JEV: shadow {correlation_id} — {status}\n").encode()
-        fd = os.open(directory / "guard.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(directory / "guard.log",
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
         os.write(fd, line)
     except Exception:
         pass
@@ -578,6 +594,15 @@ def diagnose(correlation_id, status):
                 os.close(fd)
             except OSError:
                 pass
+
+
+def shadow_deadline(record, policy):
+    record["status"] = "unavailable:deadline"
+    if record["observation"] in (None, "none"):
+        record["observation"] = "timeout"
+    append_shadow(policy, record)
+    diagnose(record["id"], record["status"])
+    os._exit(0)
 
 
 def shadow_flags(args, defaults):
@@ -731,6 +756,21 @@ def shadow_main(args):
         except OSError:
             pass
         policy = Policy()
+        valid_mode = flags["--mode"] in ("implement", "resume")
+        valid_pid = re.fullmatch(r"[0-9]+", flags["--pid"]) is not None
+        invalid_args = not (re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", flags["--lane"])
+                            and valid_mode and valid_pid
+                            and flags["--skip"] in ("-", "resume", "dry-run", "explicit-flags", "no-route", "withheld")
+                            and flags["--fast-mode"] in ("0", "1") and flags["--explicit"] in ("0", "1"))
+        if invalid_args:
+            flags["--lane"] = "invalid"
+        # Missing paths skip the worker without discarding an otherwise valid lane.
+        invalid_args = invalid_args or not flags["--task-dir"] or not flags["--workdir"]
+        if not valid_mode:
+            flags["--mode"] = "invalid"
+        if not valid_pid:
+            flags["--pid"] = "0"
+        pressure = flags["--pressure"] if re.fullmatch(r"[a-z-]{1,20}", flags["--pressure"]) else None
         try:
             t0 = float(flags["--t0"])
             if not math.isfinite(t0):
@@ -742,14 +782,18 @@ def shadow_main(args):
                       id=f"{flags['--lane']}:{flags['--pid']}:{int(t0)}", lane=flags["--lane"],
                       mode=flags["--mode"], status="unavailable:internal error", suggested_reason="no-answer",
                       attempts=0, observation="none", explicit_flags=flags["--explicit"] == "1",
-                      pressure=flags["--pressure"] or None, jev_attempts=0, truncated=False)
+                      pressure=pressure, jev_attempts=0, truncated=False)
         initial = SHADOW_PAIR.fullmatch(flags["--initial"])
         if initial:
             record.update(initial_model=initial[1], initial_effort=initial[2],
                           initial_fast_mode=flags["--fast-mode"] == "1")
-        snapshot = shadow_session(flags["--task-dir"], flags["--lane"]) if flags["--skip"] == "-" else None
+        signal.signal(signal.SIGALRM, lambda signum, frame: shadow_deadline(record, policy))
         signal.alarm(int(policy["SHADOW_TIMEOUT_SECONDS"]) + 2 * int(policy.timeout) + 30)
-        if flags["--skip"] != "-":
+        snapshot = (shadow_session(flags["--task-dir"], flags["--lane"])
+                    if not invalid_args and flags["--skip"] == "-" else None)
+        if invalid_args:
+            record["status"] = "skipped:invalid-args"
+        elif flags["--skip"] != "-":
             record["status"] = "skipped:" + flags["--skip"]
         else:
             record["status"] = shadow_decide(policy, record, flags)
@@ -783,7 +827,8 @@ def shadow_report_main(args):
                 for line in stream:
                     try:
                         record = json.loads(line)
-                        if not isinstance(record, dict) or set(record) != set(SHADOW_KEYS):
+                        if (not isinstance(record, dict) or set(record) != set(SHADOW_KEYS)
+                                or any(type(record[name]) not in types for name, types in SHADOW_TYPES.items())):
                             raise ValueError
                         records.append(record)
                     except (ValueError, RecursionError):
@@ -835,7 +880,9 @@ def shadow_report_main(args):
             if tier not in buckets:
                 continue
             n, observed, failures, retries = buckets[tier]
-            small = " — fewer than 10 records" if observed < 10 else ""
+            small = " — fewer than 10 records" if n < 10 else ""
+            if observed < 10:
+                small += " — fewer than 10 observed"
             print(f"  {tier}: {n} records · observed (exact, exit known): {observed} · unobserved: {n - observed}"
                   f" · codex failures (exit != 0): {failures}/{observed} ({percentage(failures, observed)})"
                   f" · retries (attempts > 1): {retries}/{observed} ({percentage(retries, observed)}){small}")
@@ -843,7 +890,7 @@ def shadow_report_main(args):
         print("counts only — this report draws no conclusion.")
     except Exception as error:
         print(f"shadow-report: failed ({type(error).__name__})", file=sys.stderr)
-        return 1
+        return 0
     return 0
 
 

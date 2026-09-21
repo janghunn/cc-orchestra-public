@@ -52,6 +52,9 @@ if git -C "$ROOT" show "${SHADOW_BASELINE_REV:-339eae6}:bin/codex-run-runtime" >
   chmod +x "$HARNESS/bin/codex-run-runtime.baseline"
   BASELINE=1
 else
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    fail "baseline facade unavailable in CI ($(cat "$TMP/baseline-error"))"
+  fi
   echo "skip: baseline facade unavailable ($(cat "$TMP/baseline-error"))"
 fi
 capture() {
@@ -121,7 +124,7 @@ cp "$TMP/orch-jev.real" "$HARNESS/bin/orch-jev"
 ok "off: no worker or log write"
 
 # Original, off and on must be byte-identical for every facade branch.
-for scenario in normal lane explicit fast dry withheld resume review no-route guard-error incomplete codex-only policy-directory policy-fifo; do
+for scenario in normal lane explicit fast dry withheld resume review no-route guard-error incomplete codex-only policy-directory policy-fifo empty-workdir empty-task-dir; do
   export CC_ORCH_STATE_DIR="$TMP/harness-$scenario"
   mkdir -p "$CC_ORCH_STATE_DIR"
   call=(implement "$WORK" "$TASK")
@@ -142,6 +145,8 @@ for scenario in normal lane explicit fast dry withheld resume review no-route gu
     codex-only) export CC_ORCH_BACKEND=codex; expected=none ;;
     policy-directory) mkdir "$TMP/policy-directory"; expected=none ;;
     policy-fifo) mkfifo "$TMP/policy-fifo"; expected=none ;;
+    empty-workdir) call[1]=""; expected=skipped:invalid-args ;;
+    empty-task-dir) call[2]=""; expected=skipped:invalid-args ;;
   esac
   export CC_ORCH_JEV_POLICY="$TMP/policy-0"
   if [ "$BASELINE" = 1 ]; then capture baseline "$HARNESS/bin/codex-run-runtime.baseline" "${call[@]}"; fi

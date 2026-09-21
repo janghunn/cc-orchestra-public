@@ -163,7 +163,8 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
     def invoke(self, **flags):
         out, err = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, self.env, clear=True), patch.object(jev.os, "setsid"), \
-                patch.object(jev.signal, "alarm"), patch.object(jev.urllib.request, "build_opener",
+                patch.object(jev.signal, "alarm"), patch.object(jev.signal, "signal"), \
+                patch.object(jev.urllib.request, "build_opener",
                 return_value=FakeOpener(self.server)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = jev.main(["shadow", *self.flags(**flags)])
         self.assertEqual((rc, out.getvalue(), err.getvalue()), (0, "", ""))
@@ -379,6 +380,106 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
         self.write_policy(JEV_SHADOW_MAP_ROUTINE="bogus")
         self.assertEqual(self.invoke()["suggested_reason"], "unmapped")
 
+    def test_invalid_shadow_flags_cannot_forge_records_or_diagnostics(self):
+        raw_lane = "bad\nFORGED"
+        cases = [dict(lane=raw_lane, mode="bogus-FORGED"), dict(lane=raw_lane),
+                 dict(mode="bogus-FORGED"), dict(skip="withheld\nFORGED"), dict(pid="0\nFORGED"),
+                 {"fast-mode": "1\nFORGED"}, dict(explicit="1\nFORGED"),
+                 dict(lane="a" * 33), dict(pid="１２３")]
+        for flags in cases:
+            with self.subTest(flags=flags):
+                self.reset_logs()
+                with patch.object(jev, "shadow_decide") as decide, \
+                        patch.object(jev, "shadow_observe") as observe, \
+                        patch.object(jev, "shadow_session") as session:
+                    row = self.invoke(**flags)
+                    decide.assert_not_called()
+                    observe.assert_not_called()
+                    session.assert_not_called()
+                self.assertEqual(row["lane"], "invalid")
+                self.assertEqual(row["mode"], "invalid" if "mode" in flags else "implement")
+                self.assertEqual(row["status"], "skipped:invalid-args")
+                self.assertEqual(row["observation"], "none")
+                self.assertEqual(row["attempts"], 0)
+                self.assertEqual(row["id"].split(":")[0], "invalid")
+                self.assertTrue(row["id"].split(":")[1].isascii())
+                self.assertTrue(row["id"].split(":")[1].isdigit())
+                self.assertFalse(self.server.requests)
+                self.assertEqual(len((self.state / "guard.log").read_text().splitlines()), 1)
+                for path in self.state.iterdir():
+                    self.assertNotIn("FORGED", path.read_text())
+                    self.assertNotIn(raw_lane, path.read_text())
+
+    def test_empty_paths_skip_without_reading_dispatcher_cwd(self):
+        for field in ("task-dir", "workdir"):
+            with self.subTest(field=field):
+                self.reset_logs()
+                with patch.object(jev, "shadow_decide") as decide, \
+                        patch.object(jev, "shadow_observe") as observe, \
+                        patch.object(jev, "shadow_session") as session:
+                    row = self.invoke(lane="named-lane", **{field: ""})
+                    decide.assert_not_called()
+                    observe.assert_not_called()
+                    session.assert_not_called()
+                self.assertEqual(row["lane"], "named-lane")
+                self.assertTrue(row["id"].startswith("named-lane:"))
+                self.assertEqual(row["status"], "skipped:invalid-args")
+                self.assertEqual(row["observation"], "none")
+                self.assertFalse(self.server.requests)
+                self.assertEqual(len((self.state / "guard.log").read_text().splitlines()), 1)
+
+    def test_deadline_writes_record_and_diagnostic_before_exit(self):
+        base = self.invoke(skip="dry-run")
+        for observation in (None, "none", "exact", "ambiguous", "timeout"):
+            with self.subTest(observation=observation):
+                self.reset_logs()
+                row = dict(base, observation=observation)
+                out, err = io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, self.env, clear=True), patch.object(jev.os, "_exit") as leave, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    jev.shadow_deadline(row, jev.Policy())
+                    leave.assert_called_once_with(0)
+                self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+                recorded = self.record()
+                self.assertEqual(recorded["status"], "unavailable:deadline")
+                self.assertEqual(recorded["observation"],
+                                 "timeout" if observation in (None, "none") else observation)
+                lines = (self.state / "guard.log").read_text().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertIn(f"JEV: shadow {row['id']} — unavailable:deadline", lines[0])
+
+    def test_model_slug_limit_applies_to_initial_mapping_and_observation(self):
+        for length in (64, 65):
+            with self.subTest(length=length):
+                self.reset_logs()
+                slug = "a" * length
+                pair = slug + "@high"
+                self.write_policy(JEV_SHADOW_MAP_ROUTINE=pair)
+                t0 = time.time()
+                self.set_log(self.codex_line(pair))
+                row = self.invoke(initial=pair, t0=t0)
+                for field in ("initial_model", "suggested_model", "final_model"):
+                    self.assertEqual(row[field], slug if length == 64 else None, field)
+                self.assertEqual(row["suggested_reason"], "mapped" if length == 64 else "unmapped")
+                self.assertEqual(row["observation"], "exact" if length == 64 else "none")
+                self.assertEqual(row["attempts"], 1 if length == 64 else 0)
+
+    def test_optional_shadow_metadata_is_sanitized(self):
+        for t0 in ("nan", "inf", "-inf", "FORGED"):
+            with self.subTest(t0=t0):
+                self.reset_logs()
+                before = int(time.time())
+                row = self.invoke(skip="dry-run", t0=t0, pressure="healthy\nFORGED",
+                                  initial="gpt-6-astra@xhigh\nFORGED")
+                self.assertEqual(row["status"], "skipped:dry-run")
+                self.assertIsNone(row["pressure"])
+                self.assertIsNone(row["initial_model"])
+                self.assertIsNone(row["initial_fast_mode"])
+                self.assertLessEqual(before, int(row["id"].split(":")[2]))
+                self.assertLessEqual(int(row["id"].split(":")[2]), int(time.time()))
+                for path in self.state.iterdir():
+                    self.assertNotIn("FORGED", path.read_text())
+
     def test_log_failure_and_bounded_lock(self):
         self.write_policy(JEV_SHADOW_LOG=self.state)
         # No shadow record is possible when the destination itself is a directory.
@@ -441,10 +542,15 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
                 row.update(suggested_effort="medium", codex_exit=1, attempts=2)
             rows.append(row)
         rows.append(dict(base, observation="exact", attempts=None, codex_exit="7"))
+        rows.extend(dict(rows[0], **fields) for fields in (
+            {"final_model": ["x"]}, {"status": 7}, {"explicit_flags": "yes"}))
         self.log.write_text("".join(json.dumps(row) + "\n" for row in rows) + '{}\n')
         out = self.report()
-        for line in (f"JEV shadow report — {self.log}", "records: 13  malformed: 1",
-                "status: ok 11 · skipped:empty 1 · unavailable:no key 1",
+        # By hand: 12 valid records, four wrong-typed records plus {} = 5 malformed.
+        # Routine has 10 records: 7 observed, 2 ambiguous and 1 without an exit.
+        # Eight pairs compare: 3 agree, 3 lower, 1 higher, 1 unranked. One failure/retry.
+        for line in (f"JEV shadow report — {self.log}", "records: 12  malformed: 5",
+                "status: ok 10 · skipped:empty 1 · unavailable:no key 1",
                 "comparable (exact observation, suggestion and final pair known): 8",
                 "  agreement (suggested == final): 3 (37.5%)",
                 "  suggested lower than final:     3 (37.5%)",
@@ -452,17 +558,36 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
                 "stored suggestions differing from the current mapping: 1",
                 "counts only — this report draws no conclusion."):
             self.assertIn(line, out.splitlines())
-        self.assertIn("routine: 11 records · observed (exact, exit known): 7 · unobserved: 4", out)
-        self.assertIn("codex failures (exit != 0): 1/7 (14.3%) · retries (attempts > 1): 1/7 (14.3%) — fewer than 10 records", out)
-        self.assertIn("0/0 (n/a)", out)
+        self.assertIn("  routine: 10 records · observed (exact, exit known): 7 · unobserved: 3"
+                      " · codex failures (exit != 0): 1/7 (14.3%) · retries (attempts > 1): 1/7 (14.3%)"
+                      " — fewer than 10 observed", out.splitlines())
+        self.assertIn("  none: 2 records · observed (exact, exit known): 0 · unobserved: 2"
+                      " · codex failures (exit != 0): 0/0 (n/a) · retries (attempts > 1): 0/0 (n/a)"
+                      " — fewer than 10 records — fewer than 10 observed", out.splitlines())
         self.write_policy(JEV_SHADOW_MAP_ROUTINE="gpt-6-astra@xhigh")
         self.assertIn("agreement (suggested == final): 2 (25.0%)", self.report())
+
+    def test_report_rejects_wrong_types_for_every_field(self):
+        base = self.invoke()
+        self.assertEqual(set(jev.SHADOW_TYPES), set(KEYS))
+        rows = [base]
+        rows.extend(dict(base, **{name: []}) for name in KEYS)
+        # JSON booleans must not be accepted as integers or confidence/reasoning numbers.
+        rows.extend(dict(base, **{name: True}) for name in (
+            "attempts", "jev_attempts", "codex_exit", "duration_ms", "jev_latency_ms", "input_tokens",
+            "difficulty_confidence", "reasoning"))
+        rows.extend(dict(base, **{name: 1}) for name in (
+            "explicit_flags", "truncated", "initial_fast_mode", "final_fast_mode"))
+        self.log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        out = self.report()
+        self.assertIn("records: 1  malformed: 42", out.splitlines())
+        self.assertEqual(out.splitlines()[-1], "counts only — this report draws no conclusion.")
 
     def test_report_unexpected_failure_is_visible(self):
         out, err = io.StringIO(), io.StringIO()
         with patch.object(jev, "Policy", side_effect=RuntimeError("private detail")), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertEqual(jev.main(["shadow-report"]), 1)
+            self.assertEqual(jev.main(["shadow-report"]), 0)
         self.assertEqual(out.getvalue(), "")
         self.assertEqual(err.getvalue(), "shadow-report: failed (RuntimeError)\n")
 
@@ -482,6 +607,56 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
 
 
 class SubprocessShadowTests(ShadowFixture, unittest.TestCase):
+    def test_fifo_log_targets_do_not_block(self):
+        self.env.pop("TYPESAFE_API_KEY")
+        for target in ("shadow", "guard"):
+            for with_reader in (False, True):
+                with self.subTest(target=target, with_reader=with_reader):
+                    self.reset_logs()
+                    self.write_policy(JEV_SHADOW_LOG=self.log)
+                    fifo = self.log if target == "shadow" else self.state / "guard.log"
+                    os.mkfifo(fifo)
+                    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK) if with_reader else None
+                    try:
+                        start = time.monotonic()
+                        result = subprocess.run([sys.executable, str(TOOL), "shadow", *self.flags()],
+                                                env=self.env, capture_output=True, timeout=1)
+                        self.assertLess(time.monotonic() - start, 1)
+                        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+                        if reader is not None:
+                            self.assertEqual(os.read(reader, 4096), b"")
+                        if target == "shadow":
+                            self.assertFalse(self.log.is_file())
+                            lines = (self.state / "guard.log").read_text().splitlines()
+                            self.assertEqual(len(lines), 1)
+                            self.assertIn("JEV: shadow", lines[0])
+                            self.assertTrue(lines[0].endswith("— unavailable:no key"))
+                        else:
+                            self.assertEqual(self.record()["status"], "unavailable:no key")
+                    finally:
+                        if reader is not None:
+                            os.close(reader)
+
+    def test_log_targets_do_not_follow_symlinks(self):
+        self.env.pop("TYPESAFE_API_KEY")
+        destination = self.base / "symlink-destination"
+        destination.write_text("untouched\n")
+        destination.chmod(0o644)
+        for target in ("shadow", "guard"):
+            with self.subTest(target=target):
+                self.reset_logs()
+                link = self.log if target == "shadow" else self.state / "guard.log"
+                link.symlink_to(destination)
+                result = subprocess.run([sys.executable, str(TOOL), "shadow", *self.flags()],
+                                        env=self.env, capture_output=True, timeout=1)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+                self.assertEqual(destination.read_text(), "untouched\n")
+                self.assertEqual(destination.stat().st_mode & 0o777, 0o644)
+                if target == "shadow":
+                    self.assertEqual(len((self.state / "guard.log").read_text().splitlines()), 1)
+                else:
+                    self.assertEqual(self.record()["status"], "unavailable:no key")
+
     def test_concurrent_atomic_append(self):
         self.env.pop("TYPESAFE_API_KEY")
         workers = [subprocess.Popen([sys.executable, str(TOOL), "shadow", *self.flags(lane=f"lane-{i}")],
