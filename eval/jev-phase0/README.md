@@ -118,3 +118,25 @@ intervals, operating points and decision precedence in `criteria.md`. The
 bootstrap seed is 20260921 with 2000 replicates. RISK source lines are preserved,
 including repeated plan/summary events; agreement definitions and the minimum
 of five escalation events are stated in that protocol.
+
+## Known limitations
+
+Concurrent invocations of `run_eval.py` that share a cache key are unsupported.
+At `run_eval.py:79`, the temporary cache filename is derived from the cache key
+alone, so concurrent runs writing the same key use the same `.pending` filename.
+The first rename wins; the others fail with `FileNotFoundError` and abort before
+writing their responses. In a reproduction with six concurrent mock runs of one
+key, two runs aborted. Run the driver one invocation at a time. The known
+one-line fix is to make the temporary name unique per process, for example
+`.pending.<pid>.<uuid>`; it was deliberately not applied after the verification
+gates had already run.
+
+At `labels.py:112`, `labels.py --emit-worklist` does not reject an `--out` path
+equal to its `--dataset` path. Passing the dataset path as `--out` replaces the
+complete brief records with reason rows, which breaks later evaluation. The
+`--ingest` path has an alias guard that protects the agreement note; the worklist
+path has no equivalent guard. Pass a distinct `--out` path. This was reported as
+NONBLOCKING.
+
+Both are recorded as accepted known limitations, and no code changed after the
+verification gates ran.
