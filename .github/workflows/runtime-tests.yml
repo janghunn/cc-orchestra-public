@@ -39,5 +39,7 @@ jobs:
         run: bash tests/test-security-scan.sh
       - name: Jev advisory sidecar suite
         run: bash tests/test-jev.sh
+      - name: Jev Codex-routing shadow suite
+        run: bash tests/test-jev-shadow.sh
       - name: Codex-only orchestration and backend switching
         run: bash tests/test-codex-only.sh

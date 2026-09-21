@@ -295,6 +295,86 @@ jev-policy.conf에서 JEV_JOURNAL=0으로 끌 수 있고(환경 변수가 아니
 Codex-only 모드는 사용하지 않습니다. `cc-orch-codex` 세션은 `CC_ORCH_BACKEND=codex`를
 설정하며, 이때 도구는 외부 호출을 거부합니다.
 
+### Codex 라우팅 shadow 모드 (선택 사항, 로그만 기록)
+
+Shadow 모드는 기본적으로 꺼져 있고(`JEV_SHADOW_ENABLED=0`) hybrid 모드에서만 동작합니다.
+Codex-only dispatch는 shadow를 시작하지 않습니다. 활성화하면 `codex-run-runtime`이
+대상인 최초 `implement` 호출에 detached worker를 시작하고 기다리지 않습니다.
+Jev를 사용할 수 없어도 dispatch, 인자, stdout/stderr, exit code, `codex.log`는 그대로입니다.
+플래그가 꺼져 있으면 shadow process, network 요청, 로그 기록이 없습니다.
+
+키는 위 사이드카와 동일하게 설정하고, `jev-policy.conf`(또는 `CC_ORCH_JEV_POLICY`로
+지정한 정책 파일)에서 `JEV_SHADOW_ENABLED=1`로 바꿉니다. `JEV_ENABLED=1`도 필요합니다.
+이 값들은 환경 변수가 아니라 정책 파일에서 읽습니다. 기본 매핑과 상한은 다음과 같습니다.
+
+```bash
+JEV_SHADOW_ENABLED=1
+JEV_SHADOW_MAP_MECHANICAL="gpt-5.6-luna@medium"
+JEV_SHADOW_MAP_ROUTINE="gpt-6-astra@high"
+JEV_SHADOW_MAP_INVOLVED="gpt-6-astra@xhigh"
+JEV_SHADOW_MAP_NOVEL="gpt-6-astra@xhigh"
+JEV_SHADOW_MIN_CONFIDENCE=0.6
+JEV_SHADOW_MAX_BYTES=12000
+JEV_SHADOW_TIMEOUT_SECONDS=5700
+JEV_SHADOW_LOG="codex-shadow.jsonl"
+```
+
+Jev로 전송하는 작업 내용은 `<task-dir>/brief.md`에서 `## Risk` 섹션과
+`RISK:` / `DEEP REASONING:` 줄을 제거한 본문뿐입니다. 기존 egress guard가 자르기 전
+원본 전체와 전송 전 변환된 요청을 검사하며, 탐지되면 `skipped:secret-shaped`로 건너뜁니다.
+Brief 본문은 UTF-8 기준 `JEV_SHADOW_MAX_BYTES` 이내로 제한하고, 줄이면
+`truncated=true`를 기록합니다. `plan.md`, workdir의 코드, source 경로 metadata는
+요청을 위해 읽거나 전송하지 않습니다. 정책·키·질문 template은 기존 사이드카와 동일하게
+처리하며, worker는 실행 관찰을 위해 로컬 `codex.log`와 `.codex-session` metadata를 별도로 읽습니다.
+
+Jev는 난이도(`mechanical < routine < involved < novel`)와 확장된 비국소적 추론이 필요한
+확률(Noul)만 판단하며 모델 이름을 고르지 않습니다. 매핑은 우리가 관리합니다.
+mechanical은 기존 `--mech` pair, routine은 healthy 기본값보다 effort 한 단계 아래,
+involved/novel은 healthy 기본값을 사용합니다. Confidence가 `JEV_SHADOW_MIN_CONFIDENCE`보다
+낮으면 pair를 제안하지 않습니다(`suggested_reason=low-confidence`). 정책의
+`JEV_SHADOW_MAP_*`를 수정하면 재시작 없이 제안이 바뀌며 실제 라우팅에는 영향을 주지 않습니다.
+
+기록은 `jev.log`, `codex.log`와 별도로 `<state>/codex-shadow.jsonl`에 append하며
+권한은 mode 600입니다. `JEV_SHADOW_LOG`로 경로를 바꿀 수 있고 상대 경로는 `<state>`
+기준입니다. 각 record는 다음 고정 필드를 가지며 작업 본문, 파일 경로, 키를 담지 않습니다.
+
+```text
+timestamp, id, lane, thread_id, mode, status, jev_model, difficulty, difficulty_confidence,
+reasoning, suggested_model, suggested_effort, suggested_reason, initial_model, initial_effort,
+initial_fast_mode, final_model, final_effort, final_fast_mode, final_fallback_from, attempts,
+observation, explicit_flags, pressure, codex_exit, duration_ms, jev_latency_ms, jev_attempts,
+input_tokens, truncated
+```
+
+`id`는 `<lane>:<facade-pid>:<t0>`이며, 알 수 없는 답변이나 실행 정보는 null입니다.
+`initial_*`는 facade가 라우팅한 pair이고 `final_*`와 `attempts`는 fallback을 포함해
+관찰한 실행 결과입니다. `codex_exit`는 `codex-run`의 exit가 아니라 `codex.log`에 남은
+원시 Codex exit입니다. 같은 초에 같은 workdir에서 동시에 호출하면 실행 주체를 구분하지
+못할 수 있습니다(`observation=ambiguous`). 그 밖의 observation 값은 `exact`, `none`,
+`timeout`입니다. Worker는 `JEV_SHADOW_TIMEOUT_SECONDS` 이후 관찰을 중단합니다.
+상태가 `ok`가 아니거나 로그 기록에 실패하면 `<state>/guard.log`에
+`JEV: shadow <id> — <status>` 진단을 최대 한 줄 남기며 dispatch 터미널에는 출력하지 않습니다.
+Shadow 경로는 `jev.log`에 기록하지 않습니다.
+
+```bash
+~/.claude/orchestra/bin/orch-jev shadow-report
+~/.claude/orchestra/bin/orch-jev shadow-report --log <path>
+```
+
+보고서는 Jev를 다시 호출하지 않고 저장된 원시 답변에 현재 정책 매핑을 다시 적용합니다.
+일치, 더 낮거나 높은 제안, skipped/unavailable 사유, 제안 tier별 실패·재시도의 건수와
+비율만 출력합니다. 비교에는 `observation=exact`이고 제안·최종 pair가 모두 있는 기록을,
+실패·재시도 비율에는 exact이고 exit가 알려진 기록만 사용합니다. 나머지는 unobserved로
+집계합니다. 이렇게 관찰된 기록이 10개 미만인 bucket에는 `fewer than 10 records`를 표시하며
+마지막 줄은 `counts only — this report draws no conclusion.`입니다.
+
+대상은 facade 경로로 한정됩니다. Core `bin/codex-run` 직접 호출과 Codex-only dispatch는
+shadow record를 만들지 않습니다. Shadow가 켜져 있을 때 `resume`, 명시적
+`--model` / `--effort` / `--mech` / `--fast` / `--escalate`, `--dry-run`, withheld 호출은
+각각 `skipped:resume`, `skipped:explicit-flags`, `skipped:dry-run`, `skipped:withheld`로
+기록하며 Jev 호출과 실행 관찰은 하지 않습니다. 자동 라우팅이 꺼져 있거나 사용할 수 없으면
+`skipped:no-route`로 기록합니다. 다른 모드는 기록하지 않습니다.
+
 ## reload 없이 즉시 반영되는 항목
 
 다음 값은 각 dispatch 또는 호출 시점마다 다시 읽으므로 바로 반영됩니다.

@@ -1,0 +1,10 @@
+{
+  "type": "choice",
+  "instructions": "The state is a task brief for a coding agent. Classify how difficult the implementation is for a strong coding model. Judge difficulty only; do not name models or tools.",
+  "criteria": {
+    "mechanical": "Renames, boilerplate, lint or format sweeps, codemod-like transforms, or config values; no design judgement, the shape of the change is fully determined by the brief.",
+    "routine": "An ordinary feature or fix: new logic with local reasoning, following existing patterns, tests of the usual shape, few interacting constraints.",
+    "involved": "Several interacting constraints or modules, careful edge cases, error paths, concurrency or compatibility rules; design judgement is needed inside the spec's boundaries.",
+    "novel": "Unfamiliar or underspecified behaviour, deep root-cause work, algorithmic or security-sensitive code, or a design where mistakes are costly and hard to detect."
+  }
+}

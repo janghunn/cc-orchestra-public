@@ -3,11 +3,14 @@
 import datetime
 import fcntl
 import http.client
+import io
+import math
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import signal
 import stat
 import sys
 import threading
@@ -24,8 +27,18 @@ DEFAULTS = {
     "JEV_LINT_MAX_ITEMS": 20, "JEV_LINT_THRESHOLD": 0.5,
     "JEV_RISK_MIN_CONFIDENCE": 0.6, "JEV_SCAN_CHUNK_BYTES": 4000,
     "JEV_SCAN_MAX_CHUNKS": 24, "JEV_SCAN_THRESHOLD": 0.7, "JEV_JOURNAL": "1",
+    "JEV_SHADOW_ENABLED": "0",
+    "JEV_SHADOW_MAP_MECHANICAL": "gpt-5.6-luna@medium",
+    "JEV_SHADOW_MAP_ROUTINE": "gpt-6-astra@high",
+    "JEV_SHADOW_MAP_INVOLVED": "gpt-6-astra@xhigh",
+    "JEV_SHADOW_MAP_NOVEL": "gpt-6-astra@xhigh",
+    "JEV_SHADOW_MIN_CONFIDENCE": 0.6,
+    "JEV_SHADOW_MAX_BYTES": 12000,
+    "JEV_SHADOW_TIMEOUT_SECONDS": 5700,
+    "JEV_SHADOW_LOG": "codex-shadow.jsonl",
 }
 TIERS = ("trivial", "low", "normal", "critical")
+DIFFICULTIES = ("mechanical", "routine", "involved", "novel")
 RESPONSE_MAX_BYTES = 1_048_576
 SECRET_FLAGS = re.ASCII | re.IGNORECASE
 WS_CLASS = r"[ \t\r\n\x0b\x0c\x1c-\x1f\x85\xa0\u2028\u2029\u200b\ufeff]"
@@ -40,7 +53,7 @@ BEARER = re.compile(r"bearer" + WS + r"[A-Za-z0-9_./+=-]{16,}", SECRET_FLAGS)
 PEM = re.compile(r"-----BEGIN[ A-Z]*PRIVATE KEY-----", SECRET_FLAGS)
 TERMINATORS = re.compile(r"\r\n|\r|\n|\x0b|\x0c|\x1c|\x1d|\x1e|\x85|\u2028|\u2029")
 RISK_ANCHOR = re.compile(r"^\s*(-\s*)?RISK:\s*\**([a-z]*)")
-USAGE = "usage: orch-jev lint-brief <brief.md> | risk <brief.md> | scan <file>... | - | --help"
+USAGE = "usage: orch-jev lint-brief <brief.md> | risk <brief.md> | scan <file>... | - | --help | shadow <flags> | shadow-report [--log <path>]"
 
 
 def emit(line):
@@ -138,11 +151,12 @@ def load_template(command):
     try:
         directory = Path(os.environ.get("CC_ORCH_JEV_TEMPLATES") or REPO_DIR / "templates/jev")
         template = json.loads((directory / (command + ".json")).read_text(encoding="utf-8"))
-        expected = "choice" if command == "risk" else "noul"
+        expected = "choice" if command in ("risk", "difficulty") else "noul"
+        criteria = DIFFICULTIES if command == "difficulty" else TIERS
         if (isinstance(template, dict) and template.get("type") == expected
                 and isinstance(template.get("instructions"), str)
                 and (expected != "choice" or (isinstance(template.get("criteria"), dict)
-                                             and set(template["criteria"]) == set(TIERS)))):
+                                             and set(template["criteria"]) == set(criteria)))):
             return template
     except (OSError, ValueError, UnicodeError):
         pass
@@ -372,7 +386,7 @@ def valid_response(payload, questions):
         value = answer.get(field)
         if type(value) not in (int, float) or not 0 <= value <= 1:
             return False
-        if field == "confidence" and (not isinstance(answer.get("choice"), str) or answer["choice"] not in TIERS):
+        if field == "confidence" and (not isinstance(answer.get("choice"), str) or answer["choice"] not in question.get("criteria", {})):
             return False
     return True
 
@@ -485,7 +499,359 @@ def results(command, state, answers, declared, policy, chunk_sources):
                 emit(f"JEV: scan — {source}: no chunk over threshold (max p={value:.2f})")
 
 
+# Shadow uses its own bounded journal; the advisory journal and dispatch stay independent.
+SHADOW_KEYS = (
+    "timestamp", "id", "lane", "thread_id", "mode", "status", "jev_model", "difficulty",
+    "difficulty_confidence", "reasoning", "suggested_model", "suggested_effort", "suggested_reason",
+    "initial_model", "initial_effort", "initial_fast_mode", "final_model", "final_effort",
+    "final_fast_mode", "final_fallback_from", "attempts", "observation", "explicit_flags",
+    "pressure", "codex_exit", "duration_ms", "jev_latency_ms", "jev_attempts", "input_tokens", "truncated",
+)
+SHADOW_PAIR = re.compile(r"^([a-z0-9.-]+)@(low|medium|high|xhigh|max|ultra)$")
+CODEX_LOG_LINE = re.compile(
+    r"^(\S+)  (\S+)\s+(\S+?)(?:\+fast-mode)?(?: \(fallback-from:(\S+)\))?  exit=(-?\d+)  (.*)$")
+EFFORT_RANK = {name: n for n, name in enumerate(("low", "medium", "high", "xhigh", "max", "ultra"))}
+MODEL_RANK = {"gpt-5.6-luna": 0, "gpt-5.6-terra": 1, "gpt-5.6-sol": 1, "gpt-6-astra": 2}
+
+
+def map_difficulty(policy, difficulty, confidence):
+    if difficulty is None:
+        return None, None, "no-answer"
+    if type(confidence) not in (int, float) or not 0 <= confidence <= 1 or confidence < policy["SHADOW_MIN_CONFIDENCE"]:
+        return None, None, "low-confidence"
+    if difficulty not in DIFFICULTIES:
+        return None, None, "unmapped"
+    pair = SHADOW_PAIR.fullmatch(policy["SHADOW_MAP_" + difficulty.upper()])
+    return (*pair.groups(), "mapped") if pair else (None, None, "unmapped")
+
+
+def shadow_log_path(policy):
+    path = Path(policy["SHADOW_LOG"])
+    return path if path.is_absolute() else state_dir() / path
+
+
+def append_shadow(policy, record):
+    fd = None
+    try:
+        line = (json.dumps(record, ensure_ascii=True) + "\n").encode()
+        path = shadow_log_path(policy)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        return os.write(fd, line) == len(line)
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def diagnose(correlation_id, status):
+    fd = None
+    try:
+        directory = state_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        line = (f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')}  "
+                f"JEV: shadow {correlation_id} — {status}\n").encode()
+        fd = os.open(directory / "guard.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.write(fd, line)
+    except Exception:
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def shadow_flags(args, defaults):
+    values = dict(defaults)
+    for i in range(0, len(args), 2):
+        if args[i] not in values or i + 1 == len(args):
+            raise ValueError
+        values[args[i]] = args[i + 1]
+    return values
+
+
+def shadow_session(task_dir, lane):
+    try:
+        with (Path(task_dir) / ".codex-session").open(encoding="utf-8") as stream:
+            for line in stream:
+                if line.startswith(lane + "="):
+                    return line.rstrip("\n").split("=", 1)[1]
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return None
+
+
+def shadow_observe(policy, record, flags, t0, snapshot):
+    try:
+        pid = int(flags["--pid"])
+    except ValueError:
+        pid = 0
+    deadline = t0 + policy["SHADOW_TIMEOUT_SECONDS"]
+    while pid > 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            pass  # Alive, even if a different uid now owns the pid.
+        if time.time() >= deadline:
+            record.update(observation="timeout", duration_ms=int((time.time() - t0) * 1000))
+            return
+        time.sleep(0.25)
+    record["duration_ms"] = int((time.time() - t0) * 1000)
+    workdirs = {os.path.abspath(flags["--workdir"]), os.path.realpath(flags["--workdir"])}
+    kept = []
+    try:
+        with (state_dir() / "codex.log").open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                match = CODEX_LOG_LINE.fullmatch(line.rstrip("\n"))
+                if not match:
+                    continue
+                start, mode, pair, fallback, rc, workdir = match.groups()
+                try:
+                    recent = datetime.datetime.fromisoformat(start).timestamp() >= math.floor(t0)
+                except (ValueError, OverflowError):
+                    continue
+                if mode != "implement" or workdir not in workdirs or not recent:
+                    continue
+                parsed = SHADOW_PAIR.fullmatch(pair)
+                if not parsed:
+                    continue
+                kept.append((*parsed.groups(), "+fast-mode" in line[match.start(3):match.start(5)],
+                             fallback, int(rc)))
+    except (OSError, ValueError):
+        pass
+    n = len(kept)
+    record["attempts"] = n
+    if n:
+        legal_retry = (n == 2 and kept[0][0] == "gpt-6-astra" and kept[0][4] != 0
+                       and kept[0][3] is None and kept[1][3] == "gpt-6-astra")
+        record["observation"] = "exact" if n == 1 or legal_retry else "ambiguous"
+        (record["final_model"], record["final_effort"], record["final_fast_mode"],
+         record["final_fallback_from"], record["codex_exit"]) = kept[-1]
+    session = shadow_session(flags["--task-dir"], record["lane"])
+    if session is not None and session != snapshot:
+        parts = session.split("|")
+        if re.fullmatch(r"[0-9a-f-]{36}", parts[0]):
+            record["thread_id"] = parts[0]
+        if n and len(parts) >= 3 and tuple(parts[1:3]) != (record["final_model"], record["final_effort"]):
+            record["observation"] = "ambiguous"
+
+
+def shadow_decide(policy, record, flags):
+    if policy["SHADOW_ENABLED"] != "1" or policy["ENABLED"] != "1":
+        return "unavailable:disabled"
+    if os.environ.get("CC_ORCH_BACKEND") == "codex":
+        return "unavailable:codex-only backend"
+    if not policy.valid():
+        return "unavailable:config"
+    stdout = sys.stdout
+    try:
+        sys.stdout = io.StringIO()
+        key = read_key()
+    finally:
+        sys.stdout = stdout
+    if not key:
+        return "unavailable:no key"
+    choice, noul = load_template("difficulty"), load_template("difficulty-reasoning")
+    if choice is None or noul is None:
+        return "unavailable:template"
+    try:
+        # O_NONBLOCK lets fstat reject FIFOs without waiting for a writer.
+        fd = os.open(os.path.join(flags["--task-dir"], "brief.md"),
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return "skipped:unreadable"
+            raw = stream.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return "skipped:unreadable"
+    if secret_shaped(raw):
+        return "skipped:secret-shaped"
+    text = risk_state(raw).strip()
+    if not text:
+        return "skipped:empty"
+    data, cap = text.encode(), policy["SHADOW_MAX_BYTES"]
+    if len(data) > cap:
+        text = data[:cap].decode("utf-8", errors="ignore")
+        text = text.rsplit("\n", 1)[0] if "\n" in text else text
+        record["truncated"] = True
+    questions = {"difficulty": choice, "reasoning": noul}
+    if (any(secret_shaped(value) for value in state_strings(questions))
+            or secret_shaped(json.dumps(questions, ensure_ascii=False))
+            or any(secret_shaped(value) for value in state_strings(text))
+            or secret_shaped(json.dumps(text, ensure_ascii=False))):
+        return "skipped:secret-shaped"
+    start = time.monotonic()
+    outcome, payload = call_jev(policy, key, text, questions)
+    record.update(jev_attempts=policy.attempts, jev_latency_ms=int((time.monotonic() - start) * 1000))
+    if outcome != "ok":
+        return "unavailable:" + outcome
+    answers = payload["answers"]
+    record.update(difficulty=answers["difficulty"]["choice"],
+                  difficulty_confidence=answers["difficulty"]["confidence"],
+                  reasoning=answers["reasoning"]["noul"], jev_model=policy.model)
+    usage = payload.get("usage")
+    tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
+    record["input_tokens"] = tokens if type(tokens) is int else None
+    return "ok"
+
+
+def shadow_main(args):
+    try:
+        flags = shadow_flags(args, {"--mode": "implement", "--lane": "implement", "--workdir": "",
+            "--task-dir": "", "--pid": "0", "--t0": "", "--skip": "-", "--initial": "",
+            "--pressure": "", "--fast-mode": "0", "--explicit": "0"})
+    except ValueError:
+        print("usage: orch-jev shadow <flags>", file=sys.stderr)
+        return 2
+    policy, record = None, None
+    try:
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        policy = Policy()
+        try:
+            t0 = float(flags["--t0"])
+            if not math.isfinite(t0):
+                t0 = time.time()
+        except ValueError:
+            t0 = time.time()
+        record = dict.fromkeys(SHADOW_KEYS)
+        record.update(timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                      id=f"{flags['--lane']}:{flags['--pid']}:{int(t0)}", lane=flags["--lane"],
+                      mode=flags["--mode"], status="unavailable:internal error", suggested_reason="no-answer",
+                      attempts=0, observation="none", explicit_flags=flags["--explicit"] == "1",
+                      pressure=flags["--pressure"] or None, jev_attempts=0, truncated=False)
+        initial = SHADOW_PAIR.fullmatch(flags["--initial"])
+        if initial:
+            record.update(initial_model=initial[1], initial_effort=initial[2],
+                          initial_fast_mode=flags["--fast-mode"] == "1")
+        snapshot = shadow_session(flags["--task-dir"], flags["--lane"]) if flags["--skip"] == "-" else None
+        signal.alarm(int(policy["SHADOW_TIMEOUT_SECONDS"]) + 2 * int(policy.timeout) + 30)
+        if flags["--skip"] != "-":
+            record["status"] = "skipped:" + flags["--skip"]
+        else:
+            record["status"] = shadow_decide(policy, record, flags)
+            (record["suggested_model"], record["suggested_effort"], record["suggested_reason"]) = map_difficulty(
+                policy, record["difficulty"], record["difficulty_confidence"])
+            shadow_observe(policy, record, flags, t0, snapshot)
+    except Exception:
+        if record is not None:
+            record["status"] = "unavailable:internal error"
+    finally:
+        if record is not None:
+            written = append_shadow(policy, record)
+            if record["status"] != "ok" or not written:
+                diagnose(record["id"], record["status"])
+        signal.alarm(0)
+    return 0
+
+
+def shadow_report_main(args):
+    try:
+        flags = shadow_flags(args, {"--log": ""})
+    except ValueError:
+        print("usage: orch-jev shadow-report [--log <path>]", file=sys.stderr)
+        return 2
+    try:
+        policy = Policy()
+        path = Path(flags["--log"]) if flags["--log"] else shadow_log_path(policy)
+        records, malformed = [], 0
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        record = json.loads(line)
+                        if not isinstance(record, dict) or set(record) != set(SHADOW_KEYS):
+                            raise ValueError
+                        records.append(record)
+                    except (ValueError, RecursionError):
+                        malformed += 1
+        except OSError:
+            pass
+        statuses, buckets = {}, {}
+        comparable = agreement = lower = higher = unranked = differing = 0
+        for record in records:
+            status = str(record["status"])
+            statuses[status] = statuses.get(status, 0) + 1
+            model, effort, _ = map_difficulty(policy, record["difficulty"], record["difficulty_confidence"])
+            suggested = (model, effort)
+            final = (record["final_model"], record["final_effort"])
+            differing += suggested != (record["suggested_model"], record["suggested_effort"])
+            tier = record["difficulty"] if model else "none"
+            bucket = buckets.setdefault(tier, [0, 0, 0, 0])
+            bucket[0] += 1
+            if (record["observation"] == "exact" and type(record["codex_exit"]) is int
+                    and type(record["attempts"]) is int):
+                bucket[1] += 1
+                bucket[2] += record["codex_exit"] != 0
+                bucket[3] += record["attempts"] > 1
+            if record["observation"] != "exact" or not all(suggested + final):
+                continue
+            comparable += 1
+            if any(pair[0] not in MODEL_RANK or pair[1] not in EFFORT_RANK for pair in (suggested, final)):
+                unranked += 1
+            elif suggested == final:
+                agreement += 1
+            else:
+                rank = lambda pair: (EFFORT_RANK[pair[1]], MODEL_RANK[pair[0]])
+                lower += rank(suggested) < rank(final)
+                higher += rank(suggested) > rank(final)
+                # Distinct Sol/Terra pairs have equal ranks, but are not agreements.
+                unranked += rank(suggested) == rank(final)
+        def percentage(n, total):
+            return f"{100 * n / total:.1f}%" if total else "n/a"
+        print(f"JEV shadow report — {path}")
+        print(f"records: {len(records)}  malformed: {malformed}")
+        print("status: " + " · ".join(f"{status} {n}" for status, n in sorted(statuses.items())))
+        print(f"comparable (exact observation, suggestion and final pair known): {comparable}")
+        print(f"  agreement (suggested == final): {agreement} ({percentage(agreement, comparable)})")
+        print(f"  suggested lower than final:     {lower} ({percentage(lower, comparable)})")
+        print(f"  suggested higher than final:    {higher} ({percentage(higher, comparable)})")
+        print(f"  unranked pair:                  {unranked}")
+        print("per suggested tier (re-mapped with the current jev-policy.conf):")
+        for tier in (*DIFFICULTIES, "none"):
+            if tier not in buckets:
+                continue
+            n, observed, failures, retries = buckets[tier]
+            small = " — fewer than 10 records" if observed < 10 else ""
+            print(f"  {tier}: {n} records · observed (exact, exit known): {observed} · unobserved: {n - observed}"
+                  f" · codex failures (exit != 0): {failures}/{observed} ({percentage(failures, observed)})"
+                  f" · retries (attempts > 1): {retries}/{observed} ({percentage(retries, observed)}){small}")
+        print(f"stored suggestions differing from the current mapping: {differing}")
+        print("counts only — this report draws no conclusion.")
+    except Exception as error:
+        print(f"shadow-report: failed ({type(error).__name__})", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv) -> int:
+    if argv and argv[0] == "shadow":
+        return shadow_main(argv[1:])
+    if argv and argv[0] == "shadow-report":
+        return shadow_report_main(argv[1:])
     help_requested = len(argv) == 1 and argv[0] in ("--help", "-h", "help")
     valid_args = bool(argv and argv[0] in ("lint-brief", "risk", "scan") and len(argv) >= 2
                       and (argv[0] == "scan" or len(argv) == 2))
@@ -500,7 +866,8 @@ def main(argv) -> int:
         if help_requested:
             for line in (USAGE, "key sources: TYPESAFE_API_KEY or <state>/jev.key (mode 600)",
                          "lines: lint, risk, scan, note, warning, skipped, unavailable",
-                         "advisory only; exit 0 on every outcome except usage errors", "not used in Codex-only mode"):
+                         "advisory only; exit 0 on every outcome except usage errors", "not used in Codex-only mode",
+                         "shadow: detached log-only Codex-routing worker started by codex-run-runtime; shadow-report prints counts"):
                 emit("JEV: " + line)
             return 0
         if not valid_args:

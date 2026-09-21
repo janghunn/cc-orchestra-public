@@ -248,6 +248,85 @@ set JEV_JOURNAL=0 in jev-policy.conf to disable it (the switch is read from that
 Codex-only mode does not use it: `cc-orch-codex` sessions set `CC_ORCH_BACKEND=codex`, and the
 tool refuses to call out.
 
+### Codex-routing shadow mode (opt-in, log only)
+
+Shadow mode is off by default (`JEV_SHADOW_ENABLED=0`) and runs only in hybrid mode;
+Codex-only dispatch never starts it. When enabled, `codex-run-runtime` starts a detached
+worker for eligible first-run `implement` calls and never waits for it. Dispatch, arguments,
+stdout/stderr, exit codes, and `codex.log` remain unchanged, including when Jev is unavailable.
+With the flag off, there is no shadow process, network request, or log write.
+
+Use the sidecar's key setup above and set `JEV_SHADOW_ENABLED=1` in `jev-policy.conf`
+(or the policy file selected by `CC_ORCH_JEV_POLICY`); `JEV_ENABLED=1` must also be set.
+These are policy-file settings, not environment switches. The default mapping and limits are:
+
+```bash
+JEV_SHADOW_ENABLED=1
+JEV_SHADOW_MAP_MECHANICAL="gpt-5.6-luna@medium"
+JEV_SHADOW_MAP_ROUTINE="gpt-6-astra@high"
+JEV_SHADOW_MAP_INVOLVED="gpt-6-astra@xhigh"
+JEV_SHADOW_MAP_NOVEL="gpt-6-astra@xhigh"
+JEV_SHADOW_MIN_CONFIDENCE=0.6
+JEV_SHADOW_MAX_BYTES=12000
+JEV_SHADOW_TIMEOUT_SECONDS=5700
+JEV_SHADOW_LOG="codex-shadow.jsonl"
+```
+
+The only task content sent to Jev is `<task-dir>/brief.md`, with its `## Risk` section and
+`RISK:` / `DEEP REASONING:` lines removed. The existing egress guard checks the raw brief
+before truncation and the transformed request before sending; a match skips the call with
+`skipped:secret-shaped`. Brief text is capped at `JEV_SHADOW_MAX_BYTES` UTF-8 bytes, with
+`truncated=true` recorded when shortened. No `plan.md`, workdir code, or source-path metadata
+is read for the request or sent. Policy, key, and question templates use the sidecar's existing
+handling; the worker separately observes local `codex.log` and `.codex-session` metadata.
+
+Jev classifies difficulty (`mechanical < routine < involved < novel`) and the probability of
+needing extended non-local reasoning (Noul); it never chooses model names. The mapping is
+ours: mechanical uses the existing `--mech` pair, routine lowers the healthy default's effort
+one step, and involved/novel keep the healthy default. Below `JEV_SHADOW_MIN_CONFIDENCE`, no
+pair is suggested (`suggested_reason=low-confidence`). Edit `JEV_SHADOW_MAP_*` in the policy
+to change suggestions without a restart or any change to actual routing.
+
+Records append to `<state>/codex-shadow.jsonl` with mode 600, separately from `jev.log` and
+`codex.log`. `JEV_SHADOW_LOG` can override the path; relative paths are under `<state>`.
+Each record has these fixed fields and contains no task text, file paths, or key:
+
+```text
+timestamp, id, lane, thread_id, mode, status, jev_model, difficulty, difficulty_confidence,
+reasoning, suggested_model, suggested_effort, suggested_reason, initial_model, initial_effort,
+initial_fast_mode, final_model, final_effort, final_fast_mode, final_fallback_from, attempts,
+observation, explicit_flags, pressure, codex_exit, duration_ms, jev_latency_ms, jev_attempts,
+input_tokens, truncated
+```
+
+`id` is `<lane>:<facade-pid>:<t0>`; unavailable answers or execution details are null.
+`initial_*` records the facade's routed pair, while `final_*` and `attempts` reflect observed
+execution, including fallback. `codex_exit` is the raw Codex exit from `codex.log`, not
+`codex-run`'s exit. Concurrent calls in the same second and workdir can prevent attribution
+(`observation=ambiguous`); observation can also be `exact`, `none`, or `timeout`. The worker
+stops observing after `JEV_SHADOW_TIMEOUT_SECONDS`. A non-`ok` status or log-write failure
+produces at most one `JEV: shadow <id> — <status>` diagnostic in `<state>/guard.log`, never
+on the dispatch terminal. The shadow path does not write `jev.log`.
+
+```bash
+~/.claude/orchestra/bin/orch-jev shadow-report
+~/.claude/orchestra/bin/orch-jev shadow-report --log <path>
+```
+
+The report re-applies the current policy mapping to stored raw answers without calling Jev.
+It prints counts and rates only: agreement, lower/higher suggestions, skipped/unavailable
+reasons, and failures/retries per suggested tier. Comparisons require `observation=exact`
+and known suggested/final pairs; failure/retry rates use only exact observations with a known
+exit. Other records count as unobserved. Buckets with fewer than 10 such observations are
+marked `fewer than 10 records`. It ends with `counts only — this report draws no conclusion.`
+
+Coverage is limited to the facade: direct core `bin/codex-run` calls and Codex-only dispatch
+produce no shadow record. With shadow enabled, `resume`, explicit
+`--model` / `--effort` / `--mech` / `--fast` / `--escalate`, `--dry-run`, and withheld calls
+are recorded as `skipped:resume`, `skipped:explicit-flags`, `skipped:dry-run`, or
+`skipped:withheld`, without a Jev call or execution observation. Disabled or unavailable
+automatic routing is recorded as `skipped:no-route`. Other modes are not recorded.
+
 ## What changes without reload
 
 The following are read at each dispatch or invocation and apply immediately:
