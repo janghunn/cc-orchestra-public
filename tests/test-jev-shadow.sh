@@ -2,14 +2,15 @@
 set -euo pipefail
 export CC_ORCH_CLI_AUTO_UPDATE=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python3 "$ROOT/tests/test-jev-shadow.py"
 TMP="$(mktemp -d)"
+export PYTHONPYCACHEPREFIX="$TMP/pycache"
 SERVER_PID=""
 cleanup() {
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+python3 "$ROOT/tests/test-jev-shadow.py"
 pass=0
 ok() { echo "ok $((++pass)) - $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -48,7 +49,15 @@ export CC_ORCH_JEV_POLICY="$TMP/policy-0" TEST_ARGS="$TMP/args"
 printf '# Task\nAdd a fixture.\n' > "$TASK/brief.md"
 printf '# Plan\nRun the fixture.\n' > "$TASK/plan.md"
 BASELINE=0
-if git -C "$ROOT" show "${SHADOW_BASELINE_REV:-339eae6}:bin/codex-run-runtime" > "$HARNESS/bin/codex-run-runtime.baseline" 2> "$TMP/baseline-error"; then
+if [ "${SHADOW_BASELINE_REV+x}" = x ]; then
+  baseline_rev="$SHADOW_BASELINE_REV"
+else
+  rev="$(git -C "$ROOT" log --format=%H --diff-filter=A -1 -- tests/test-jev-shadow.sh 2>/dev/null)" || rev=""
+  if [ -n "$rev" ]; then baseline_rev="${rev}^"; else baseline_rev=339eae6; fi
+fi
+baseline_source="$baseline_rev:bin/codex-run-runtime"
+printf 'baseline facade: %s\n' "$baseline_source"
+if git -C "$ROOT" show "$baseline_source" > "$HARNESS/bin/codex-run-runtime.baseline" 2> "$TMP/baseline-error"; then
   chmod +x "$HARNESS/bin/codex-run-runtime.baseline"
   BASELINE=1
 else

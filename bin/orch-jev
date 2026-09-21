@@ -625,7 +625,7 @@ def shadow_session(task_dir, lane):
     return None
 
 
-def shadow_observe(policy, record, flags, t0, snapshot):
+def shadow_observe(policy, record, flags, t0, snapshot, log_offset):
     try:
         pid = int(flags["--pid"])
     except ValueError:
@@ -645,8 +645,11 @@ def shadow_observe(policy, record, flags, t0, snapshot):
     record["duration_ms"] = int((time.time() - t0) * 1000)
     workdirs = {os.path.abspath(flags["--workdir"]), os.path.realpath(flags["--workdir"])}
     kept = []
+    truncated = False
     try:
         with (state_dir() / "codex.log").open(encoding="utf-8", errors="replace") as stream:
+            truncated = os.fstat(stream.fileno()).st_size < log_offset
+            stream.seek(0 if truncated else log_offset)
             for line in stream:
                 match = CODEX_LOG_LINE.fullmatch(line.rstrip("\n"))
                 if not match:
@@ -670,7 +673,7 @@ def shadow_observe(policy, record, flags, t0, snapshot):
     if n:
         legal_retry = (n == 2 and kept[0][0] == "gpt-6-astra" and kept[0][4] != 0
                        and kept[0][3] is None and kept[1][3] == "gpt-6-astra")
-        record["observation"] = "exact" if n == 1 or legal_retry else "ambiguous"
+        record["observation"] = "exact" if not truncated and (n == 1 or legal_retry) else "ambiguous"
         (record["final_model"], record["final_effort"], record["final_fast_mode"],
          record["final_fallback_from"], record["codex_exit"]) = kept[-1]
     session = shadow_session(flags["--task-dir"], record["lane"])
@@ -755,6 +758,10 @@ def shadow_main(args):
             os.setsid()
         except OSError:
             pass
+        try:
+            log_offset = (state_dir() / "codex.log").stat().st_size
+        except OSError:
+            log_offset = 0
         policy = Policy()
         valid_mode = flags["--mode"] in ("implement", "resume")
         valid_pid = re.fullmatch(r"[0-9]+", flags["--pid"]) is not None
@@ -799,7 +806,7 @@ def shadow_main(args):
             record["status"] = shadow_decide(policy, record, flags)
             (record["suggested_model"], record["suggested_effort"], record["suggested_reason"]) = map_difficulty(
                 policy, record["difficulty"], record["difficulty_confidence"])
-            shadow_observe(policy, record, flags, t0, snapshot)
+            shadow_observe(policy, record, flags, t0, snapshot, log_offset)
     except Exception:
         if record is not None:
             record["status"] = "unavailable:internal error"
@@ -807,7 +814,7 @@ def shadow_main(args):
         if record is not None:
             written = append_shadow(policy, record)
             if record["status"] != "ok" or not written:
-                diagnose(record["id"], record["status"])
+                diagnose(record["id"], record["status"] + ("" if written else " (log write failed)"))
         signal.alarm(0)
     return 0
 

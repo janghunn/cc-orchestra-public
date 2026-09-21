@@ -150,8 +150,8 @@ class ShadowFixture:
         self.assertFalse((self.state / "jev.log").exists())
         return record
 
-    def codex_line(self, pair="gpt-6-astra@xhigh", rc=0, *, seconds=0, work=None, fallback=""):
-        start = datetime.datetime.fromtimestamp(time.time() + seconds).astimezone().isoformat(timespec="seconds")
+    def codex_line(self, pair="gpt-6-astra@xhigh", rc=0, *, seconds=0, work=None, fallback="", when=None):
+        start = datetime.datetime.fromtimestamp((time.time() if when is None else when) + seconds).astimezone().isoformat(timespec="seconds")
         note = f" (fallback-from:{fallback})" if fallback else ""
         return f"{start}  implement    {pair}{note}  exit={rc}  {work or self.work}\n"
 
@@ -169,6 +169,32 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
             rc = jev.main(["shadow", *self.flags(**flags)])
         self.assertEqual((rc, out.getvalue(), err.getvalue()), (0, "", ""))
         return self.record()
+
+    def invoke_with_log(self, lines, *, log_mode="a", **flags):
+        child = subprocess.Popen(["sleep", "0.4"])
+        errors = []
+        def finish():
+            child.wait()
+            try:
+                path = self.state / "codex.log"
+                if log_mode == "rotate":
+                    replacement = self.state / "codex.log.next"
+                    replacement.write_text("".join(lines()))
+                    replacement.replace(path)
+                else:
+                    with path.open(log_mode) as stream:
+                        stream.write("".join(lines()))
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=finish)
+        thread.start()
+        try:
+            row = self.invoke(pid=child.pid, **flags)
+        finally:
+            child.wait()
+            thread.join()
+        self.assertFalse(errors, errors)
+        return row
 
     def test_policy_defaults_and_invalid_values(self):
         self.policy.write_text("")
@@ -204,11 +230,11 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
             self.assertIsNone(jev.load_template("difficulty"))
 
     def test_ok_observation_privacy_and_request(self):
-        self.set_log(self.codex_line(seconds=-10), self.codex_line(work=self.base / "elsewhere"),
-                     self.codex_line(rc=1), self.codex_line("gpt-5.6-sol@xhigh+fast-mode", fallback="gpt-6-astra"))
         child = subprocess.Popen(["sleep", "0.4"])
         def finish():
             child.wait()
+            self.set_log(self.codex_line(seconds=-10), self.codex_line(work=self.base / "elsewhere"),
+                         self.codex_line(rc=1), self.codex_line("gpt-5.6-sol@xhigh+fast-mode", fallback="gpt-6-astra"))
             (self.task / ".codex-session").write_text(f"implement={TID}|gpt-5.6-sol|xhigh\n")
         thread = threading.Thread(target=finish)
         thread.start()
@@ -232,22 +258,25 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
         self.assertEqual(self.log.stat().st_mode & 0o777, 0o600)
 
     def test_observation_variants(self):
-        cases = [([], "none"), ([self.codex_line()] * 3, "ambiguous"),
-                 ([self.codex_line()] * 2, "ambiguous"),
-                 ([self.codex_line(rc=1), self.codex_line("gpt-5.6-sol@xhigh", fallback="gpt-6-astra")], "exact")]
-        for lines, expected in cases:
-            with self.subTest(expected=expected, n=len(lines)):
+        cases = [(lambda: [], "none", 0), (lambda: [self.codex_line()] * 3, "ambiguous", 3),
+                 (lambda: [self.codex_line()] * 2, "ambiguous", 2),
+                 (lambda: [self.codex_line(rc=1), self.codex_line("gpt-5.6-sol@xhigh", fallback="gpt-6-astra")], "exact", 2)]
+        for lines, expected, attempts in cases:
+            with self.subTest(expected=expected, n=attempts):
                 self.reset_logs()
-                self.set_log(*lines)
                 start = time.monotonic()
-                r = self.invoke()
+                r = self.invoke_with_log(lines)
                 self.assertLess(time.monotonic() - start, 1)
-                self.assertEqual((r["observation"], r["attempts"]), (expected, len(lines)))
-                if not lines:
+                self.assertEqual((r["observation"], r["attempts"]), (expected, attempts))
+                if not attempts:
                     self.assertIsNone(r["final_model"])
         self.reset_logs()
         with patch.object(jev, "shadow_session", side_effect=[None, f"{TID}|gpt-5.6-luna|medium"]):
-            self.assertEqual(self.invoke()["observation"], "ambiguous")
+            self.assertEqual(self.invoke_with_log(lambda: [self.codex_line()])["observation"], "ambiguous")
+        self.reset_logs()
+        start = time.monotonic()
+        self.assertEqual(self.invoke()["observation"], "none")
+        self.assertLess(time.monotonic() - start, 1)
         self.reset_logs()
         child = subprocess.Popen(["sleep", "3"])
         try:
@@ -259,6 +288,37 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
         finally:
             child.terminate()
             child.wait()
+
+    def test_preexisting_same_second_line_is_not_observed(self):
+        t0 = time.time()
+        self.set_log(self.codex_line("gpt-5.6-luna@medium", rc=7, when=t0))
+        row = self.invoke(t0=t0)
+        self.assertEqual(row["observation"], "none")
+        self.assertEqual(row["attempts"], 0)
+        for field in ("final_model", "final_effort", "final_fast_mode", "final_fallback_from", "codex_exit"):
+            self.assertIsNone(row[field], field)
+
+    def test_only_lines_appended_after_worker_start_are_observed(self):
+        t0 = time.time()
+        self.set_log(self.codex_line("gpt-5.6-luna@medium", rc=7, when=t0))
+        row = self.invoke_with_log(lambda: [self.codex_line("gpt-5.6-sol@high", rc=0, when=t0)], t0=t0)
+        self.assertEqual((row["observation"], row["attempts"]), ("exact", 1))
+        self.assertEqual((row["final_model"], row["final_effort"], row["codex_exit"]),
+                         ("gpt-5.6-sol", "high", 0))
+
+    def test_log_shrink_marks_new_observations_ambiguous(self):
+        for mode in ("w", "rotate"):
+            for new_line in (False, True):
+                with self.subTest(mode=mode, new_line=new_line):
+                    self.reset_logs()
+                    t0 = time.time()
+                    self.set_log(*([self.codex_line(when=t0)] * 3))
+                    row = self.invoke_with_log(
+                        lambda: [self.codex_line("gpt-5.6-sol@high", when=t0)] if new_line else [],
+                        log_mode=mode, t0=t0)
+                    self.assertEqual(row["observation"], "ambiguous" if new_line else "none")
+                    self.assertEqual(row["attempts"], 1 if new_line else 0)
+                    self.assertEqual(row["final_model"], "gpt-5.6-sol" if new_line else None)
 
     def test_brief_boundary_and_read_audit(self):
         self.brief.unlink()
@@ -346,15 +406,13 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
             self.assertEqual(self.invoke()["status"], "unavailable:no key")
 
     def test_transport_failure_matrix_still_observes(self):
-        self.set_log(self.codex_line())
         for mode, reason in [("401", "auth (HTTP 401)"), ("429", "rate limit (HTTP 429)"),
                 ("529", "overloaded (HTTP 529)"), ("malformed", "malformed response"),
                 ("schema", "schema"), ("network", "network"), ("slow", "timeout")]:
             with self.subTest(mode=mode):
                 self.reset_logs()
                 self.server.mode = mode
-                self.set_log(self.codex_line())
-                r = self.invoke()
+                r = self.invoke_with_log(lambda: [self.codex_line()])
                 self.assertEqual(r["status"], "unavailable:" + reason)
                 self.assertIsNone(r["difficulty"])
                 self.assertEqual(r["suggested_reason"], "no-answer")
@@ -456,8 +514,7 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
                 pair = slug + "@high"
                 self.write_policy(JEV_SHADOW_MAP_ROUTINE=pair)
                 t0 = time.time()
-                self.set_log(self.codex_line(pair))
-                row = self.invoke(initial=pair, t0=t0)
+                row = self.invoke_with_log(lambda: [self.codex_line(pair)], initial=pair, t0=t0)
                 for field in ("initial_model", "suggested_model", "final_model"):
                     self.assertEqual(row[field], slug if length == 64 else None, field)
                 self.assertEqual(row["suggested_reason"], "mapped" if length == 64 else "unmapped")
@@ -488,7 +545,7 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
         lines = (self.state / "guard.log").read_text().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn("JEV: shadow", lines[0])
-        self.assertTrue(lines[0].endswith("— ok"))
+        self.assertTrue(lines[0].endswith("— ok (log write failed)"))
         self.reset_logs()
         self.write_policy()
         self.log.touch(mode=0o644)
@@ -630,7 +687,7 @@ class SubprocessShadowTests(ShadowFixture, unittest.TestCase):
                             lines = (self.state / "guard.log").read_text().splitlines()
                             self.assertEqual(len(lines), 1)
                             self.assertIn("JEV: shadow", lines[0])
-                            self.assertTrue(lines[0].endswith("— unavailable:no key"))
+                            self.assertTrue(lines[0].endswith("— unavailable:no key (log write failed)"))
                         else:
                             self.assertEqual(self.record()["status"], "unavailable:no key")
                     finally:
