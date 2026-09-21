@@ -84,31 +84,38 @@ def acceptance_items(brief):
 
 
 def amendment_sections(plan):
-    """Return audit and process sections; process headings override their subtree."""
-    stack, sections, current, current_kind = [], [], [], None
+    """Classify each amendment heading's own body, ending at the next heading."""
+    sections, current, kind = [], [], None
     for number, line in enumerate(strip_fences(plan).split("\n"), 1):
         heading = HEADING.match(line)
         if heading:
-            depth, title = len(heading.group(1)), heading.group(2)
-            while stack and stack[-1][0] >= depth:
-                stack.pop()
-            inherited = stack[-1][1] if stack else None
-            kind = inherited
-            if PROCESS.search(title):
-                kind = "process"
-            elif re.search("amendment", title, re.I) and inherited != "process":
-                kind = "audit"
-            stack.append((depth, kind))
-        kind = stack[-1][1] if stack else None
-        if kind != current_kind:
             if current:
-                sections.append((current_kind, current))
-            current, current_kind = [], kind
+                sections.append((kind, current))
+            current, kind = [], None
+            title = heading.group(2)
+            if re.search("amendment", title, re.I):
+                kind = "process" if PROCESS.search(title) else "audit"
         if kind is not None:
             current.append((number, line))
     if current:
-        sections.append((current_kind, current))
+        sections.append((kind, current))
     return sections
+
+
+def amendment_reasons(lines):
+    """Use list items alone, or a single heading-and-prose reason without a list."""
+    body = lines[1:]
+    first_item = next((index for index, (_, text) in enumerate(body) if ITEM.match(text)), None)
+    if first_item is not None:
+        candidates = split_items(body[first_item:])
+    elif any(character.isalnum() for _, text in body for character in text):
+        title = HEADING.match(lines[0][1]).group(2)
+        text = " ".join([title, *(text.strip() for _, text in body if text.strip())])
+        candidates = [(lines[0][0], text)]
+    else:
+        candidates = []
+    return [(number, text.strip()) for number, text in candidates
+            if any(character.isalnum() for character in text)]
 
 
 def root_slug(root):
@@ -124,12 +131,13 @@ def task_record(root, task):
     record_id = f"{root_slug(root)}/{task.name}"
     reasons, audit_lines = [], []
 
-    def add_reasons(lines, source, path, category_hint=None):
-        for number, text in split_items(lines):
+    def add_reasons(items, source, path):
+        for number, text in items:
+            text = text.strip()
+            if not any(character.isalnum() for character in text):
+                continue
             entry = {"reason_id": f"{record_id}#r{len(reasons) + 1:02d}", "text": text,
                      "source": source, "source_path": str(path), "source_line": number}
-            if category_hint:
-                entry["category_hint"] = category_hint
             reasons.append(entry)
 
     if verdict in ("amended", "defective") and reason:
@@ -138,8 +146,7 @@ def task_record(root, task):
         for kind, lines in amendment_sections(plan):
             if kind == "audit":
                 audit_lines.extend(lines)
-            # Process reasons remain traceable but cannot label a brief defect.
-            add_reasons(lines, "plan", plan_path, "process" if kind == "process" else None)
+                add_reasons(amendment_reasons(lines), "plan", plan_path)
     events = risk_events(plan, plan_path) + risk_events(summary, summary_path)
     return {"id": record_id, "root": str(root), "task": task.name,
             "brief_path": str(brief_path), "brief_text": brief,

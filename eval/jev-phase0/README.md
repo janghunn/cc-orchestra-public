@@ -42,15 +42,23 @@ Have Codex propose labels from the private worklist and have the lead label it
 independently. Each private proposal/adjudication JSONL row is:
 
 ```json
-{"reason_id":"example/task#r01","category":"other","evidence_span":"exact substring of the reason"}
+{"reason_id":"example/task#r01","reason_sha256":"copy the hash from the worklist","category":"other","evidence_span":"exact substring of the reason"}
 ```
 
 Allowed categories are `criterion-unverifiable`, `repo-fact-mismatch`,
 `scope-overlap`, `process`, `other`, and `ambiguous`. Evidence is a verbatim span,
 without adding quotation characters that are absent from the source. The two
-sets must cover all reasons. Process-section worklist entries carry a
-`category_hint` and must remain `process` or `ambiguous`. Disagreements retain
-both labels and become ambiguous. Final labels preserve source path and line.
+sets must cover all reasons. Only headings containing `amendment` select plan
+sections; each section ends at the next heading. A section's own heading decides
+whether it is an audit amendment or a mid-task/process amendment. Structural
+ancestor headings never affect that decision. Process amendment sections are
+excluded from reasons. Enumerated sections emit their items without a separate
+heading or preamble reason; prose-only sections emit one reason. Disagreements
+retain both labels and become ambiguous. Final labels preserve source path and line.
+Copy each worklist entry's `reason_sha256` unchanged into both independent label
+files. Ingestion and scoring compare it with the SHA-256 hash of the current
+reason text. Missing hashes, changed reasons, and labels for absent reason IDs
+abort scoring; regenerate and review labels after rebuilding a changed dataset.
 
 ```bash
 EVAL_DIR="${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/jev-eval"

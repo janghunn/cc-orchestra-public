@@ -88,7 +88,8 @@ def fixture(positive=10, clean=10):
             reason = {"reason_id": f"f/{i}#r01", "text": "An unclear criterion.",
                       "source_path": str(TMP / "fixture-summary.md"), "source_line": 2}
             record["reasons"] = [reason]
-            final.append({"reason_id": reason["reason_id"], "category": "criterion-unverifiable"})
+            final.append({"reason_id": reason["reason_id"], "category": "criterion-unverifiable",
+                          "reason_sha256": common.sha256_text(reason["text"])})
         records.append(record)
         responses.append(response(record, 0.8 if is_positive else 0.1))
     return records, final, responses
@@ -176,9 +177,10 @@ def parser_tests():
     record = next(r for r in records if r["task"] == "wrapped")
     assert record["verdict"] == "amended" and record["verdict_line_no"] == 1
     assert record["verdict_reason"] == "(first reason continues here and ends here)"
-    assert "new instruction" not in record["plan_amendment_text"]
-    process = [r for r in record["reasons"] if r.get("category_hint") == "process"]
-    assert process and any("More new instructions" in r["text"] for r in process)
+    assert "A new instruction." not in record["plan_amendment_text"]
+    assert not any("A new instruction." in r["text"] for r in record["reasons"])
+    assert any("More new instructions." in r["text"] for r in record["reasons"])
+    assert [kind for kind, _ in builder.amendment_sections(plan)] == ["audit", "process", "audit"]
     assert stats["per_verdict"]["unknown"] == 2
     for i, reason in enumerate(record["reasons"], 1):
         assert reason["reason_id"] == f"parsing/wrapped#r{i:02d}"
@@ -195,9 +197,11 @@ def parser_tests():
     # Independent labels retain disagreements and exact source locations.
     reasons = [{"reason_id": f"r{i}", "text": "quoted evidence", "source_path": str(directory / "summary.md"),
                 "source_line": i + 1} for i in range(3)]
-    a = [{"reason_id": f"r{i}", "category": category, "evidence_span": "quoted"}
+    a = [{"reason_id": f"r{i}", "category": category, "evidence_span": "quoted",
+          "reason_sha256": common.sha256_text(reasons[i]["text"])}
          for i, category in enumerate(("other", "other", "process"))]
-    b = [{"reason_id": f"r{i}", "category": category, "evidence_span": "evidence"}
+    b = [{"reason_id": f"r{i}", "category": category, "evidence_span": "evidence",
+          "reason_sha256": common.sha256_text(reasons[i]["text"])}
          for i, category in enumerate(("other", "process", "process"))]
     final = labels.reconcile(reasons, a, b)
     assert [r["category"] for r in final] == ["other", "ambiguous", "process"]
@@ -210,10 +214,14 @@ def parser_tests():
     common.write_jsonl(TMP / "b.jsonl", b)
     result = cli("labels.py", "--emit-worklist", "--dataset", records_path, "--out", TMP / "worklist.jsonl")
     assert result.returncode == 0 and len(common.read_jsonl(TMP / "worklist.jsonl")) == 3
+    assert all(row["reason_sha256"] == common.sha256_text(row["text"])
+               for row in common.read_jsonl(TMP / "worklist.jsonl"))
     result = cli("labels.py", "--ingest", "--dataset", records_path,
                  "--proposal", TMP / "a.jsonl", "--adjudication", TMP / "b.jsonl",
                  "--out", TMP / "labels.jsonl", "--agreement-note", TMP / "agreement.md")
     assert result.returncode == 0 and common.read_jsonl(TMP / "labels.jsonl") == final
+    assert all(row["reason_sha256"] == row["labeler_a"]["reason_sha256"] ==
+               row["labeler_b"]["reason_sha256"] for row in final)
     a[0]["evidence_span"] = "absent span"
     try:
         labels.reconcile(reasons, a, b)
@@ -514,6 +522,109 @@ def root_config_tests():
                 f"private project name found in {path.name}"
 
 
+def amendment_extraction_tests():
+    root = TMP / "amendment-boundaries"
+    plan = ("# Plan (round 2)\n## Amendments\nThis preamble is not a separate reason.\n"
+            "1. First audit correction.\n2. Second audit correction.\n3. Third audit correction.\n"
+            "### Implementation details\n- Unrelated implementation work.\n"
+            "## Orchestrator notes\n- Unrelated operational instructions.\n"
+            "## Amendment (mid-task, round 3)\n- New instructions after the audit.\n")
+    directory = task(root, "enumerated", summary="BRIEF AUDIT: amended\n", plan=plan)
+    record = builder.task_record(root, directory)
+    assert [r["text"] for r in record["reasons"]] == [
+        "First audit correction.", "Second audit correction.", "Third audit correction."]
+    assert [r["source_line"] for r in record["reasons"]] == [4, 5, 6]
+    assert [kind for kind, _ in builder.amendment_sections(plan)] == ["audit", "process"]
+    for excluded in ("Unrelated implementation", "Unrelated operational", "New instructions"):
+        assert excluded not in record["plan_amendment_text"]
+    prose = "## Amendment: unclear acceptance\nThe acceptance statement has no observable outcome.\n"
+    directory = task(root, "prose", summary="BRIEF AUDIT: amended\n", plan=prose)
+    record = builder.task_record(root, directory)
+    assert len(record["reasons"]) == 1
+    assert record["reasons"][0]["text"] == (
+        "Amendment: unclear acceptance The acceptance statement has no observable outcome.")
+    assert record["reasons"][0]["source_line"] == 1
+    for own_heading in ("Amendment mid-task", "Amendment from orchestrator", "Amendment ruling",
+                        "Amendment course correction", "Amendment post-gate", "Amendment round 4"):
+        sections = builder.amendment_sections(f"# {own_heading}\n- Process change.\n")
+        assert [kind for kind, _ in sections] == ["process"]
+    nested = ("# Plan (orchestrator, round 2)\n## Amendment mid-task\n- Process change.\n"
+              "### Amendments\n- Independent audit correction.\n### Implementation\n- Not a reason.\n"
+              "## Amendments\n- Another audit correction.\n")
+    directory = task(root, "nested", summary="BRIEF AUDIT: amended\n", plan=nested)
+    record = builder.task_record(root, directory)
+    assert [r["text"] for r in record["reasons"]] == [
+        "Independent audit correction.", "Another audit correction."]
+    for empty in ("## Amendments\n", "## Amendments\n---\n...\n",
+                  "## Amendments\n1. ---\n2. !!!\n3. \n"):
+        directory = task(root, "empty", summary="BRIEF AUDIT: amended (---)\n", plan=empty)
+        assert builder.task_record(root, directory)["reasons"] == []
+
+
+def label_binding_tests():
+    records, _, responses = fixture()
+    sources = labels.worklist(records)
+    proposal = [{"reason_id": row["reason_id"], "reason_sha256": row["reason_sha256"],
+                 "category": "criterion-unverifiable", "evidence_span": row["text"]}
+                for row in sources]
+    final = labels.reconcile(sources, proposal, [dict(row) for row in proposal])
+    for row in responses:
+        row["mode"] = "live"  # Synthetic metadata only; no adapter is called.
+    assert score.render_report(records, final, responses, [], b=10).endswith("\npass\n")
+    reason = records[0]["reasons"][0]
+    original = reason["text"]
+    reason["text"] = "Changed reason text after labeling."
+    # Even a retained stale hash on the dataset must not override its actual text.
+    reason["reason_sha256"] = common.sha256_text(original)
+    with patch.object(score, "decide", side_effect=AssertionError("stale labels produced a verdict")):
+        try:
+            score.render_report(records, final, responses, [], b=10)
+        except ValueError as error:
+            assert "reason_sha256 mismatch" in str(error)
+        else:
+            raise AssertionError("changed reason text accepted stale labels")
+    dataset, label_file, response_file, output = [TMP / name for name in
+        ("binding-dataset.jsonl", "binding-labels.jsonl", "binding-responses.jsonl", "binding-report.md")]
+    for path, rows in ((dataset, records), (label_file, final), (response_file, responses)):
+        common.write_jsonl(path, rows)
+    result = cli("score.py", "--dataset", dataset, "--labels", label_file,
+                 "--responses", response_file, "--out", output)
+    assert result.returncode == 2 and "score.py: label reason_sha256 mismatch" in result.stderr
+    assert reason["text"] not in result.stderr and not result.stdout and not output.exists()
+    reason["text"] = original
+    for excluded in (False, True):
+        records[0]["verdict"] = "unknown" if excluded else "amended"
+        for problem, message in (("missing", "missing reason_sha256"),
+                                 ("mismatch", "reason_sha256 mismatch"),
+                                 ("orphan", "reason_id is absent from the current dataset")):
+            bad = [dict(row) for row in final]
+            if problem == "missing":
+                del bad[0]["reason_sha256"]
+            elif problem == "mismatch":
+                bad[0]["reason_sha256"] = "0" * 64
+            else:
+                bad[0]["reason_id"] = "absent/reason#r01"
+            try:
+                score.populations(records, bad, {})
+            except ValueError as error:
+                assert message in str(error)
+            else:
+                raise AssertionError("unbound label was silently accepted or skipped")
+    for labeler in (0, 1):
+        for missing in (False, True):
+            pair = [[dict(row) for row in proposal] for _ in range(2)]
+            if missing:
+                del pair[labeler][0]["reason_sha256"]
+            else:
+                pair[labeler][0]["reason_sha256"] = "0" * 64
+            try:
+                labels.reconcile(sources, *pair)
+            except ValueError as error:
+                assert "reason_sha256" in str(error)
+            else:
+                raise AssertionError("ingestion accepted an unbound proposal or adjudication")
+
+
 globals()[sys.argv[1] + "_tests"]()
 PY
 
@@ -547,5 +658,9 @@ python3 "$TMP/check.py" injection
 ok 'synthetic injection fixture validation and scan scoring path'
 python3 "$TMP/check.py" root_config
 ok 'explicit and environment root selection, missing-root guidance and private-name exclusion'
+python3 "$TMP/check.py" amendment_extraction
+ok 'own-heading amendment selection, exact list counts, prose fallback and empty-reason rejection'
+python3 "$TMP/check.py" label_binding
+ok 'reason hashes bind both labelers and abort stale, missing-hash or orphaned-label scoring'
 
 echo "PASS: $pass jev-eval test groups"

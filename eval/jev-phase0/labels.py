@@ -5,17 +5,37 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
-from common import assert_out_of_tree, read_jsonl, state_dir, write_jsonl
+from common import assert_out_of_tree, read_jsonl, sha256_text, state_dir, write_jsonl
 
 
 CATEGORIES = ("criterion-unverifiable", "repo-fact-mismatch", "scope-overlap", "process", "other")
 
 
+class LabelBindingError(ValueError):
+    """A label cannot be safely associated with the current dataset."""
+
+
+def validate_reason_binding(label, reason):
+    if not label.get("reason_sha256"):
+        raise LabelBindingError(
+            "label is missing reason_sha256; regenerate labels from the current worklist")
+    if label["reason_sha256"] != sha256_text(reason["text"]):
+        raise LabelBindingError(
+            "label reason_sha256 mismatch with current reason text; "
+            "regenerate labels from the current worklist")
+
+
 def worklist(records):
-    return [{key: reason[key] for key in
-             ("reason_id", "source_path", "source_line", "text", "category_hint") if key in reason}
-            for record in records if record["verdict"] in ("amended", "defective")
-            for reason in record.get("reasons", [])]
+    rows = []
+    for record in records:
+        if record["verdict"] not in ("amended", "defective"):
+            continue
+        for reason in record.get("reasons", []):
+            row = {key: reason[key] for key in
+                   ("reason_id", "source_path", "source_line", "text", "category_hint") if key in reason}
+            row["reason_sha256"] = sha256_text(reason["text"])
+            rows.append(row)
+    return rows
 
 
 def indexed(rows):
@@ -35,6 +55,7 @@ def reconcile(reasons, proposal, adjudication):
     final = []
     for reason_id, source in sources.items():
         for label in (a[reason_id], b[reason_id]):
+            validate_reason_binding(label, source)
             if label.get("category") not in (*CATEGORIES, "ambiguous"):
                 raise ValueError("invalid label category")
             span = label.get("evidence_span")
@@ -46,6 +67,7 @@ def reconcile(reasons, proposal, adjudication):
         agreed = left["category"] == right["category"]
         final.append({"reason_id": reason_id, "source_path": source["source_path"],
                       "source_line": source["source_line"],
+                      "reason_sha256": left["reason_sha256"],
                       "category": left["category"] if agreed else "ambiguous",
                       "evidence_span": left["evidence_span"] if agreed else None,
                       "labeler_a": left, "labeler_b": right, "agreed": agreed})
@@ -105,7 +127,7 @@ def main(argv=None):
     except (OSError, ValueError, KeyError, TypeError) as error:
         # JSON parser exceptions can contain input snippets; keep them private.
         from common import OutOfTreeError
-        message = str(error) if isinstance(error, OutOfTreeError) else "invalid label input or output"
+        message = str(error) if isinstance(error, (OutOfTreeError, LabelBindingError)) else "invalid label input or output"
         parser.exit(2, f"labels.py: {message}\n")
 
 

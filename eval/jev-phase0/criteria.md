@@ -44,11 +44,18 @@ into an enablement score. Any mock response forces the report title to
 The verdict comes only from a summary audit line. Unknown and defective verdicts
 are counted and excluded from the clean/amended scoring population. A category
 is positive when any reason has that category. Its negatives are clean briefs
-plus amended briefs with no reason in that category. Process amendment sections
-are labeled `process`; they cannot become criterion positives.
+plus amended briefs with no reason in that category. Only a section's own
+amendment heading selects and classifies its body, ending at the next heading.
+Mid-task/process amendment sections contribute no reasons. Enumerated amendment
+sections emit their items without a heading/preamble reason; prose-only sections
+emit one reason. Empty or punctuation-only reasons are discarded.
 
 Both independent label sets must cover the full reason worklist with verbatim
-evidence spans. Disagreement yields `ambiguous`, preserving both labels. An
+evidence spans and the worklist's `reason_sha256` content hash. Every supplied
+label must reference a current reason and match the SHA-256 of its exact text.
+Missing or mismatched hashes and labels for absent reason IDs abort scoring,
+even if the corresponding brief would otherwise be excluded. Disagreement
+yields `ambiguous`, preserving both labels. An
 amended brief with any ambiguous or missing reason label, or with no reasons,
 is excluded from every category denominator; these reason and brief counts are
 reported. Its audit verdict may still contribute to the separate context cell.

@@ -9,7 +9,7 @@ import random
 
 import baseline
 from common import OutOfTreeError, assert_out_of_tree, now_iso, read_jsonl, sha256_text, state_dir
-from labels import CATEGORIES
+from labels import CATEGORIES, LabelBindingError, validate_reason_binding
 
 
 MIN_POSITIVES = 10
@@ -113,8 +113,20 @@ def matched_prediction(indexed, task, record_id, text):
 
 
 def populations(records, labels, indexed):
+    current_reasons = {}
+    for record in records:
+        for reason in record.get("reasons", []):
+            if reason["reason_id"] in current_reasons:
+                raise ValueError("duplicate dataset reason id")
+            current_reasons[reason["reason_id"]] = reason
     by_reason = {}
     for label in labels:
+        reason_id = label.get("reason_id")
+        if reason_id not in current_reasons:
+            raise LabelBindingError(
+                "label reason_id is absent from the current dataset; "
+                "regenerate labels from the current worklist")
+        validate_reason_binding(label, current_reasons[reason_id])
         if label["reason_id"] in by_reason or label["category"] not in (*CATEGORIES, "ambiguous"):
             raise ValueError("duplicate reason label or invalid category")
         by_reason[label["reason_id"]] = label["category"]
@@ -302,7 +314,7 @@ def main(argv=None):
         target.write_text(report, encoding="utf-8")
         print(report, end="")
     except (OSError, ValueError, KeyError, TypeError) as error:
-        message = str(error) if isinstance(error, OutOfTreeError) else "invalid scoring input or output"
+        message = str(error) if isinstance(error, (OutOfTreeError, LabelBindingError)) else "invalid scoring input or output"
         parser.exit(2, f"score.py: {message}\n")
 
 
