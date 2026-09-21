@@ -10,6 +10,7 @@ import re
 import socket
 import stat
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -234,8 +235,12 @@ def trim_state(command, state, cap):
 
 def prepare(command, sources, policy, template):
     items, state, declared, reason = [], None, None, "empty"
-    for path in sources:
+    for position, path in enumerate(sources, 1):
         source = display_name("<stdin>" if command == "scan" and path == "-" else path)
+        if command == "scan" and has_secret_shape(source):
+            emit(f"JEV: skipped — secret-shaped literal (argument {position}: source name)")
+            reason = "secret-shaped"
+            continue
         try:
             if command == "scan" and path == "-":
                 raw = sys.stdin.buffer.read().decode("utf-8", errors="replace") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
@@ -325,55 +330,69 @@ def valid_response(payload, questions):
     return True
 
 
+def request_attempt(request, timeout, questions):
+    start = time.monotonic()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
+            body = bytearray()
+            while True:
+                remaining = timeout - (time.monotonic() - start)
+                if remaining <= 0:
+                    raise TimeoutError
+                try:
+                    response.fp.raw._sock.settimeout(remaining)
+                except (AttributeError, OSError):
+                    pass
+                # read1 returns after one buffered/socket read, including a slow drip.
+                part = response.read1(65536)
+                if time.monotonic() - start > timeout:
+                    raise TimeoutError
+                body.extend(part)
+                if len(body) > RESPONSE_MAX_BYTES:
+                    return "malformed response", None
+                if not part or response.fp is None:
+                    break
+        try:
+            payload = json.loads(body)
+        except (ValueError, UnicodeError, RecursionError):
+            return "malformed response", None
+        return ("ok", payload) if valid_response(payload, questions) else ("schema", None)
+    except urllib.error.HTTPError as error:
+        code = error.code
+        error.close()
+        kind = {401: "auth", 403: "auth", 422: "validation", 429: "rate limit", 529: "overloaded"}.get(code)
+        kind = "redirect" if 300 <= code < 400 else kind
+        outcome = f"{kind} (HTTP {code})" if kind else f"http {code}"
+    except (TimeoutError, socket.timeout):
+        outcome = "timeout"
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, UnicodeError) as error:
+        outcome = "timeout" if isinstance(getattr(error, "reason", None), (TimeoutError, socket.timeout)) else "network"
+    return outcome, None
+
+
+def run_attempt(request, timeout, questions, result):
+    try:
+        result.append(request_attempt(request, timeout, questions))
+    except Exception:
+        result.append(("internal error", None))
+
+
 def call_jev(policy, key, state, questions):
     request = urllib.request.Request(policy["ENDPOINT"],
         data=json.dumps({"state": state, "model": policy.model, "questions": questions}, ensure_ascii=False).encode(),
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
                  "Accept": "application/json", "User-Agent": "cc-orchestra-orch-jev"}, method="POST")
-    opener = urllib.request.build_opener(NoRedirect())
     for attempt in range(2):
         policy.attempts = attempt + 1
-        start, delay, retry = time.monotonic(), 0.5, False
-        try:
-            with opener.open(request, timeout=policy.timeout) as response:
-                body = bytearray()
-                while True:
-                    remaining = policy.timeout - (time.monotonic() - start)
-                    if remaining <= 0:
-                        raise TimeoutError
-                    try:
-                        response.fp.raw._sock.settimeout(remaining)
-                    except (AttributeError, OSError):
-                        pass
-                    # read1 returns after one buffered/socket read, including a slow drip.
-                    part = response.read1(65536)
-                    if time.monotonic() - start > policy.timeout:
-                        raise TimeoutError
-                    body.extend(part)
-                    if len(body) > RESPONSE_MAX_BYTES:
-                        return "malformed response", None
-                    if not part or response.fp is None:
-                        break
-            try:
-                payload = json.loads(body)
-            except (ValueError, UnicodeError, RecursionError):
-                return "malformed response", None
-            return ("ok", payload) if valid_response(payload, questions) else ("schema", None)
-        except urllib.error.HTTPError as error:
-            code = error.code
-            error.close()
-            kind = {401: "auth", 403: "auth", 422: "validation", 429: "rate limit", 529: "overloaded"}.get(code)
-            kind = "redirect" if 300 <= code < 400 else kind
-            outcome = f"{kind} (HTTP {code})" if kind else f"http {code}"
-            retry = code in (429, 529)
-        except (TimeoutError, socket.timeout):
-            outcome, retry, delay = "timeout", True, 0
-        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, UnicodeError) as error:
-            timeout = isinstance(getattr(error, "reason", None), (TimeoutError, socket.timeout))
-            outcome, retry, delay = ("timeout", True, 0) if timeout else ("network", True, 0.5)
-        if not retry or attempt == 1:
-            return outcome, None
-        time.sleep(delay)
+        result = []
+        worker = threading.Thread(target=run_attempt, args=(request, policy.timeout, questions, result), daemon=True)
+        worker.start()
+        worker.join(policy.timeout)
+        outcome, payload = ("timeout", None) if worker.is_alive() else result[0]
+        if outcome not in ("timeout", "network", "rate limit (HTTP 429)", "overloaded (HTTP 529)") or attempt == 1:
+            return outcome, payload
+        time.sleep(0 if outcome == "timeout" else 0.5)
 
 
 def journal(record):

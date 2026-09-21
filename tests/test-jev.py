@@ -58,6 +58,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if mode == "sleep":
                 time.sleep(2)
+            if mode == "drip-headers":
+                self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+                self.wfile.flush()
+                for _ in range(14):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.3)
+                return
             if mode == "drip":
                 self.send_response(200)
                 self.end_headers()
@@ -202,7 +210,8 @@ class JevTests(unittest.TestCase):
         cases = {"401": "auth (HTTP 401)", "403": "auth (HTTP 403)", "422": "validation (HTTP 422)",
                  "429": "rate limit (HTTP 429)", "529": "overloaded (HTTP 529)",
                  "500": "http 500", "malformed": "malformed response", "oversize": "malformed response",
-                 "redirect": "redirect (HTTP 302)", "sleep": "timeout", "drip": "timeout"}
+                 "redirect": "redirect (HTTP 302)", "sleep": "timeout", "drip": "timeout",
+                 "drip-headers": "timeout"}
         cases.update({"schema-" + name: "schema" for name in
                       ("noanswers", "nomodel", "wrongtype", "range", "bool", "nan", "missing")})
         self.write_policy(JEV_TIMEOUT_SECONDS=1)
@@ -213,10 +222,48 @@ class JevTests(unittest.TestCase):
                     self.server.requests.clear()
                     result = self.invoke(command, self.brief)
                     self.assertEqual(result.stdout, "JEV: unavailable — " + outcome + "\n")
-                    self.assertEqual(len(self.server.requests), 2 if mode in ("429", "529", "sleep", "drip") else 1)
-                    if mode in ("sleep", "drip"):
+                    self.assertEqual(len(self.server.requests), 2 if mode in ("429", "529", "sleep", "drip", "drip-headers") else 1)
+                    if mode in ("sleep", "drip", "drip-headers"):
                         self.assertLess(result.elapsed, 3.5)
         self.assertEqual(target.requests, [])
+
+    def test_t2_proxy_ignored(self):
+        proxy = self.new_server()
+        env = dict(self.env)
+        for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+            env[name] = proxy.url
+        env.pop("no_proxy", None)
+        env.pop("NO_PROXY", None)
+        for command in ("lint-brief", "risk", "scan"):
+            with self.subTest(command=command):
+                self.server.requests.clear()
+                self.assertNotIn("unavailable", self.invoke(command, self.brief, env=env).stdout)
+                self.assertEqual(len(self.server.requests), 1)
+                self.assertEqual(proxy.requests, [])
+
+    def test_t2_attempt_deadline(self):
+        self.write_policy(JEV_TIMEOUT_SECONDS=0.05)
+        release, workers = threading.Event(), []
+        def stalled_open(*args, **kwargs):
+            workers.append(threading.current_thread())
+            release.wait(2)
+            raise OSError("worker released")
+        try:
+            with patch.dict(os.environ, self.env, clear=True), \
+                 patch.object(jev.urllib.request, "build_opener") as build_opener:
+                build_opener.return_value.open.side_effect = stalled_open
+                policy = jev.Policy()
+                start = time.monotonic()
+                outcome, payload = jev.call_jev(policy, self.sentinel, "text", {"q1": {"type": "noul"}})
+                self.assertLess(time.monotonic() - start, 0.5)
+                self.assertEqual((outcome, payload), ("timeout", None))
+                self.assertEqual(policy.attempts, 2)
+                self.assertEqual(len(workers), 2)
+                self.assertTrue(all(worker.daemon and worker.is_alive() for worker in workers))
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(0.5)
 
     def test_t2_preconditions(self):
         bad_templates = self.base / "bad-templates"
@@ -248,7 +295,8 @@ class JevTests(unittest.TestCase):
     def test_t2_internal_errors(self):
         cases = ((["risk", str(self.brief)], patch.object(jev, "call_jev", side_effect=RuntimeError("boom"))),
                  (["scan", "-"], patch.object(sys, "stdin", None)),
-                 (["risk", str(self.brief)], patch.object(jev, "Policy", side_effect=RuntimeError("boom"))))
+                 (["risk", str(self.brief)], patch.object(jev, "Policy", side_effect=RuntimeError("boom"))),
+                 (["risk", str(self.brief)], patch.object(jev.urllib.request, "build_opener", side_effect=RuntimeError("boom"))))
         for args, failure in cases:
             with self.subTest(args=args):
                 output, errors = io.StringIO(), io.StringIO()
@@ -333,6 +381,37 @@ class JevTests(unittest.TestCase):
         self.assertEqual(len(self.server.requests), 3)
         for command in ("lint-brief", "risk", "scan"):
             self.assertIn("JEV: skipped — cannot read", self.invoke(command, self.fixtures / "missing").stdout)
+
+    def test_t4_source_name_secrets(self):
+        global AUDIT_PATHS
+        identifier = "AKIA" + "0123456789ABCDEF"
+        secret = self.fixture(identifier + ".md", "Safe content.\n")
+        safe = self.fixture("safe.md", "Other safe content.\n")
+        output = self.invoke("scan", secret).stdout
+        self.assertEqual(output, "JEV: skipped — secret-shaped literal (argument 1: source name)\n")
+        self.assertNotIn(identifier, output)
+        self.assertEqual(self.server.requests, [])
+        output = self.invoke("scan", safe, secret).stdout
+        self.assertIn("JEV: skipped — secret-shaped literal (argument 2: source name)\n", output)
+        self.assertNotIn(identifier, output)
+        self.assertEqual(len(self.server.requests), 1)
+        chunks = self.server.requests[0]["body"]["state"]["chunks"]
+        self.assertEqual({chunk["source"] for chunk in chunks}, {str(safe)})
+        self.assertNotIn(identifier, json.dumps(self.server.requests))
+        output, errors, opened = io.StringIO(), io.StringIO(), []
+        try:
+            AUDIT_PATHS = opened
+            with patch.dict(os.environ, self.env, clear=True), \
+                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                self.assertEqual(jev.main(["scan", str(secret)]), 0)
+        finally:
+            AUDIT_PATHS = None
+        self.assertNotIn(secret, opened)
+        self.assertEqual(output.getvalue(), "JEV: skipped — secret-shaped literal (argument 1: source name)\n")
+        self.assertEqual(errors.getvalue(), "")
+        log = (self.state / "jev.log").read_text()
+        self.assertNotIn(identifier, log)
+        self.assert_no_leak(output.getvalue(), errors.getvalue(), log)
 
     def test_t4_truncation_and_caps(self):
         self.write_policy(JEV_MAX_STATE_BYTES=5000)

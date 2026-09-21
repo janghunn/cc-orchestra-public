@@ -277,6 +277,7 @@ no key, template, auth, validation, rate limit, overloaded, redirect, 기타 HTT
 timeout, network, malformed response, schema입니다. 재시도 대상은 timeout 두 번과
 0.5 s backoff 이내로 처리합니다. 기본 timeout 6 s이면 총 약 12.5 s이며,
 재시도 대상이 아닌 오류는 즉시 반환합니다.
+proxy 환경 변수는 무시하고 직접 연결하므로 proxy가 필수인 환경에서는 network 오류로 fail-open 처리될 수 있습니다.
 
 모든 출력 줄은 `JEV:`로 시작합니다. `risk`는 confidence가 충분할 때 더 높은 등급만
 제안하며 등급 선언을 만들지 않습니다. Jev 출력을 `RISK:` 줄에 붙여 넣지 마세요.

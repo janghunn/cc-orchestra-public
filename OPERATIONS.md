@@ -230,6 +230,7 @@ All advisory outcomes exit 0; invalid command arguments exit 2. Failures print
 template, auth, validation, rate limit, overloaded, redirect, other HTTP status, timeout, network,
 malformed response, and schema. Retriable failures use at most two timeout periods plus 0.5 s
 backoff (default timeout 6 s, roughly 12.5 s total); other failures return immediately.
+Proxy environment variables are ignored, so connections are direct and a required proxy can cause a fail-open network error.
 
 Every output line starts with `JEV:`. `risk` only suggests a higher tier with sufficient
 confidence; its lines never form a tier declaration. Do not paste Jev output into a `RISK:` line.
