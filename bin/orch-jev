@@ -42,7 +42,7 @@ def emit(line):
 
 
 def display_name(name):
-    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]|RISK:", "?", str(name))[:120]
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]|RISK:|RISK AMENDED", "?", str(name))[:120]
 
 
 def state_dir():
@@ -280,6 +280,8 @@ def prepare(command, sources, policy, template):
             elif not parts:
                 emit(f"JEV: scan — {source}: empty")
             else:
+                for part in parts:
+                    part["source_index"] = position
                 items.extend(parts)
     if command == "scan":
         if not items:
@@ -427,10 +429,11 @@ def results(command, state, answers, declared, policy):
         sources = {}
         for chunk in state["chunks"]:
             value, source = answers[chunk["id"]]["noul"], chunk["source"]
-            sources[source] = max(value, sources.get(source, 0))
+            position = chunk["source_index"]
+            sources[position] = (source, max(value, sources.get(position, (source, 0))[1]))
             if value >= policy["SCAN_THRESHOLD"]:
                 emit(f"JEV: scan — {source}:{chunk['lines']} possible agent-directed instruction (p={value:.2f})")
-        for source, value in sources.items():
+        for source, value in sources.values():
             if value < policy["SCAN_THRESHOLD"]:
                 emit(f"JEV: scan — {source}: no chunk over threshold (max p={value:.2f})")
 
@@ -448,14 +451,12 @@ def main(argv) -> int:
         policy = Policy()
         record["model"] = policy.model
         if help_requested:
-            record["outcome"] = "skipped:help"
             for line in (USAGE, "key sources: TYPESAFE_API_KEY or <state>/jev.key (mode 600)",
                          "lines: lint, risk, scan, note, warning, skipped, unavailable",
                          "advisory only; exit 0 on every outcome except usage errors", "not used in Codex-only mode"):
                 emit("JEV: " + line)
             return 0
         if not valid_args:
-            record["outcome"] = "skipped:usage"
             print(USAGE, file=sys.stderr)
             return 2
         unavailable = ("disabled" if policy["ENABLED"] != "1" else
@@ -493,7 +494,7 @@ def main(argv) -> int:
         emit("JEV: unavailable — internal error")
         return 0
     finally:
-        if policy is None or policy["JOURNAL"] != "0":
+        if valid_args and (policy is None or policy["JOURNAL"] != "0"):
             journal(record)
 
 

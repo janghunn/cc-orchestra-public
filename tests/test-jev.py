@@ -204,6 +204,23 @@ class JevTests(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertEqual(len(result.stderr.splitlines()), 1)
 
+    def test_t1_help_usage_leave_state_absent(self):
+        state = self.home / "fresh-state"
+        env = dict(self.env, CC_ORCH_STATE_DIR=str(state))
+        env.pop("TYPESAFE_API_KEY")
+        self.assertFalse(state.exists())
+        for command, status in (("--help", 0), ("-h", 0), ("help", 0), ("unknown", 2), ("risk", 2)):
+            with self.subTest(command=command):
+                self.invoke(command, env=env, expected=status)
+                self.assertFalse(state.exists())
+        output = self.invoke("risk", self.brief, env=env).stdout
+        self.assertEqual(output, "JEV: unavailable — no key\n")
+        records = [json.loads(line) for line in (state / "jev.log").read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["subcommand"], "risk")
+        self.assertEqual(records[0]["outcome"], "unavailable:no key")
+        self.assertEqual(self.server.requests, [])
+
     def test_t2_fail_open_matrix(self):
         target = self.new_server()
         self.server.redirect_url = target.url
@@ -575,6 +592,42 @@ class JevTests(unittest.TestCase):
         self.assertIn("cannot read", output)
         self.assertEqual(len(self.server.requests), 1)
         self.assertEqual(len(self.server.requests[-1]["body"]["state"]["chunks"]), 2)
+
+    def test_t7_scan_declaration_names(self):
+        self.server.values = {"c1": {"noul": 0.1}}
+        for name, sanitized in (("RISK AMENDED notes.md", "? notes.md"),
+                                ("RISK: RISK AMENDED notes.md", "? ? notes.md")):
+            with self.subTest(name=name):
+                path = self.fixture(name, "Safe content.\n")
+                display = str(self.fixtures / sanitized)[:120]
+                output = self.invoke("scan", path).stdout
+                self.assertEqual(output, f"JEV: scan — {display}: no chunk over threshold (max p=0.10)\n")
+                self.assertNotIn("output guard", output)
+                record = json.loads((self.state / "jev.log").read_text().splitlines()[-1])
+                self.assertEqual(record["outcome"], "ok")
+                path.unlink()
+                output = self.invoke("scan", path).stdout
+                self.assertEqual(output, f"JEV: skipped — cannot read {display}\n")
+                self.assertNotIn("output guard", output)
+
+    def test_t7_scan_colliding_names(self):
+        prefix = "x" * 130
+        first = self.fixture(prefix + "-first.md", "First safe content.\n")
+        second = self.fixture(prefix + "-second.md", "Second safe content.\n")
+        display = str(first)[:120]
+        self.assertEqual(display, str(second)[:120])
+        self.server.values = {"c1": {"noul": 0.95}, "c2": {"noul": 0.1}}
+        output = self.invoke("scan", first, second).stdout
+        self.assertEqual(output, f"JEV: scan — {display}:1-1 possible agent-directed instruction (p=0.95)\n"
+                                f"JEV: scan — {display}: no chunk over threshold (max p=0.10)\n")
+        self.assertEqual(len(self.server.requests), 1)
+        self.write_policy(JEV_SCAN_CHUNK_BYTES=4)
+        first.write_text("one\ntwo\n")
+        second.write_text("six\nten\n")
+        self.server.values = {f"c{n}": {"noul": n / 10} for n in range(1, 5)}
+        output = self.invoke("scan", first, second).stdout
+        self.assertEqual(output, f"JEV: scan — {display}: no chunk over threshold (max p=0.20)\n"
+                                f"JEV: scan — {display}: no chunk over threshold (max p=0.40)\n")
 
     def test_t7_unicode_chunks(self):
         self.write_policy(JEV_SCAN_CHUNK_BYTES=7)
