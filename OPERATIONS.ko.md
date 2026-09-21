@@ -267,6 +267,9 @@ export TYPESAFE_API_KEY=<your-key>
 입력은 지정한 파일 또는 stdin만 읽으며, 설정·질문 template·키 파일도 별도로 읽습니다.
 자르기 전에 각 원본 전체에서 secret 형태의 literal을 검사하고, 발견된 source 전체를
 제외합니다. 크기와 항목/chunk 상한을 적용한 경우 명시적인 note를 출력합니다.
+
+egress guard의 알려진 한계(수정하지 않고 수용): (a) bin/orch-jev:164의 count cancellation — 의도적으로 구성된 문서에서 placeholder로 억제된 한 줄 assignment 하나가 여러 줄에 걸쳐서만 조립되는 credential 하나를 상쇄할 수 있어 그 cross-line 값이 전송됩니다. (b) 한 LF 줄 안에서 placeholder 표식과 credential 사이에 bare CR이 있으면 탐지가 억제됩니다. 기존 Bash scanner(bin/orch-security-scan)도 같은 종류를 놓칩니다. scan은 사용자가 지정한 파일(또는 stdin)만 읽으며 guard를 통과한 내용은 모두 Jev API로 전송되므로, 그곳에 보내지 않을 파일은 지정하지 마세요.
+
 기본 상한은 직렬화한 state 24,000 bytes, 항목 20개, 4,000 bytes chunk 24개입니다.
 
 목적지는 `https://api.typesafe.ai`이며 호출당 HTTPS POST 하나와 최대 한 번의 재시도를
@@ -288,7 +291,7 @@ proxy 환경 변수는 무시하고 직접 연결하므로 proxy가 필수인 �
 
 `<state>/jev.log`는 mode 600의 metadata 전용 journal입니다. 시간, 명령, 결과, 시도 횟수,
 latency, model, 질문 수, token 사용량만 남기며 입력 본문, source 이름, 답변, 키는 없습니다.
-`JEV_JOURNAL=0`으로 끌 수 있고 journal 기록 실패는 자문 결과에 영향을 주지 않습니다.
+jev-policy.conf에서 JEV_JOURNAL=0으로 끌 수 있고(환경 변수가 아니라 이 파일에서만 읽음) journal 기록 실패는 자문 결과에 영향을 주지 않습니다.
 Codex-only 모드는 사용하지 않습니다. `cc-orch-codex` 세션은 `CC_ORCH_BACKEND=codex`를
 설정하며, 이때 도구는 외부 호출을 거부합니다.
 

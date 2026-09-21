@@ -221,6 +221,9 @@ lines removed. `scan` sends text chunks with source names and line ranges in one
 Only named input files or stdin are read, alongside the policy, question template, and key file.
 Every source is checked for secret-shaped literals before truncation: a matching source is
 skipped in full. Size and item/chunk limits bound what leaves the machine, with explicit notes.
+
+Known limits of the egress guard (accepted, not fixed): (a) count cancellation at bin/orch-jev:164 — in an adversarially constructed document, one placeholder-suppressed single-line assignment can cancel one credential that is only assembled across lines, so that cross-line value is sent; (b) a placeholder marker separated from a credential by a bare carriage return inside one LF line suppresses the hit. The existing Bash scanner (bin/orch-security-scan) shares the same class of misses. scan reads only the files you name (or stdin), and everything that passes the guard is sent to the Jev API, so do not point it at files you would not send there.
+
 The default limits are 24,000 serialized state bytes, 20 items, and 24 chunks of 4,000 bytes.
 
 The destination is `https://api.typesafe.ai`: one HTTPS POST per invocation, with at most one
@@ -241,7 +244,7 @@ runtime and is outside `orch-policy-rev`; the model must be pinned to `jev-X.Y.Z
 
 `<state>/jev.log` is a mode-600 metadata-only journal: time, command, outcome, attempts, latency,
 model, question count, and token usage. It contains no input text, source names, answers, or key;
-set `JEV_JOURNAL=0` to disable it. Journal failures do not affect the advisory result.
+set JEV_JOURNAL=0 in jev-policy.conf to disable it (the switch is read from that file only, not from the environment). Journal failures do not affect the advisory result.
 Codex-only mode does not use it: `cc-orch-codex` sessions set `CC_ORCH_BACKEND=codex`, and the
 tool refuses to call out.
 
