@@ -180,14 +180,19 @@ trivial이 아닌 작업에서는 `orch-summary-check --strict`가 양성 `GATES
   `VERIFIER-VERDICT: PASS`가 있어야 한다(Markdown 제목도 허용). 또는 `## Verdict`
   제목 다음의 첫 번째 비어 있지 않은 줄이 `PASS`로 시작해야 한다(Markdown 강조와 `PASS.` 허용).
 
-최상위 파일만 검사하며 `evidence/`, `rounds/`의 보관 파일은 제외한다. Verifier 후보는
-이름순으로 처음 64개까지만 고려하고 mtime이 같으면 version 정렬상 마지막 이름을 선택한다.
+최상위 파일만 검사하며 `evidence/`, `rounds/`의 보관 파일은 제외한다. 이름 패턴에 맞는 모든
+verifier 파일 중 mtime이 가장 최신인 것을 선택하고, mtime이 같으면 version 정렬상 마지막 이름을 선택한다.
 인식된 verdict header 중 마지막 것이 우선하며, header가 없으면 마지막으로 인식된 verdict
 section을 사용한다. Claude verifier의 header 이름은 대소문자를 구분하지 않지만 artifact의
 verdict token은 구분한다. `VERDICT: PASS | FAIL | INCONCLUSIVE` 같은 선택지 template은
-verdict로 인정하지 않는다. 1 MiB를 넘는 파일은 파싱하지 않는다. Summary와 Claude verifier의
+verdict로 인정하지 않는다. Artifact의 verdict token(또는 review 개수) 뒤에는 공백만 있거나,
+공백 다음에 `—`, `–`, `-`, `(`, `:`, `;`, `,`, `.`로 시작하는 주석만 허용한다(공백은 선택 사항).
+`PASS but only as an example`처럼 바로 이어지는 일반 문장은 거부한다.
+1 MiB를 넘는 파일은 파싱하지 않는다. Summary와 Claude verifier의
 fenced block은 무시하며, Codex artifact는 첫 번째 비어 있지 않은 줄 자체가 header여야 한다.
 Fence 밖의 마지막 `GATES:` 줄을 사용하고 status는 접두사가 아닌 완전한 token으로 판정한다.
+각 주장은 `·`, `;`, `,`로 구분한 구간의 시작에 있어야 하며 `no codex-verify PASS`처럼
+앞에 다른 문구가 붙으면 주장으로 인정하지 않는다.
 Artifact 누락이나 모순은 `--strict`에서는 오류, 그 외에는 경고다. Trivial self-check와 low-risk
 review waiver 정책은 유지된다. 실패를 해소하려면 summary를 수정하거나 일치하는 artifact를
 제공한다. Stop gate에 문서화된 `stop-gate.off` switch도 계속 사용할 수 있다.

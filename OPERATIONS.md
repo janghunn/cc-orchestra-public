@@ -156,14 +156,19 @@ against artifacts in the task directory:
   next non-blank line starts with `PASS` (Markdown emphasis and `PASS.` are accepted).
 
 Only top-level files count; archived files under `evidence/` or `rounds/` are ignored.
-Verifier candidates are sorted by name and capped at 64; equal mtimes choose the last basename
-in version order. The last recognised verdict header wins, or the last recognised verdict
+All matching verifier files are considered; the newest mtime wins, and equal mtimes choose
+the last basename in version order. The last recognised verdict header wins, or the last recognised verdict
 section if there is no header. Header names are case-insensitive for the Claude verifier;
 artifact verdict tokens are case-sensitive. Template alternatives such as
-`VERDICT: PASS | FAIL | INCONCLUSIVE` are not verdicts. Files over 1 MiB are not parsed.
+`VERDICT: PASS | FAIL | INCONCLUSIVE` are not verdicts. After an artifact verdict token (or
+review counts), only whitespace or an annotation beginning with `—`, `–`, `-`, `(`, `:`, `;`,
+`,`, or `.` is accepted; bare trailing prose such as `PASS but only as an example` is rejected.
+Files over 1 MiB are not parsed.
 Fenced blocks are ignored in the summary and Claude verifier; Codex artifacts require the
 header itself as their first non-blank line. The last `GATES:` line outside fences is used,
-with complete status tokens rather than prefixes. Missing or contradicting artifacts produce
+with complete status tokens rather than prefixes. Claims must begin a segment separated by
+`·`, `;`, or `,`; prefixed text such as `no codex-verify PASS` is not a claim.
+Missing or contradicting artifacts produce
 errors with `--strict` and warnings otherwise. Trivial self-checks and low-risk review waivers
 retain their policy. To clear a failure, correct the summary or supply the matching artifact;
 the stop gate's documented `stop-gate.off` switch remains available.

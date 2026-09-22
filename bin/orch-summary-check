@@ -148,11 +148,15 @@ if [ -r "$SUMMARY" ]; then
       printf '%s' "$desc" | grep -q '[A-Za-z0-9]' || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
     else
       tokend='([^A-Za-z0-9_-]|$)'
+      gate_claim() { # <label> <status regex>; claims must begin a separator-delimited segment
+        printf '%s\n' "${gates#GATES:}" | sed 's/·/\n/g;s/[;,]/\n/g' \
+          | grep -qiE "^[[:space:]]*$1[[:space:]]+($2)$tokend"
+      }
       codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0; codex_audit_ok=0
-      printf '%s' "$gates" | grep -qiE "codex-verify[[:space:]]+PASS$tokend" && codex_verify_ok=1
-      printf '%s' "$gates" | grep -qiE "codex-review[[:space:]]+(CLEAR|NONBLOCKING)$tokend" && codex_review_ok=1
-      printf '%s' "$gates" | grep -qiE "claude-verifier[[:space:]]+PASS$tokend" && claude_verify_ok=1
-      printf '%s' "$gates" | grep -qiE "codex-auditor[[:space:]]+PASS$tokend" && codex_audit_ok=1
+      gate_claim codex-verify PASS && codex_verify_ok=1
+      gate_claim codex-review 'CLEAR|NONBLOCKING' && codex_review_ok=1
+      gate_claim claude-verifier PASS && claude_verify_ok=1
+      gate_claim codex-auditor PASS && codex_audit_ok=1
 
       # A provider outage may fall back to the zero-context Claude verifier, but it must be
       # visible in the same line; a bare missing/waived executable verdict is never PASS.
@@ -163,15 +167,15 @@ if [ -r "$SUMMARY" ]; then
           [ "$codex_audit_ok" = 1 ] || problem error "critical Codex-only risk requires codex-auditor PASS"
         fi
       elif [ "$codex_verify_ok" = "0" ]; then
-        if ! printf '%s' "$gates" | grep -qiE "codex-verify[[:space:]]+unavailable$tokend" || \
+        if ! gate_claim codex-verify unavailable || \
            [ "$claude_verify_ok" = "0" ]; then
           problem error "executable verification did not PASS and has no explicit Claude fallback"
         fi
       fi
       if [ "$backend" != codex ] && [ "$codex_review_ok" = "0" ]; then
-        if [ "$risk" = "low" ] && printf '%s' "$gates" | grep -qiE "codex-review[[:space:]]+waived$tokend"; then
+        if [ "$risk" = "low" ] && gate_claim codex-review waived; then
           :
-        elif printf '%s' "$gates" | grep -qiE "codex-review[[:space:]]+unavailable$tokend" && \
+        elif gate_claim codex-review unavailable && \
              [ "$claude_verify_ok" = "1" ]; then
           :
         else
@@ -182,6 +186,8 @@ if [ -r "$SUMMARY" ]; then
         problem error "critical risk requires claude-verifier PASS"
       fi
 
+      # An annotation must start with punctuation, not prose that merely mentions a verdict.
+      hdrtail='([[:space:]]*$|[[:space:]]*(—|–|[-(:;,.]))'
       # First non-blank line of an artifact, CR-stripped and trimmed. Files over 1 MiB are unrecognised.
       artifact_header() {
         [ -f "$1" ] && [ "$(wc -c < "$1")" -le 1048576 ] || return 1
@@ -189,7 +195,7 @@ if [ -r "$SUMMARY" ]; then
       }
       # Diagnostics never echo artifact text: print the recognised header token or a placeholder.
       safe_header() { # <header> <kind: VERDICT|REVIEW|AUDIT>
-        printf '%s' "$1" | sed -nE "s/^(CODEX-$2:[[:space:]]*(PASS|FAIL|INCONCLUSIVE|CLEAR|BLOCKING[[:space:]]+[0-9]+[[:space:]]*\/[[:space:]]*NONBLOCKING[[:space:]]+[0-9]+))$tokend.*/\1/p" | head -1 \
+        printf '%s' "$1" | sed -nE "s/^(CODEX-$2:[[:space:]]*(PASS|FAIL|INCONCLUSIVE|CLEAR|BLOCKING[[:space:]]+[0-9]+[[:space:]]*\/[[:space:]]*NONBLOCKING[[:space:]]+[0-9]+))$hdrtail.*/\1/p" | head -1 \
           | grep . || printf '<unrecognised first line>'
       }
       cross_check() { # <claim> <file basename> <kind> <accepting regex> <required form>
@@ -201,13 +207,13 @@ if [ -r "$SUMMARY" ]; then
       }
       verifier_cross_check() {
         local candidates=() file newest="" newest_mtime=-1 mtime name content token
-        # Bound the name-sorted candidate set, then visit it in version order so mtime ties
+        # Visit all candidates in version order so mtime ties
         # select the last versioned basename. NUL delimiters preserve spaces in filenames.
         mapfile -d '' -t candidates < <(
           shopt -s nullglob
           for file in "$TASK_DIR"/verdict.md "$TASK_DIR"/verdict-*.md "$TASK_DIR"/verifier-verdict.md "$TASK_DIR"/verifier-verdict-*.md; do
             [ ! -f "$file" ] || printf '%s\0' "$file"
-          done | sort -z | head -z -n 64 | sort -zV
+          done | sort -zV
         )
         for file in "${candidates[@]}"; do
           mtime="$(stat -c %Y -- "$file" 2>/dev/null)" || continue
@@ -229,10 +235,9 @@ if [ -r "$SUMMARY" ]; then
             if (!match(value, /^(PASS|FAIL|INCONCLUSIVE)/)) return ""
             token = substr(value, 1, RLENGTH); rest = substr(value, RLENGTH + 1)
             sub(/^[*`]*/, "", rest)
-            if (rest ~ /^[A-Za-z0-9_|-]/) return ""
-            # A template is not a verdict, even with whitespace before its pipe.
             sub(/^[[:space:]]*/, "", rest)
-            if (rest ~ /^\|/) return ""
+            # Only punctuation may introduce an annotation; prose and template pipes fail.
+            if (rest != "" && rest !~ /^(—|–|[-(:;,.])/) return ""
             return token
           }
           {
@@ -255,9 +260,9 @@ if [ -r "$SUMMARY" ]; then
         esac
         return 0
       }
-      [ "$codex_verify_ok" = 1 ] && cross_check 'codex-verify PASS' codex-verdict.md VERDICT "^CODEX-VERDICT:[[:space:]]*PASS$tokend" 'CODEX-VERDICT: PASS'
-      [ "$codex_review_ok" = 1 ] && cross_check 'codex-review CLEAR/NONBLOCKING' codex-review.md REVIEW "^CODEX-REVIEW:[[:space:]]*(CLEAR|BLOCKING[[:space:]]+0[[:space:]]*/[[:space:]]*NONBLOCKING[[:space:]]+[0-9]+)$tokend" 'CODEX-REVIEW: CLEAR or CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>'
-      [ "$backend" = codex ] && [ "$codex_audit_ok" = 1 ] && cross_check 'codex-auditor PASS' codex-audit.md AUDIT "^CODEX-AUDIT:[[:space:]]*PASS$tokend" 'CODEX-AUDIT: PASS'
+      [ "$codex_verify_ok" = 1 ] && cross_check 'codex-verify PASS' codex-verdict.md VERDICT "^CODEX-VERDICT:[[:space:]]*PASS$hdrtail" 'CODEX-VERDICT: PASS'
+      [ "$codex_review_ok" = 1 ] && cross_check 'codex-review CLEAR/NONBLOCKING' codex-review.md REVIEW "^CODEX-REVIEW:[[:space:]]*(CLEAR|BLOCKING[[:space:]]+0[[:space:]]*/[[:space:]]*NONBLOCKING[[:space:]]+[0-9]+)$hdrtail" 'CODEX-REVIEW: CLEAR or CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>'
+      [ "$backend" = codex ] && [ "$codex_audit_ok" = 1 ] && cross_check 'codex-auditor PASS' codex-audit.md AUDIT "^CODEX-AUDIT:[[:space:]]*PASS$hdrtail" 'CODEX-AUDIT: PASS'
       [ "$claude_verify_ok" = 1 ] && verifier_cross_check
     fi
   fi

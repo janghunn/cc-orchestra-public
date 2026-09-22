@@ -1308,7 +1308,9 @@ for token in FAIL INCONCLUSIVE; do
 done
 printf 'CODEX-VERDICT: PASSWORD\n' > "$TRIV/codex-verdict.md"
 artifact_check 1 'X5 lookalike' '<unrecognised first line>'
-printf 'CODEX-VERDICT: FAIL secret="%s"\n' "$(printf 'z%.0s' {1..30})" > "$TRIV/codex-verdict.md"
+printf 'CODEX-VERDICT: PASS was expected, but verification failed\n' > "$TRIV/codex-verdict.md"
+artifact_check 1 'X5 trailing prose' '<unrecognised first line>'
+printf 'CODEX-VERDICT: FAIL — secret="%s"\n' "$(printf 'z%.0s' {1..30})" > "$TRIV/codex-verdict.md"
 artifact_check 1 'X5 private prose' "codex-verdict.md first line is 'CODEX-VERDICT: FAIL'"
 assert_not_has "$TRIV_OUT" zzzzzzzzzz 'X5 artifact text is never echoed'
 
@@ -1323,6 +1325,8 @@ printf '\nCODEX-VERDICT: PASS\n' > "$TRIV/codex-verdict.md"
 artifact_check 0 'X6 leading blank'
 printf '  CODEX-VERDICT: PASS\r\n' > "$TRIV/codex-verdict.md"
 artifact_check 0 'X6 indented CR'
+printf 'CODEX-VERDICT: PASS — 12/12\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X6 punctuation annotation'
 
 # X7: positive summary tokens must be complete; annotations remain supported.
 artifacts_ok
@@ -1340,11 +1344,23 @@ artifact_check 1 'X7 negated PASS' 'executable verification did not PASS'
 triv_brief 'RISK: critical'
 triv_summary 'critical fable@high' 'GATES: codex-verify PASS (2 runs) · codex-review CLEAR, · claude-verifier PASS.'
 artifact_check 0 'X7 punctuation'
+triv_summary 'critical fable@high' 'GATES: no codex-verify PASS · no codex-review CLEAR · no claude-verifier PASS'
+artifact_check 1 'X7 negated labels' 'executable verification did not PASS'
+assert_has "$TRIV_OUT" 'adversarial review is not' 'X7 negated review label'
+assert_has "$TRIV_OUT" 'critical risk requires claude-verifier PASS' 'X7 negated verifier label'
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS, codex-review CLEAR, claude-verifier PASS'
+artifact_check 0 'X7 comma separators'
 
 # X8: recognised verifier shapes, newest mtime, version ties, and false positives.
 triv_summary 'critical fable@high' "$G3"
 artifacts_ok
 artifact_check 0 'X8 plain PASS'
+printf 'VERDICT: PASS but only as an example\n' > "$TRIV/verdict.md"
+artifact_check 1 'X8 trailing prose' 'no recognised verdict'
+for shape in 'VERDICT: PASS — 21/21 met' 'VERDICT: PASS (21/21)' '## Verdict: PASS — all met' '**VERDICT**: **PASS**'; do
+  printf '%s\n' "$shape" > "$TRIV/verdict.md"
+  artifact_check 0 'X8 punctuation and emphasis'
+done
 printf 'VERDICT: FAIL\n' > "$TRIV/verdict.md"
 artifact_check 1 'X8 plain FAIL' 'verdict.md verdict is FAIL'
 printf '**VERDICT:** PASS\n' > "$TRIV/verdict.md"
@@ -1373,6 +1389,16 @@ printf 'VERDICT: FAIL\n' > "$TRIV/verifier-verdict-10.md"
 printf 'VERDICT: PASS\n' > "$TRIV/verifier-verdict-9.md"
 touch -d '2020-01-01 UTC' "$TRIV/verifier-verdict-10.md" "$TRIV/verifier-verdict-9.md"
 artifact_check 1 'X8 version tie' 'verifier-verdict-10.md verdict is FAIL'
+artifacts_ok
+rm "$TRIV/verdict.md"
+for number in {1..70}; do
+  printf -v file 'verifier-verdict-a%03d.md' "$number"
+  printf 'VERDICT: PASS\n' > "$TRIV/$file"
+done
+touch -d '2020-01-01 UTC' "$TRIV"/verifier-verdict-a*.md
+printf 'VERDICT: FAIL\n' > "$TRIV/verifier-verdict-zzzz.md"
+touch -d '2020-01-02 UTC' "$TRIV/verifier-verdict-zzzz.md"
+artifact_check 1 'X8 newest beyond 64 candidates' 'verifier-verdict-zzzz.md verdict is FAIL'
 artifacts_ok
 for shape in 'We considered VERDICT: PASS but' 'VERDICT: PASS | FAIL | INCONCLUSIVE' $'```\nVERDICT: PASS\n```' $'## Verdict\nThe PASS criteria were checked.'; do
   printf '%s\n' "$shape" > "$TRIV/verdict.md"
