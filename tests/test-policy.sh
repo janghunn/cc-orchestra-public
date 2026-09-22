@@ -1308,6 +1308,10 @@ for token in FAIL INCONCLUSIVE; do
 done
 printf 'CODEX-VERDICT: PASSWORD\n' > "$TRIV/codex-verdict.md"
 artifact_check 1 'X5 lookalike' '<unrecognised first line>'
+for token in PASS-FAIL PASS-ish; do
+  printf 'CODEX-VERDICT: %s\n' "$token" > "$TRIV/codex-verdict.md"
+  artifact_check 1 "X5 attached hyphen $token" '<unrecognised first line>'
+done
 printf 'CODEX-VERDICT: PASS was expected, but verification failed\n' > "$TRIV/codex-verdict.md"
 artifact_check 1 'X5 trailing prose' '<unrecognised first line>'
 printf 'CODEX-VERDICT: FAIL — secret="%s"\n' "$(printf 'z%.0s' {1..30})" > "$TRIV/codex-verdict.md"
@@ -1327,6 +1331,10 @@ printf '  CODEX-VERDICT: PASS\r\n' > "$TRIV/codex-verdict.md"
 artifact_check 0 'X6 indented CR'
 printf 'CODEX-VERDICT: PASS — 12/12\n' > "$TRIV/codex-verdict.md"
 artifact_check 0 'X6 punctuation annotation'
+printf 'CODEX-VERDICT: PASS - 12/12\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X6 spaced hyphen annotation'
+printf 'CODEX-REVIEW: CLEAR-BLOCKING 1\n' > "$TRIV/codex-review.md"
+artifact_check 1 'X6 attached review hyphen' '<unrecognised first line>'
 
 # X7: positive summary tokens must be complete; annotations remain supported.
 artifacts_ok
@@ -1357,7 +1365,11 @@ artifacts_ok
 artifact_check 0 'X8 plain PASS'
 printf 'VERDICT: PASS but only as an example\n' > "$TRIV/verdict.md"
 artifact_check 1 'X8 trailing prose' 'no recognised verdict'
-for shape in 'VERDICT: PASS — 21/21 met' 'VERDICT: PASS (21/21)' '## Verdict: PASS — all met' '**VERDICT**: **PASS**'; do
+for token in PASS-FAIL PASS-ish; do
+  printf 'VERDICT: %s\n' "$token" > "$TRIV/verdict.md"
+  artifact_check 1 "X8 attached hyphen $token" 'no recognised verdict'
+done
+for shape in 'VERDICT: PASS — 21/21 met' 'VERDICT: PASS - 21/21' 'VERDICT: PASS (21/21)' '## Verdict: PASS — all met' '**VERDICT**: **PASS**'; do
   printf '%s\n' "$shape" > "$TRIV/verdict.md"
   artifact_check 0 'X8 punctuation and emphasis'
 done
@@ -1400,6 +1412,18 @@ printf 'VERDICT: FAIL\n' > "$TRIV/verifier-verdict-zzzz.md"
 touch -d '2020-01-02 UTC' "$TRIV/verifier-verdict-zzzz.md"
 artifact_check 1 'X8 newest beyond 64 candidates' 'verifier-verdict-zzzz.md verdict is FAIL'
 artifacts_ok
+rm "$TRIV/verdict.md"
+for number in {1..1001}; do
+  printf -v file 'verifier-verdict-b%04d.md' "$number"
+  printf 'VERDICT: PASS\n' > "$TRIV/$file"
+done
+verifier_limit_started=$SECONDS
+artifact_check 1 'X8 candidate limit' '1001 verifier verdict files exist'
+verifier_limit_elapsed=$((SECONDS - verifier_limit_started))
+assert_has "$TRIV_OUT" 'limit 1000' 'X8 candidate limit diagnostic'
+[ "$verifier_limit_elapsed" -lt 5 ] || fail "X8 candidate limit took ${verifier_limit_elapsed}s (must be under 5s)"
+printf 'NOTE: 1001-verifier limit check completed in %ss (under 5s)\n' "$verifier_limit_elapsed"
+artifacts_ok
 for shape in 'We considered VERDICT: PASS but' 'VERDICT: PASS | FAIL | INCONCLUSIVE' $'```\nVERDICT: PASS\n```' $'## Verdict\nThe PASS criteria were checked.'; do
   printf '%s\n' "$shape" > "$TRIV/verdict.md"
   artifact_check 1 'X8 unrecognised shape' 'no recognised verdict'
@@ -1423,6 +1447,8 @@ ROUNDS: 1
 EOF
 printf 'CODEX-AUDIT: PASS — final source and offline audit.\n' > "$TRIV/codex-audit.md"
 artifact_check 0 'X9 audit PASS'
+printf 'CODEX-AUDIT: PASS-INCONCLUSIVE\n' > "$TRIV/codex-audit.md"
+artifact_check 1 'X9 attached audit hyphen' '<unrecognised first line>'
 printf 'CODEX-AUDIT: FAIL\n' > "$TRIV/codex-audit.md"
 artifact_check 1 'X9 audit FAIL' 'codex-audit.md'
 printf 'CODEX-AUDIT: PASS\n' > "$TRIV/codex-audit.md"

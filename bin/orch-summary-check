@@ -187,7 +187,7 @@ if [ -r "$SUMMARY" ]; then
       fi
 
       # An annotation must start with punctuation, not prose that merely mentions a verdict.
-      hdrtail='([[:space:]]*$|[[:space:]]*(—|–|[-(:;,.]))'
+      hdrtail='([[:space:]]*$|[[:space:]]+-|[[:space:]]*(—|–|[(:;,.]))'
       # First non-blank line of an artifact, CR-stripped and trimmed. Files over 1 MiB are unrecognised.
       artifact_header() {
         [ -f "$1" ] && [ "$(wc -c < "$1")" -le 1048576 ] || return 1
@@ -206,23 +206,23 @@ if [ -r "$SUMMARY" ]; then
         return 0
       }
       verifier_cross_check() {
-        local candidates=() file newest="" newest_mtime=-1 mtime name content token
-        # Visit all candidates in version order so mtime ties
-        # select the last versioned basename. NUL delimiters preserve spaces in filenames.
+        local candidates=() count newest name content token
+        # Collect metadata in one process, then sort by mtime and versioned basename.
+        # The second key includes the whole path; NUL delimiters preserve whitespace in names.
         mapfile -d '' -t candidates < <(
-          shopt -s nullglob
-          for file in "$TASK_DIR"/verdict.md "$TASK_DIR"/verdict-*.md "$TASK_DIR"/verifier-verdict.md "$TASK_DIR"/verifier-verdict-*.md; do
-            [ ! -f "$file" ] || printf '%s\0' "$file"
-          done | sort -zV
+          find "$TASK_DIR" -maxdepth 1 -type f \( -name verdict.md -o -name 'verdict-*.md' -o -name verifier-verdict.md -o -name 'verifier-verdict-*.md' \) \
+            -printf '%T@ %p\0' | sort -z -t ' ' -k1,1n -k2V
         )
-        for file in "${candidates[@]}"; do
-          mtime="$(stat -c %Y -- "$file" 2>/dev/null)" || continue
-          if [ -z "$newest" ] || [ "$mtime" -ge "$newest_mtime" ]; then newest="$file"; newest_mtime="$mtime"; fi
-        done
-        if [ -z "$newest" ]; then
+        count="${#candidates[@]}"
+        if [ "$count" -gt 1000 ]; then
+          problem warning "GATES claims claude-verifier PASS but $count verifier verdict files exist in $TASK_DIR (limit 1000); archive old runs under evidence/"
+          return 0
+        fi
+        if [ "$count" = 0 ]; then
           problem warning "GATES claims claude-verifier PASS but no verifier verdict file (verdict.md, verdict-*.md, verifier-verdict.md, verifier-verdict-*.md) exists in $TASK_DIR"
           return 0
         fi
+        newest="${candidates[count - 1]#* }"
         name="${newest##*/}"
         if [ "$(wc -c < "$newest")" -gt 1048576 ]; then
           problem warning "GATES claims claude-verifier PASS but $name exceeds 1 MiB and was not parsed"
@@ -235,9 +235,11 @@ if [ -r "$SUMMARY" ]; then
             if (!match(value, /^(PASS|FAIL|INCONCLUSIVE)/)) return ""
             token = substr(value, 1, RLENGTH); rest = substr(value, RLENGTH + 1)
             sub(/^[*`]*/, "", rest)
+            # An ASCII hyphen introduces an annotation only after whitespace.
+            if (rest ~ /^[[:space:]]+-/) return token
             sub(/^[[:space:]]*/, "", rest)
             # Only punctuation may introduce an annotation; prose and template pipes fail.
-            if (rest != "" && rest !~ /^(—|–|[-(:;,.])/) return ""
+            if (rest != "" && rest !~ /^(—|–|[(:;,.])/) return ""
             return token
           }
           {

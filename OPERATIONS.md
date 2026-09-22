@@ -157,12 +157,17 @@ against artifacts in the task directory:
 
 Only top-level files count; archived files under `evidence/` or `rounds/` are ignored.
 All matching verifier files are considered; the newest mtime wins, and equal mtimes choose
-the last basename in version order. The last recognised verdict header wins, or the last recognised verdict
-section if there is no header. Header names are case-insensitive for the Claude verifier;
+the last basename in version order. More than 1000 matching files produces an error under
+`--strict` (a warning otherwise) without parsing a verdict; archive old runs under `evidence/`.
+The last recognised verdict header wins, or the last recognised verdict section if there is
+no header. Header names are case-insensitive for the Claude verifier;
 artifact verdict tokens are case-sensitive. Template alternatives such as
 `VERDICT: PASS | FAIL | INCONCLUSIVE` are not verdicts. After an artifact verdict token (or
 review counts), only whitespace or an annotation beginning with `—`, `–`, `-`, `(`, `:`, `;`,
 `,`, or `.` is accepted; bare trailing prose such as `PASS but only as an example` is rejected.
+ASCII `-` requires at least one preceding whitespace character: `PASS - 12/12` is accepted,
+while `PASS-FAIL`, `PASS-ish`, and `CLEAR-BLOCKING 1` are rejected. The other delimiters may
+follow the token directly or after whitespace.
 Files over 1 MiB are not parsed.
 Fenced blocks are ignored in the summary and Claude verifier; Codex artifacts require the
 header itself as their first non-blank line. The last `GATES:` line outside fences is used,

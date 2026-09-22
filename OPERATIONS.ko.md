@@ -182,12 +182,17 @@ trivial이 아닌 작업에서는 `orch-summary-check --strict`가 양성 `GATES
 
 최상위 파일만 검사하며 `evidence/`, `rounds/`의 보관 파일은 제외한다. 이름 패턴에 맞는 모든
 verifier 파일 중 mtime이 가장 최신인 것을 선택하고, mtime이 같으면 version 정렬상 마지막 이름을 선택한다.
+일치하는 파일이 1000개를 넘으면 verdict를 파싱하지 않고 `--strict`에서는 오류, 그 외에는
+경고를 낸다. 이전 실행 파일은 `evidence/` 아래로 보관한다.
 인식된 verdict header 중 마지막 것이 우선하며, header가 없으면 마지막으로 인식된 verdict
 section을 사용한다. Claude verifier의 header 이름은 대소문자를 구분하지 않지만 artifact의
 verdict token은 구분한다. `VERDICT: PASS | FAIL | INCONCLUSIVE` 같은 선택지 template은
 verdict로 인정하지 않는다. Artifact의 verdict token(또는 review 개수) 뒤에는 공백만 있거나,
 공백 다음에 `—`, `–`, `-`, `(`, `:`, `;`, `,`, `.`로 시작하는 주석만 허용한다(공백은 선택 사항).
 `PASS but only as an example`처럼 바로 이어지는 일반 문장은 거부한다.
+ASCII `-` 앞에는 반드시 공백 문자가 하나 이상 있어야 한다. `PASS - 12/12`는 허용하지만
+`PASS-FAIL`, `PASS-ish`, `CLEAR-BLOCKING 1`은 거부한다. 나머지 구분자는 token에 바로
+붙거나 공백 뒤에 와도 된다.
 1 MiB를 넘는 파일은 파싱하지 않는다. Summary와 Claude verifier의
 fenced block은 무시하며, Codex artifact는 첫 번째 비어 있지 않은 줄 자체가 header여야 한다.
 Fence 밖의 마지막 `GATES:` 줄을 사용하고 status는 접두사가 아닌 완전한 token으로 판정한다.
