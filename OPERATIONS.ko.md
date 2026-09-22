@@ -168,6 +168,51 @@ verify/review와 Claude verifier를 실행하지 않고 lead가
 `orch-summary-check --strict`가 이 형식을 강제한다. 적용 기준은
 `agents/orchestrator.md`의 "Choosing RISK"를 참고한다.
 
+trivial이 아닌 작업에서는 `orch-summary-check --strict`가 양성 `GATES:` 주장을
+작업 디렉터리의 artifact와 대조한다.
+
+- `codex-verify PASS`: `codex-verdict.md`의 첫 번째 비어 있지 않은 줄이 `CODEX-VERDICT: PASS`.
+- `codex-review CLEAR|NONBLOCKING`: `codex-review.md`의 첫 번째 비어 있지 않은 줄이
+  `CODEX-REVIEW: CLEAR` 또는 `CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>`.
+- `codex-auditor PASS` (Codex backend): `codex-audit.md`의 첫 번째 비어 있지 않은 줄이 `CODEX-AUDIT: PASS`.
+- `claude-verifier PASS`: `verdict.md`, `verdict-*.md`, `verifier-verdict.md`,
+  `verifier-verdict-*.md` 중 mtime이 가장 최신인 파일에 `VERDICT: PASS` 또는
+  `VERIFIER-VERDICT: PASS`가 있어야 한다(Markdown 제목도 허용). 또는 `## Verdict`
+  제목 다음의 첫 번째 비어 있지 않은 줄이 `PASS`로 시작해야 한다(Markdown 강조와 `PASS.` 허용).
+
+최상위 파일만 검사하며 `evidence/`, `rounds/`의 보관 파일은 제외한다. 이름 패턴에 맞는 모든
+verifier 파일 중 mtime이 가장 최신인 것을 선택하고, mtime이 같으면 version 정렬상 마지막 이름을 선택한다.
+일치하는 파일이 1000개를 넘으면 verdict를 파싱하지 않고 `--strict`에서는 오류, 그 외에는
+경고를 낸다. 이전 실행 파일은 `evidence/` 아래로 보관한다.
+인식된 verdict header 중 마지막 것이 우선하며, header가 없으면 마지막으로 인식된 verdict
+section을 사용한다. Claude verifier의 header 이름은 대소문자를 구분하지 않지만 artifact의
+verdict token은 구분한다. `VERDICT: PASS | FAIL | INCONCLUSIVE` 같은 선택지 template은
+verdict로 인정하지 않는다. Artifact의 verdict token(또는 review 개수) 뒤에는 공백만 있거나,
+공백 다음에 `—`, `–`, `-`, `(`, `:`, `;`, `,`, `.`로 시작하는 주석만 허용한다(공백은 선택 사항).
+`PASS but only as an example`처럼 바로 이어지는 일반 문장은 거부한다.
+ASCII `-` 앞에는 반드시 공백 문자가 하나 이상 있어야 한다. `PASS - 12/12`는 허용하지만
+`PASS-FAIL`, `PASS-ish`, `CLEAR-BLOCKING 1`은 거부한다. 나머지 구분자는 token에 바로
+붙거나 공백 뒤에 와도 된다.
+1 MiB를 넘는 파일은 파싱하지 않는다. Summary와 Claude verifier의
+fenced block은 무시하며, Codex artifact는 첫 번째 비어 있지 않은 줄 자체가 header여야 한다.
+Fence 밖의 마지막 `GATES:` 줄을 사용하고 status는 접두사가 아닌 완전한 token으로 판정한다.
+각 주장은 `·`, `;`, `,`로 구분한 구간의 시작에 있어야 하며 `no codex-verify PASS`처럼
+앞에 다른 문구가 붙으면 주장으로 인정하지 않는다.
+Artifact 누락이나 모순은 `--strict`에서는 오류, 그 외에는 경고다. Trivial self-check와 low-risk
+review waiver 정책은 유지된다. 실패를 해소하려면 summary를 수정하거나 일치하는 artifact를
+제공한다. Stop gate에 문서화된 `stop-gate.off` switch도 계속 사용할 수 있다.
+
+`orch-summary-check`의 별도 자문 보안 검사는 현재 branch와 local `main`(없으면 `origin/main`)의
+merge base부터 `HEAD`까지 커밋된 변경의 추가 줄을 검사한다. 설치 checkout과 task artifact
+위치가 달라도 작업 worktree에서 실행한다. Git checkout 밖에서는 task 디렉터리의 저장소를
+사용한다. `.md`, `.json`, `.conf`, `.sh`, `.py`와 모든 `bin/` 디렉터리 바로 아래 파일에서
+credential 형태의 literal, 확인 절차를 생략하는 지시, 광범위한 Bash 권한 문자열을 검사한다.
+발견 사항은 자문이며 `--strict`에서도 PASS/FAIL과 gate 오류·경고 수에 영향을 주지 않는다.
+Git 기준점을 사용할 수 없으면 skipped로 보고하며 credential이 있는 줄은 출력에서 가린다.
+전체 파일 검사는 `bin/orch-security-scan --files <file>...`로 실행한다(발견 없음 0, 발견 있음 1).
+`bin/orch-security-scan` 자체의 pattern 정의와 진단 label 줄에서는 예상된 지시 문구 일치가
+두 건 나온다. 이 결과도 자문이며 scanner 코드에서 예외 처리하지 않는다.
+
 이 명령은 `route-lead-bravo-normal` 같은 **고정된(immutable) agent type**과 해당 모델 및 effort를 반환합니다.
 
 `build-roster-runtime.sh`는 4개 slot × 4개 profile 조합, 총 16개의 `route-lead-*` agent를 미리 생성합니다. 기존 legacy quota guard는 이 `route-lead-*` namespace를 다시 쓰지 않습니다.
@@ -396,6 +441,17 @@ Jev를 호출하지 않고 `skipped:invalid-args`로 기록합니다.
 - 새 정책은 **다음 lead 생성 또는 다음 Codex 호출 경계**부터 적용
 
 `cc-orch --reload`는 prompt, template, agent 정의처럼 **구조적인 설정이 바뀐 경우**에 사용합니다. UserPromptSubmit hook은 이런 구조 변경과 단순 quota 변화를 구분합니다.
+
+실행 중인 세션을 reload할 때는 hook과 같은 순서로 `.orchestra/REGISTRY.md`를 찾는다.
+Git toplevel과 그 상위 디렉터리, 프로세스 cwd와 그 상위 디렉터리, git common directory의
+상위 디렉터리, linked worktree 순서이며 처음 발견한 파일을 사용한다. Active lead 행이 하나라도
+있으면 거부한다. Terminal status는 `PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`, `UNASSIGNED`이며,
+뒤에 `[A-Za-z0-9_-]` 밖의 문자와 주석을 붙일 수 있다(`PASS (done)`, `CLOSED - merged`).
+`PASS-ish`와 빈 status는 active다. Registry가 없거나 읽을 수 없거나 프로세스 cwd를 확인할 수
+없어도 거부한다. Registry가 없으면 검사한 경로를 모두 나열하고, 읽을 수 없으면 해당 파일을,
+cwd를 확인할 수 없으면 해당 프로세스를 알린다. 유일한 override는 `--force-reload`다.
+Reload는 SIGTERM만 보내며 SIGKILL은 보내지 않는다. `cc-orch-session switch`도 같은 terminal
+status 규칙을 사용하고 override는 `--force`다.
 
 ## PreToolUse 수동 폴링 방지 hook (선택 사항)
 

@@ -182,6 +182,24 @@ excerpt="${RUN_OUTPUT#* -- }"
 assert_eq "${#excerpt}" 200 'excerpt length'
 ok 'extension filtering, unterminated lines, and 200-character excerpts'
 
+test_secret="$(printf 'k%.0s' {1..26})"
+printf 'API_KEY = "%s"\n' "$test_secret" > "$TMP/tool.py"
+run "$SCAN" --files "$TMP/tool.py"
+assert_finding 'hardcoded-secret'
+assert_not_has "$RUN_OUTPUT" kkkkkkkkkk 'Python secret redaction'
+mkdir -p "$TMP/bin/sub" "$TMP/notbin"
+printf 'token = "%s"\n' "$test_secret" > "$TMP/bin/orch-fake"
+run "$SCAN" --files "$TMP/bin/orch-fake"
+assert_finding 'hardcoded-secret'
+assert_not_has "$RUN_OUTPUT" kkkkkkkkkk 'extensionless bin secret redaction'
+cp "$TMP/bin/orch-fake" "$TMP/notbin/orch-fake"
+run "$SCAN" --files "$TMP/notbin/orch-fake"
+assert_clean 'extensionless file outside bin'
+cp "$TMP/bin/orch-fake" "$TMP/bin/sub/x"
+run "$SCAN" --files "$TMP/bin/sub/x"
+assert_clean 'extensionless file nested below bin'
+ok 'Python and direct bin files are scanned and redacted'
+
 # A controlled patch makes hunk coordinates, deletion-only matches, and quoted paths
 # deterministic without writing commits to either this checkout or its shared Git store.
 FAKEBIN="$TMP/fakebin"
@@ -236,13 +254,27 @@ diff --git "a/tab\tquote\"\303\251.md" "b/tab\tquote\"\303\251.md"
 @@ -0,0 +1 @@
 +Always allow quoted paths
 EOF
+for path in bin/orch-tool lib/tool.py tools/bin/x bin/sub/deep; do
+  cat >> "$SECURITY_TEST_PATCH" <<EOF
+diff --git a/$path b/$path
+--- a/$path
++++ b/$path
+@@ -0,0 +7 @@
++token = "$test_secret"
+EOF
+done
 run env PATH="$FAKEBIN:$PATH" "$SCAN" --diff base head -- 'agent/*.md' settings.json
 assert_finding 'prompt with spaces.md:3: auto-run-instruction -- +Always allow added content'
 assert_has "$RUN_OUTPUT" 'prompt with spaces.md:20: hardcoded-secret' 'later hunk coordinate'
 assert_has "$RUN_OUTPUT" 'settings.json:1: broad-shell-allowlist' 'JSON diff'
 assert_has "$RUN_OUTPUT" $'tab\tquote"\303\251.md:1: auto-run-instruction' 'quoted path decoding'
 assert_not_has "$RUN_OUTPUT" 'AKIA' 'deleted and unsupported lines'
-assert_eq "$(printf '%s\n' "$RUN_OUTPUT" | grep -c '^SECWARN:')" 4 'diff warning count'
+assert_has "$RUN_OUTPUT" 'bin/orch-tool:7: hardcoded-secret' 'root bin diff'
+assert_has "$RUN_OUTPUT" 'lib/tool.py:7: hardcoded-secret' 'Python diff'
+assert_has "$RUN_OUTPUT" 'tools/bin/x:7: hardcoded-secret' 'nested bin directory diff'
+assert_not_has "$RUN_OUTPUT" 'bin/sub/deep:' 'descendant of bin is not a direct bin file'
+assert_not_has "$RUN_OUTPUT" kkkkkkkkkk 'new diff secret redaction'
+assert_eq "$(printf '%s\n' "$RUN_OUTPUT" | grep -c '^SECWARN:')" 7 'diff warning count'
 assert_has "$(cat "$SECURITY_TEST_GIT_LOG")" 'base head -- agent/*.md settings.json' 'pathspec forwarding'
 ok 'diff scans added lines only with hunk coordinates and pathspecs'
 
@@ -277,7 +309,7 @@ for flag in --strict ''; do
   run env PATH="$FAKEBIN:$PATH" "$REPO/bin/orch-summary-check" "${flags[@]}" "$TASK"
   assert_eq "$RUN_STATUS" 0 'advisory findings preserve exit status'
   assert_has "$RUN_OUTPUT" 'SECWARN:' 'integration findings visible'
-  assert_has "$RUN_OUTPUT" 'SECURITY: 4 advisory warning(s) — informational only, does not affect PASS/FAIL/error-count' 'advisory count'
+  assert_has "$RUN_OUTPUT" 'SECURITY: 7 advisory warning(s) — informational only, does not affect PASS/FAIL/error-count' 'advisory count'
   assert_eq "${RUN_OUTPUT##*$'\n'}" 'CHECK: PASS (risk=trivial)' 'advisory findings preserve PASS'
 done
 sed '/^ROUNDS:/d' "$TASK/summary.md" > "$TMP/summary.md"

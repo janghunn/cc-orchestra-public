@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Advisory scan of full files or added diff lines; 0 = clean/skipped, 1 = findings.
+# Advisory scan of .md/.json/.conf/.sh/.py and direct bin/ files or added lines; 0 = clean/skipped, 1 = findings.
 set -uo pipefail
 
 findings=0
@@ -12,7 +12,10 @@ instruction_pattern='always allow|auto-approve|auto approve|without confirmation
 shell_pattern='"Bash\((\*|bash:\*|sh:\*|zsh:\*|\*:\*)\)"'
 
 scannable() {
-  case "$1" in *.md|*.json|*.conf|*.sh) return 0 ;; *) return 1 ;; esac
+  # Extension set plus Python and any file directly inside a bin/ directory (repo-root bin/*
+  # scripts are extensionless). Diff-mode paths are repo-relative.
+  case "$1" in *.md|*.json|*.conf|*.sh|*.py) return 0 ;; esac
+  [[ "$1" =~ (^|/)bin/[^/]+$ ]]
 }
 
 warn() {

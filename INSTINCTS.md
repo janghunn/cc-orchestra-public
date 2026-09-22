@@ -86,3 +86,12 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
 - **Lesson:** before writing an acceptance criterion about "the text a tool is given", open the tool's
   argument parser; and when a side process must correlate with `codex-run` without changing it, snapshot
   `codex.log`'s size before dispatch and record an explicit attribution class instead of assuming exact.
+
+### Gate summaries must agree with their artifacts
+- **Observed:** a summary claimed a nonblocking review while `codex-review.md` reported a blocking
+  finding; checking only summary text produced a false green. Existing passing test fixtures also
+  claimed gates without creating their artifacts.
+- **Where:** `.orchestra/05-gate-hardening`, `bin/orch-summary-check`, and its policy/stop/Codex/Jev fixtures.
+- **Lesson:** cross-check positive claims against current top-level artifacts, with exact verdict
+  tokens and documented header shapes. Test contradictory, missing, archived, prose, and fenced
+  lookalikes; every fixture claiming a positive gate must carry the artifact it claims.

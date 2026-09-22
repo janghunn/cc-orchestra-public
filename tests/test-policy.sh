@@ -435,6 +435,9 @@ DISPATCH: codex-first
 INVESTIGATION: codex (1 call)
 LANES: codex gpt-5.6-sol@xhigh
 EOF
+printf 'CODEX-VERDICT: PASS\n' > "$TASK/codex-verdict.md"
+printf 'CODEX-REVIEW: CLEAR\n' > "$TASK/codex-review.md"
+printf 'VERDICT: PASS\n' > "$TASK/verdict.md"
 "$ROOT/bin/orch-summary-check" --strict "$TASK" >/dev/null
 
 sed -i 's/LANES:.*/LANES: dev-1/' "$TASK/summary.md"
@@ -453,6 +456,7 @@ ok "strict artifact and gate policy"
 TRIV="$WORK/.orchestra/02-trivial"
 mkdir -p "$TRIV"
 cp "$TASK/plan.md" "$TRIV/plan.md"
+cp "$TASK/codex-verdict.md" "$TASK/codex-review.md" "$TASK/verdict.md" "$TRIV/"
 
 SELF='GATES: self-check only (trivial) — ran bash tests/test-policy.sh; self-reviewed diff once'
 FULL='GATES: codex-verify PASS · codex-review CLEAR · claude-verifier not-required'
@@ -1205,6 +1209,7 @@ triv_check
 assert_eq "$TRIV_RC" "1" "T19 low to normal amendment exit"
 assert_has "$TRIV_OUT" "RISK AMENDED may only downgrade" "T19 low to normal amendment message"
 cp "$TASK/plan.md" "$TRIV/plan.md"
+cp "$TASK/codex-verdict.md" "$TASK/codex-review.md" "$TASK/verdict.md" "$TRIV/"
 
 # T20-T26: lock every pre-existing risk tier's gate behavior.
 triv_brief 'RISK: critical'
@@ -1244,6 +1249,248 @@ triv_summary 'normal opus@high' 'GATES: codex-verify PASS · codex-review unavai
 triv_check
 assert_eq "$TRIV_RC" "0" "T26 normal review fallback exit"
 ok "trivial risk tier gate policy and safe RISK fallback"
+
+# Gate artifact cross-check: every positive claim needs its own current artifact.
+artifacts_ok() {
+  rm -f "$TRIV"/verdict*.md "$TRIV"/verifier-verdict*.md "$TRIV/codex-audit.md"
+  printf 'CODEX-VERDICT: PASS\n' > "$TRIV/codex-verdict.md"
+  printf 'CODEX-REVIEW: CLEAR\n' > "$TRIV/codex-review.md"
+  printf 'VERDICT: PASS\n' > "$TRIV/verdict.md"
+}
+artifact_check() { # expected status, label, optional diagnostic
+  triv_check
+  assert_eq "$TRIV_RC" "$1" "$2 exit"
+  [ -z "${3:-}" ] || assert_has "$TRIV_OUT" "$3" "$2 diagnostic"
+}
+G3='GATES: codex-verify PASS · codex-review CLEAR · claude-verifier PASS'
+triv_brief 'RISK: critical'
+artifacts_ok
+
+# X1: the production false green claims NONBLOCKING over a blocking review.
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS · codex-review NONBLOCKING · claude-verifier PASS'
+printf 'CODEX-REVIEW: BLOCKING 1 / NONBLOCKING 0\n' > "$TRIV/codex-review.md"
+artifact_check 1 X1 "codex-review.md first line is 'CODEX-REVIEW: BLOCKING 1 / NONBLOCKING 0'"
+
+# X2: nonblocking findings are allowed when the blocking count is zero.
+printf 'CODEX-REVIEW: BLOCKING 0 / NONBLOCKING 2\n' > "$TRIV/codex-review.md"
+artifact_check 0 X2
+
+# X3: archived failures never replace current top-level artifacts.
+artifacts_ok
+triv_summary 'critical fable@high' "$G3"
+mkdir -p "$TRIV/evidence"
+printf 'CODEX-VERDICT: FAIL\n' > "$TRIV/evidence/codex-verdict-r1.md"
+printf 'CODEX-REVIEW: BLOCKING 2 / NONBLOCKING 0\n' > "$TRIV/evidence/codex-review-r1.md"
+printf 'VERDICT: FAIL\n' > "$TRIV/evidence/verdict.md"
+artifact_check 0 X3
+
+# X4: missing artifacts fail strict, but remain warnings without --strict.
+for file in codex-verdict.md codex-review.md verdict.md; do
+  artifacts_ok
+  rm "$TRIV/$file"
+  message="$file is missing"
+  [ "$file" != verdict.md ] || message='no verifier verdict file'
+  artifact_check 1 "X4 $file" "$message"
+done
+artifacts_ok
+rm "$TRIV/codex-verdict.md"
+TRIV_RC=0
+TRIV_OUT="$("$ROOT/bin/orch-summary-check" "$TRIV" 2>&1)" || TRIV_RC=$?
+assert_eq "$TRIV_RC" 0 'X4 non-strict exit'
+assert_has "$TRIV_OUT" 'WARN:' 'X4 non-strict warning'
+assert_has "$TRIV_OUT" 'codex-verdict.md is missing' 'X4 non-strict missing artifact'
+
+# X5: contradictions and token lookalikes cannot pass or leak artifact prose.
+artifacts_ok
+for token in FAIL INCONCLUSIVE; do
+  printf 'CODEX-VERDICT: %s\n' "$token" > "$TRIV/codex-verdict.md"
+  artifact_check 1 "X5 $token" "codex-verdict.md first line is 'CODEX-VERDICT: $token'"
+done
+printf 'CODEX-VERDICT: PASSWORD\n' > "$TRIV/codex-verdict.md"
+artifact_check 1 'X5 lookalike' '<unrecognised first line>'
+for token in PASS-FAIL PASS-ish; do
+  printf 'CODEX-VERDICT: %s\n' "$token" > "$TRIV/codex-verdict.md"
+  artifact_check 1 "X5 attached hyphen $token" '<unrecognised first line>'
+done
+printf 'CODEX-VERDICT: PASS was expected, but verification failed\n' > "$TRIV/codex-verdict.md"
+artifact_check 1 'X5 trailing prose' '<unrecognised first line>'
+printf 'CODEX-VERDICT: FAIL — secret="%s"\n' "$(printf 'z%.0s' {1..30})" > "$TRIV/codex-verdict.md"
+artifact_check 1 'X5 private prose' "codex-verdict.md first line is 'CODEX-VERDICT: FAIL'"
+assert_not_has "$TRIV_OUT" zzzzzzzzzz 'X5 artifact text is never echoed'
+
+# X6: Codex reads only the first non-blank line, including a leading fence.
+printf '%s\n' 'CODEX-VERDICT: FAIL' 'Earlier run: CODEX-VERDICT: PASS' '```' 'CODEX-VERDICT: PASS' '```' > "$TRIV/codex-verdict.md"
+artifact_check 1 'X6 later lookalikes' "codex-verdict.md first line is 'CODEX-VERDICT: FAIL'"
+artifacts_ok
+printf '%s\n' '```' 'CODEX-REVIEW: CLEAR' '```' > "$TRIV/codex-review.md"
+artifact_check 1 'X6 leading fence' '<unrecognised first line>'
+artifacts_ok
+printf '\nCODEX-VERDICT: PASS\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X6 leading blank'
+printf '  CODEX-VERDICT: PASS\r\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X6 indented CR'
+printf 'CODEX-VERDICT: PASS — 12/12\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X6 punctuation annotation'
+printf 'CODEX-VERDICT: PASS - 12/12\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X6 spaced hyphen annotation'
+printf 'CODEX-REVIEW: CLEAR-BLOCKING 1\n' > "$TRIV/codex-review.md"
+artifact_check 1 'X6 attached review hyphen' '<unrecognised first line>'
+
+# X7: positive summary tokens must be complete; annotations remain supported.
+artifacts_ok
+triv_summary 'critical fable@high' 'GATES: codex-verify PASSED · codex-review CLEAR · claude-verifier PASS'
+artifact_check 1 'X7 PASSED' 'executable verification did not PASS'
+for token in CLEARLY NONBLOCKINGX; do
+  triv_summary 'critical fable@high' "GATES: codex-verify PASS · codex-review $token · claude-verifier PASS"
+  artifact_check 1 "X7 $token" 'adversarial review is not'
+done
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS · codex-review CLEAR · claude-verifier PASSING'
+artifact_check 1 'X7 PASSING' 'critical risk requires claude-verifier PASS'
+triv_brief 'RISK: normal'
+triv_summary 'normal opus@high' 'GATES: codex-verify not PASS · codex-review CLEAR · claude-verifier PASS'
+artifact_check 1 'X7 negated PASS' 'executable verification did not PASS'
+triv_brief 'RISK: critical'
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS (2 runs) · codex-review CLEAR, · claude-verifier PASS.'
+artifact_check 0 'X7 punctuation'
+triv_summary 'critical fable@high' 'GATES: no codex-verify PASS · no codex-review CLEAR · no claude-verifier PASS'
+artifact_check 1 'X7 negated labels' 'executable verification did not PASS'
+assert_has "$TRIV_OUT" 'adversarial review is not' 'X7 negated review label'
+assert_has "$TRIV_OUT" 'critical risk requires claude-verifier PASS' 'X7 negated verifier label'
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS, codex-review CLEAR, claude-verifier PASS'
+artifact_check 0 'X7 comma separators'
+
+# X8: recognised verifier shapes, newest mtime, version ties, and false positives.
+triv_summary 'critical fable@high' "$G3"
+artifacts_ok
+artifact_check 0 'X8 plain PASS'
+printf 'VERDICT: PASS but only as an example\n' > "$TRIV/verdict.md"
+artifact_check 1 'X8 trailing prose' 'no recognised verdict'
+for token in PASS-FAIL PASS-ish; do
+  printf 'VERDICT: %s\n' "$token" > "$TRIV/verdict.md"
+  artifact_check 1 "X8 attached hyphen $token" 'no recognised verdict'
+done
+for shape in 'VERDICT: PASS — 21/21 met' 'VERDICT: PASS - 21/21' 'VERDICT: PASS (21/21)' '## Verdict: PASS — all met' '**VERDICT**: **PASS**'; do
+  printf '%s\n' "$shape" > "$TRIV/verdict.md"
+  artifact_check 0 'X8 punctuation and emphasis'
+done
+printf 'VERDICT: FAIL\n' > "$TRIV/verdict.md"
+artifact_check 1 'X8 plain FAIL' 'verdict.md verdict is FAIL'
+printf '**VERDICT:** PASS\n' > "$TRIV/verdict.md"
+artifact_check 0 'X8 emphasized header PASS'
+printf '**VERDICT:** FAIL\n' > "$TRIV/verdict.md"
+artifact_check 1 'X8 emphasized header FAIL' 'verdict.md verdict is FAIL'
+touch -d '2020-01-01 UTC' "$TRIV/verdict.md"
+printf 'VERIFIER-VERDICT: PASS\n' > "$TRIV/verifier-verdict.md"
+touch -d '2020-01-02 UTC' "$TRIV/verifier-verdict.md"
+artifact_check 0 'X8 verifier header'
+printf '# heading\n\n## VERDICT: PASS\n' > "$TRIV/verifier-verdict-2.md"
+touch -d '2020-01-03 UTC' "$TRIV/verifier-verdict-2.md"
+artifact_check 0 'X8 heading header'
+printf '# Independent verification\n\n## Verdict\n\n**PASS.** Every command succeeded.\n' > "$TRIV/verifier-verdict-3.md"
+touch -d '2020-01-04 UTC' "$TRIV/verifier-verdict-3.md"
+artifact_check 0 'X8 verdict section PASS'
+printf '# Independent verification\n\n## Verdict\n\n**FAIL** — a command failed.\n' > "$TRIV/verifier-verdict-3.md"
+touch -d '2020-01-04 UTC' "$TRIV/verifier-verdict-3.md"
+artifact_check 1 'X8 verdict section FAIL' 'verifier-verdict-3.md verdict is FAIL'
+printf '## Verdict\n**PASS** — all commands passed.\n' > "$TRIV/verifier-verdict-3.md"
+touch -d '+1 minute' "$TRIV/verdict.md"
+artifact_check 1 'X8 mtime beats filename' 'verdict.md verdict is FAIL'
+artifacts_ok
+rm "$TRIV/verdict.md"
+printf 'VERDICT: FAIL\n' > "$TRIV/verifier-verdict-10.md"
+printf 'VERDICT: PASS\n' > "$TRIV/verifier-verdict-9.md"
+touch -d '2020-01-01 UTC' "$TRIV/verifier-verdict-10.md" "$TRIV/verifier-verdict-9.md"
+artifact_check 1 'X8 version tie' 'verifier-verdict-10.md verdict is FAIL'
+artifacts_ok
+rm "$TRIV/verdict.md"
+for number in {1..70}; do
+  printf -v file 'verifier-verdict-a%03d.md' "$number"
+  printf 'VERDICT: PASS\n' > "$TRIV/$file"
+done
+touch -d '2020-01-01 UTC' "$TRIV"/verifier-verdict-a*.md
+printf 'VERDICT: FAIL\n' > "$TRIV/verifier-verdict-zzzz.md"
+touch -d '2020-01-02 UTC' "$TRIV/verifier-verdict-zzzz.md"
+artifact_check 1 'X8 newest beyond 64 candidates' 'verifier-verdict-zzzz.md verdict is FAIL'
+artifacts_ok
+rm "$TRIV/verdict.md"
+for number in {1..1001}; do
+  printf -v file 'verifier-verdict-b%04d.md' "$number"
+  printf 'VERDICT: PASS\n' > "$TRIV/$file"
+done
+verifier_limit_started=$SECONDS
+artifact_check 1 'X8 candidate limit' '1001 verifier verdict files exist'
+verifier_limit_elapsed=$((SECONDS - verifier_limit_started))
+assert_has "$TRIV_OUT" 'limit 1000' 'X8 candidate limit diagnostic'
+[ "$verifier_limit_elapsed" -lt 5 ] || fail "X8 candidate limit took ${verifier_limit_elapsed}s (must be under 5s)"
+printf 'NOTE: 1001-verifier limit check completed in %ss (under 5s)\n' "$verifier_limit_elapsed"
+artifacts_ok
+for shape in 'We considered VERDICT: PASS but' 'VERDICT: PASS | FAIL | INCONCLUSIVE' $'```\nVERDICT: PASS\n```' $'## Verdict\nThe PASS criteria were checked.'; do
+  printf '%s\n' "$shape" > "$TRIV/verdict.md"
+  artifact_check 1 'X8 unrecognised shape' 'no recognised verdict'
+done
+rm "$TRIV/verdict.md"
+artifact_check 1 'X8 Codex file is not verifier' 'no verifier verdict file'
+printf 'VERDICT: PASS\n' > "$TRIV/evidence/verdict.md"
+artifact_check 1 'X8 evidence is not verifier' 'no verifier verdict file'
+
+# X9: Codex-only critical tasks cross-check the audit header as well.
+artifacts_ok
+cat > "$TRIV/summary.md" <<'EOF'
+BACKEND: codex
+CODEX PROFILE: critical gpt-6-astra@high
+PROMOTIONS: none
+DISPATCH: codex-first
+INVESTIGATION: Codex
+LANES: Astra
+GATES: codex-verify PASS; codex-review CLEAR; codex-auditor PASS
+ROUNDS: 1
+EOF
+printf 'CODEX-AUDIT: PASS — final source and offline audit.\n' > "$TRIV/codex-audit.md"
+artifact_check 0 'X9 audit PASS'
+printf 'CODEX-AUDIT: PASS-INCONCLUSIVE\n' > "$TRIV/codex-audit.md"
+artifact_check 1 'X9 attached audit hyphen' '<unrecognised first line>'
+printf 'CODEX-AUDIT: FAIL\n' > "$TRIV/codex-audit.md"
+artifact_check 1 'X9 audit FAIL' 'codex-audit.md'
+printf 'CODEX-AUDIT: PASS\n' > "$TRIV/codex-audit.md"
+sed -i 's/codex-auditor PASS/codex-auditor PASSING/' "$TRIV/summary.md"
+artifact_check 1 'X9 audit lookalike' 'requires codex-auditor PASS'
+sed -i 's/codex-auditor PASSING/codex-auditor PASS/' "$TRIV/summary.md"
+rm "$TRIV/codex-audit.md"
+artifact_check 1 'X9 audit missing' 'codex-audit.md is missing'
+
+# X10: trivial self-checks do not require artifacts for optional gate text.
+rm "$TRIV/codex-verdict.md" "$TRIV/codex-review.md" "$TRIV/verdict.md"
+triv_brief 'RISK: trivial'
+triv_summary 'light sonnet@medium' 'GATES: self-check only (trivial) — ran tests; additionally codex-verify PASS'
+artifact_check 0 X10
+
+# X11: a low-risk waiver needs no review, but claimed verification remains real.
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$LOW_WAIVED"
+printf 'CODEX-VERDICT: PASS\n' > "$TRIV/codex-verdict.md"
+artifact_check 0 'X11 waived review'
+printf 'CODEX-VERDICT: FAIL\n' > "$TRIV/codex-verdict.md"
+artifact_check 1 'X11 failed verification' 'codex-verdict.md'
+
+# X12: fenced GATES and embedded artifact prose cannot override real failures.
+artifacts_ok
+triv_brief 'RISK: critical'
+triv_summary 'critical fable@high' 'GATES: codex-verify FAIL · codex-review CLEAR · claude-verifier PASS'
+printf '\n```\n%s\n```\n' "$G3" >> "$TRIV/summary.md"
+artifact_check 1 'X12 fenced GATES' 'executable verification did not PASS'
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS (file: CODEX-VERDICT: PASS) · codex-review CLEAR (CODEX-REVIEW: CLEAR) · claude-verifier PASS (VERDICT: PASS)'
+printf 'CODEX-VERDICT: FAIL\n' > "$TRIV/codex-verdict.md"
+printf 'CODEX-REVIEW: BLOCKING 1 / NONBLOCKING 0\n' > "$TRIV/codex-review.md"
+printf 'VERDICT: FAIL\n' > "$TRIV/verdict.md"
+artifact_check 1 'X12 header prose' 'codex-verdict.md'
+assert_has "$TRIV_OUT" 'codex-review.md' 'X12 header prose review'
+assert_has "$TRIV_OUT" 'verdict.md verdict is FAIL' 'X12 header prose verifier'
+artifacts_ok
+triv_summary 'critical fable@high' "$G3"
+printf '\nCODEX-VERDICT: PASS\n' >> "$TRIV/summary.md"
+printf 'CODEX-VERDICT: FAIL\n' > "$TRIV/codex-verdict.md"
+artifact_check 1 'X12 body header' 'codex-verdict.md'
+ok "gate artifact cross-check"
 
 report="$(CC_ORCH_CLAUDE_PROJECTS="$TMP/empty-claude" CC_ORCH_CODEX_LOG="$TMP/no-codex.log" "$ROOT/bin/orch-usage-report" --days 1)"
 assert_has "$report" "LOCAL USAGE REPORT" "usage heading"

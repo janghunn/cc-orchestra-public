@@ -134,7 +134,8 @@ if [ -r "$SUMMARY" ]; then
   grep -q '^INVESTIGATION:' "$SUMMARY" || problem warning "summary lacks INVESTIGATION"
   grep -q '^LANES:' "$SUMMARY" || problem warning "summary lacks LANES"
 
-  gates="$(grep '^GATES:' "$SUMMARY" | tail -1)"
+  if ! summary_nofence="$(strip_fences "$SUMMARY")"; then problem error "summary.md contains NUL bytes"; summary_nofence="$(cat "$SUMMARY")"; fi
+  gates="$(printf '%s\n' "$summary_nofence" | grep '^GATES:' | tail -1)"
   if [ -z "$gates" ]; then
     problem error "summary lacks GATES"
   else
@@ -146,10 +147,16 @@ if [ -r "$SUMMARY" ]; then
       # one ASCII letter/digit; this is locale-independent and rejects emoji/punctuation-only text.
       printf '%s' "$desc" | grep -q '[A-Za-z0-9]' || problem error "trivial risk must report 'GATES: self-check only (trivial) — <what was checked>'"
     else
-      codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0
-      printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+PASS' && codex_verify_ok=1
-      printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+(CLEAR|NONBLOCKING)' && codex_review_ok=1
-      printf '%s' "$gates" | grep -qiE 'claude-verifier[[:space:]]+PASS' && claude_verify_ok=1
+      tokend='([^A-Za-z0-9_-]|$)'
+      gate_claim() { # <label> <status regex>; claims must begin a separator-delimited segment
+        printf '%s\n' "${gates#GATES:}" | sed 's/·/\n/g;s/[;,]/\n/g' \
+          | grep -qiE "^[[:space:]]*$1[[:space:]]+($2)$tokend"
+      }
+      codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0; codex_audit_ok=0
+      gate_claim codex-verify PASS && codex_verify_ok=1
+      gate_claim codex-review 'CLEAR|NONBLOCKING' && codex_review_ok=1
+      gate_claim claude-verifier PASS && claude_verify_ok=1
+      gate_claim codex-auditor PASS && codex_audit_ok=1
 
       # A provider outage may fall back to the zero-context Claude verifier, but it must be
       # visible in the same line; a bare missing/waived executable verdict is never PASS.
@@ -157,18 +164,18 @@ if [ -r "$SUMMARY" ]; then
         [ "$codex_verify_ok" = 1 ] || problem error "Codex-only executable verification must PASS"
         [ "$codex_review_ok" = 1 ] || problem error "Codex-only review must be CLEAR/NONBLOCKING"
         if [ "$risk" = critical ]; then
-          printf '%s' "$gates" | grep -qiE 'codex-auditor[[:space:]]+PASS' || problem error "critical Codex-only risk requires codex-auditor PASS"
+          [ "$codex_audit_ok" = 1 ] || problem error "critical Codex-only risk requires codex-auditor PASS"
         fi
       elif [ "$codex_verify_ok" = "0" ]; then
-        if ! printf '%s' "$gates" | grep -qiE 'codex-verify[[:space:]]+unavailable' || \
+        if ! gate_claim codex-verify unavailable || \
            [ "$claude_verify_ok" = "0" ]; then
           problem error "executable verification did not PASS and has no explicit Claude fallback"
         fi
       fi
       if [ "$backend" != codex ] && [ "$codex_review_ok" = "0" ]; then
-        if [ "$risk" = "low" ] && printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+waived'; then
+        if [ "$risk" = "low" ] && gate_claim codex-review waived; then
           :
-        elif printf '%s' "$gates" | grep -qiE 'codex-review[[:space:]]+unavailable' && \
+        elif gate_claim codex-review unavailable && \
              [ "$claude_verify_ok" = "1" ]; then
           :
         else
@@ -178,6 +185,87 @@ if [ -r "$SUMMARY" ]; then
       if [ "$backend" != codex ] && [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
         problem error "critical risk requires claude-verifier PASS"
       fi
+
+      # An annotation must start with punctuation, not prose that merely mentions a verdict.
+      hdrtail='([[:space:]]*$|[[:space:]]+-|[[:space:]]*(—|–|[(:;,.]))'
+      # First non-blank line of an artifact, CR-stripped and trimmed. Files over 1 MiB are unrecognised.
+      artifact_header() {
+        [ -f "$1" ] && [ "$(wc -c < "$1")" -le 1048576 ] || return 1
+        grep -m1 -v '^[[:space:]]*$' "$1" 2>/dev/null | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+      }
+      # Diagnostics never echo artifact text: print the recognised header token or a placeholder.
+      safe_header() { # <header> <kind: VERDICT|REVIEW|AUDIT>
+        printf '%s' "$1" | sed -nE "s/^(CODEX-$2:[[:space:]]*(PASS|FAIL|INCONCLUSIVE|CLEAR|BLOCKING[[:space:]]+[0-9]+[[:space:]]*\/[[:space:]]*NONBLOCKING[[:space:]]+[0-9]+))$hdrtail.*/\1/p" | head -1 \
+          | grep . || printf '<unrecognised first line>'
+      }
+      cross_check() { # <claim> <file basename> <kind> <accepting regex> <required form>
+        local file="$TASK_DIR/$2" header
+        if [ ! -f "$file" ]; then problem warning "GATES claims $1 but $2 is missing (needs first line $5)"; return 0; fi
+        header="$(artifact_header "$file")" || header=""
+        printf '%s' "$header" | grep -qE "$4" || problem warning "GATES claims $1 but $2 first line is '$(safe_header "$header" "$3")' (needs $5)"
+        return 0
+      }
+      verifier_cross_check() {
+        local candidates=() count newest name content token
+        # Collect metadata in one process, then sort by mtime and versioned basename.
+        # The second key includes the whole path; NUL delimiters preserve whitespace in names.
+        mapfile -d '' -t candidates < <(
+          find "$TASK_DIR" -maxdepth 1 -type f \( -name verdict.md -o -name 'verdict-*.md' -o -name verifier-verdict.md -o -name 'verifier-verdict-*.md' \) \
+            -printf '%T@ %p\0' | sort -z -t ' ' -k1,1n -k2V
+        )
+        count="${#candidates[@]}"
+        if [ "$count" -gt 1000 ]; then
+          problem warning "GATES claims claude-verifier PASS but $count verifier verdict files exist in $TASK_DIR (limit 1000); archive old runs under evidence/"
+          return 0
+        fi
+        if [ "$count" = 0 ]; then
+          problem warning "GATES claims claude-verifier PASS but no verifier verdict file (verdict.md, verdict-*.md, verifier-verdict.md, verifier-verdict-*.md) exists in $TASK_DIR"
+          return 0
+        fi
+        newest="${candidates[count - 1]#* }"
+        name="${newest##*/}"
+        if [ "$(wc -c < "$newest")" -gt 1048576 ]; then
+          problem warning "GATES claims claude-verifier PASS but $name exceeds 1 MiB and was not parsed"
+          return 0
+        fi
+        if ! content="$(strip_fences "$newest")"; then problem warning "$name contains NUL bytes"; return 0; fi
+        token="$(printf '%s\n' "$content" | awk '
+          function verdict(value, token, rest) {
+            sub(/^[[:space:]*`]*/, "", value)
+            if (!match(value, /^(PASS|FAIL|INCONCLUSIVE)/)) return ""
+            token = substr(value, 1, RLENGTH); rest = substr(value, RLENGTH + 1)
+            sub(/^[*`]*/, "", rest)
+            # An ASCII hyphen introduces an annotation only after whitespace.
+            if (rest ~ /^[[:space:]]+-/) return token
+            sub(/^[[:space:]]*/, "", rest)
+            # Only punctuation may introduce an annotation; prose and template pipes fail.
+            if (rest != "" && rest !~ /^(—|–|[(:;,.])/) return ""
+            return token
+          }
+          {
+            line = $0; gsub(/\r/, "", line)
+            if (section && line !~ /^[[:space:]]*$/) {
+              value = verdict(line); if (value != "") last_section = value
+              section = 0
+            }
+            if (match(toupper(line), /^[[:space:]]*(#+[[:space:]]*)?[*`]*(VERIFIER-)?VERDICT[*`]*[[:space:]]*:[[:space:]]*/)) {
+              value = verdict(substr(line, RLENGTH + 1)); if (value != "") last_header = value
+            }
+            if (line ~ /^#+[[:space:]]*[*]*[Vv]erdict[*]*[[:space:]]*$/) section = 1
+          }
+          END { if (last_header != "") print last_header; else if (last_section != "") print last_section }
+        ')"
+        case "$token" in
+          PASS) ;;
+          FAIL|INCONCLUSIVE) problem warning "GATES claims claude-verifier PASS but $name verdict is $token" ;;
+          *) problem warning "GATES claims claude-verifier PASS but $name has no recognised verdict (VERDICT: <token>, VERIFIER-VERDICT: <token>, or a '## Verdict' heading followed by the token)" ;;
+        esac
+        return 0
+      }
+      [ "$codex_verify_ok" = 1 ] && cross_check 'codex-verify PASS' codex-verdict.md VERDICT "^CODEX-VERDICT:[[:space:]]*PASS$hdrtail" 'CODEX-VERDICT: PASS'
+      [ "$codex_review_ok" = 1 ] && cross_check 'codex-review CLEAR/NONBLOCKING' codex-review.md REVIEW "^CODEX-REVIEW:[[:space:]]*(CLEAR|BLOCKING[[:space:]]+0[[:space:]]*/[[:space:]]*NONBLOCKING[[:space:]]+[0-9]+)$hdrtail" 'CODEX-REVIEW: CLEAR or CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>'
+      [ "$backend" = codex ] && [ "$codex_audit_ok" = 1 ] && cross_check 'codex-auditor PASS' codex-audit.md AUDIT "^CODEX-AUDIT:[[:space:]]*PASS$hdrtail" 'CODEX-AUDIT: PASS'
+      [ "$claude_verify_ok" = 1 ] && verifier_cross_check
     fi
   fi
 

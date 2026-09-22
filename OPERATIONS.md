@@ -143,6 +143,41 @@ Codex verify/review or Claude verifier, and the lead reports
 `GATES: self-check only (trivial) — <what was checked>`. `orch-summary-check --strict` enforces
 that line. See "Choosing RISK" in `agents/orchestrator.md` for the applicability rules.
 
+For non-trivial tasks, `orch-summary-check --strict` cross-checks positive `GATES:` claims
+against artifacts in the task directory:
+
+- `codex-verify PASS`: `codex-verdict.md`, first non-blank line `CODEX-VERDICT: PASS`.
+- `codex-review CLEAR|NONBLOCKING`: `codex-review.md`, first non-blank line
+  `CODEX-REVIEW: CLEAR` or `CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>`.
+- `codex-auditor PASS` (Codex backend): `codex-audit.md`, first non-blank line `CODEX-AUDIT: PASS`.
+- `claude-verifier PASS`: the newest file by mtime among `verdict.md`, `verdict-*.md`,
+  `verifier-verdict.md`, and `verifier-verdict-*.md`. It must contain `VERDICT: PASS` or
+  `VERIFIER-VERDICT: PASS` (optionally a Markdown heading), or a `## Verdict` heading whose
+  next non-blank line starts with `PASS` (Markdown emphasis and `PASS.` are accepted).
+
+Only top-level files count; archived files under `evidence/` or `rounds/` are ignored.
+All matching verifier files are considered; the newest mtime wins, and equal mtimes choose
+the last basename in version order. More than 1000 matching files produces an error under
+`--strict` (a warning otherwise) without parsing a verdict; archive old runs under `evidence/`.
+The last recognised verdict header wins, or the last recognised verdict section if there is
+no header. Header names are case-insensitive for the Claude verifier;
+artifact verdict tokens are case-sensitive. Template alternatives such as
+`VERDICT: PASS | FAIL | INCONCLUSIVE` are not verdicts. After an artifact verdict token (or
+review counts), only whitespace or an annotation beginning with `—`, `–`, `-`, `(`, `:`, `;`,
+`,`, or `.` is accepted; bare trailing prose such as `PASS but only as an example` is rejected.
+ASCII `-` requires at least one preceding whitespace character: `PASS - 12/12` is accepted,
+while `PASS-FAIL`, `PASS-ish`, and `CLEAR-BLOCKING 1` are rejected. The other delimiters may
+follow the token directly or after whitespace.
+Files over 1 MiB are not parsed.
+Fenced blocks are ignored in the summary and Claude verifier; Codex artifacts require the
+header itself as their first non-blank line. The last `GATES:` line outside fences is used,
+with complete status tokens rather than prefixes. Claims must begin a segment separated by
+`·`, `;`, or `,`; prefixed text such as `no codex-verify PASS` is not a claim.
+Missing or contradicting artifacts produce
+errors with `--strict` and warnings otherwise. Trivial self-checks and low-risk review waivers
+retain their policy. To clear a failure, correct the summary or supply the matching artifact;
+the stop gate's documented `stop-gate.off` switch remains available.
+
 The command returns an immutable agent type such as `route-lead-bravo-normal`, plus its model and
 effort. `build-roster-runtime.sh` generates all 16 slot/profile combinations, and the legacy quota
 guard never rewrites the `route-lead-*` namespace. Usage changes therefore choose among already
@@ -153,12 +188,15 @@ changes from the current branch's merge base with local `main` (or `origin/main`
 Run it from the task worktree, even when the executable is installed in another checkout or
 the task artifacts are stored in the orchestrator's checkout. Outside a Git checkout, it falls
 back to the repository containing the task directory; it never scans the installation by default.
-It checks `.md`, `.json`, `.conf`, and `.sh` files for secret-shaped literals, instructions to
+It checks `.md`, `.json`, `.conf`, `.sh`, `.py`, and files directly inside any `bin/` directory for secret-shaped literals, instructions to
 bypass confirmation, and broad Bash permission strings. Findings are warn-only and never change
 PASS/FAIL or gate error/warning counts, including with `--strict`; unavailable Git bases are
 reported as skipped, not clean. Secret-bearing lines are redacted from diagnostics. To scan
 full on-disk files, run `bin/orch-security-scan --files <file>...` (exit 0 for
 no findings, 1 for findings).
+Scanning `bin/orch-security-scan` itself produces two expected instruction-phrase findings
+on its pattern definition and diagnostic label lines. These remain advisory and have no
+exemption in the scanner.
 
 Codex model and effort are resolved automatically on each new `codex-run` invocation:
 
@@ -348,6 +386,17 @@ An already-running model process is not hot-swapped mid-turn:
 
 `cc-orch --reload` remains appropriate after structural prompt/template/agent-definition changes.
 The prompt hook distinguishes that case from ordinary budget movement.
+
+With a live session, reload discovers `.orchestra/REGISTRY.md` like the hooks: git toplevel
+and its ancestors, process cwd and its ancestors, the git common directory's parent, then
+linked worktrees. The first existing file wins. Any active lead row refuses reload. Terminal
+statuses are `PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`, and `UNASSIGNED`, optionally followed
+by a character outside `[A-Za-z0-9_-]` and an annotation, such as `PASS (done)` or
+`CLOSED - merged`; `PASS-ish` and empty statuses are active. A missing or unreadable registry,
+or an unresolvable process cwd, also refuses reload. Missing-registry diagnostics list every
+path checked; unreadable-registry diagnostics name the file, and unresolved-cwd diagnostics
+identify the process. `--force-reload` is the only override. Reload sends SIGTERM and never
+SIGKILL. `cc-orch-session switch` uses the same terminal-status rule, with `--force` as its override.
 
 ## PreToolUse poll guard (opt-in)
 
