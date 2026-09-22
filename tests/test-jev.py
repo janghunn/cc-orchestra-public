@@ -512,6 +512,8 @@ class JevBehaviour:
         task.mkdir()
         (task / "brief.md").write_text("# T\nRISK: low\nVerification: true\n")
         (task / "plan.md").write_text("# plan\n")
+        (task / "codex-verdict.md").write_text("CODEX-VERDICT: PASS\n")
+        (task / "codex-review.md").write_text("CODEX-REVIEW: CLEAR\n")
         (task / "summary.md").write_text("[lead-alpha] STATUS: PASS\nCLAUDE PROFILE: light sonnet@medium\nPROMOTIONS: none\nGATES: codex-verify PASS · codex-review CLEAR · claude-verifier not-required\nROUNDS: 1\nDISPATCH: codex-first\nINVESTIGATION: codex (1 call)\nLANES: codex gpt-5.6-sol@xhigh\nBRIEF AUDIT: clean\n")
         def check():
             result = subprocess.run([str(ROOT / "bin/orch-summary-check"), "--strict", str(task)],

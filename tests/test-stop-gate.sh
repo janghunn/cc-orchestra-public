@@ -286,6 +286,8 @@ LANES: codex
 GATES: codex-verify PASS; codex-review BLOCKING
 ROUNDS: 1
 SUMMARY
+printf 'CODEX-VERDICT: PASS\n' > "$ESCALATION/codex-verdict.md"
+printf 'CODEX-REVIEW: BLOCKING 1 / NONBLOCKING 0\n' > "$ESCALATION/codex-review.md"
 registry '.orchestra/escalation'
 transcript $'STATUS: BLOCKED\nGATES: codex-review BLOCKING'
 CHECK_ERROR_TEXT='ERROR: adversarial review is not CLEAR/NONBLOCKING' check warn-check 'C honest BLOCKED summary with real gate failure can escalate' yes route-lead-charlie-critical false cccccccc1234 "$ESCALATION"

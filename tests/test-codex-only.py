@@ -78,6 +78,9 @@ path.write_text(json.dumps(state))
         task.mkdir(parents=True, exist_ok=True)
         (task / "brief.md").write_text("RISK: " + risk + "\n")
         (task / "plan.md").write_text("# Plan\nTest concrete behavior.\n")
+        (task / "codex-verdict.md").write_text("CODEX-VERDICT: PASS\n")
+        (task / "codex-review.md").write_text("CODEX-REVIEW: CLEAR\n")
+        (task / "codex-audit.md").write_text("CODEX-AUDIT: PASS\n")
         level = "light" if risk in ["trivial", "low"] else risk
         (task / "summary.md").write_text(f"BACKEND: codex\nCODEX PROFILE: {level} gpt-6-astra@high\nPROMOTIONS: none\nDISPATCH: codex-first\nINVESTIGATION: Codex\nLANES: Astra\nGATES: {gates}\nROUNDS: 1\n")
         return task
@@ -334,6 +337,27 @@ path.write_text(json.dumps(state))
         self.run_cmd([*command, "switch", "sample", "--backend", "hybrid", "--no-attach"], expected=2)
         self.assertIn("backend    codex", self.run_cmd([*command, "status", "sample"]))
         self.assertIn("ccorch-codex-sample", json.loads((self.base / "tmux-state.json").read_text()))
+
+        for status in ["PASS-ish", ""]:
+            with self.subTest(status=status):
+                (self.cwd / ".orchestra/REGISTRY.md").write_text(f"| lead-alpha | id | task | branch | path | {status} | now |\n")
+                self.run_cmd([*command, "switch", "sample", "--backend", "hybrid", "--no-attach"], expected=2)
+                self.assertIn("backend    codex", self.run_cmd([*command, "status", "sample"]))
+                self.assertIn("ccorch-codex-sample", json.loads((self.base / "tmux-state.json").read_text()))
+
+    def test_switch_accepts_annotated_terminal_leads(self):
+        command = [ROOT / "bin/cc-orch-codex", "session"]
+        self.run_cmd([*command, "new", "sample", self.cwd, "--project-name", "demo", "--inplace", "--no-attach"])
+        artifact = self.task() / "keep.txt"
+        artifact.write_text("existing user work")
+        (self.cwd / ".orchestra/REGISTRY.md").write_text(
+            "| lead-alpha | id | task | branch | path | PASS (done) | now |\n"
+            "| lead-bravo | id | task | branch | path | CLOSED - merged | now |\n"
+        )
+        self.run_cmd([*command, "switch", "sample", "--backend", "hybrid", "--no-attach"])
+        self.assertIn("backend    claude", self.run_cmd([*command, "status", "sample"]))
+        self.assertIn("CC_ORCH_BACKEND=claude", json.loads((self.base / "tmux-state.json").read_text())["ccorch-codex-sample"])
+        self.assertEqual(artifact.read_text(), "existing user work")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,8 @@ jobs:
         run: bash -n install.sh && bash install.sh --help >/dev/null
       - name: Existing policy suite
         run: bash tests/test-policy.sh
+      - name: Reload registry guard suite
+        run: bash tests/test-reload.sh
       - name: Runtime routing and session suite
         run: bash tests/test-runtime.sh
       - name: Poll guard hook suite

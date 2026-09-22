@@ -284,7 +284,12 @@ cmd_switch() {
     command -v claude >/dev/null 2>&1 || die 'Claude CLI is not installed; current session kept'
   fi
   if [ -r "$WORKDIR/.orchestra/REGISTRY.md" ]; then
-    active="$(awk -F'|' '/^\|[[:space:]]*lead-/ {s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); if (s != "" && s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)([^A-Z]|$)/) print}' "$WORKDIR/.orchestra/REGISTRY.md")"
+    # keep identical to bin/cc-orch reload check
+    active="$(awk -F'|' '
+          /^\|[[:space:]]*lead-/ {
+            s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+            if (s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)([^A-Za-z0-9_-]|$)/) print $0
+          }' "$WORKDIR/.orchestra/REGISTRY.md")"
   fi
   if [ -n "$active" ] && [ "$force" = 0 ]; then
     die "active lead records remain; finish/save their work first, or use --force after checking those tasks"

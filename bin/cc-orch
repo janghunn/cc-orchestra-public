@@ -36,7 +36,7 @@ usage: cc-orch [options] <project-name> [project-dir] [extra claude args...]
   --model M        Explicit model override for this orchestrator session.
   --effort E       Explicit effort override (low|medium|high|xhigh|max).
   --reload         Gracefully replace the running named session and continue its conversation.
-                   Refuses while REGISTRY.md has active lead rows.
+                   Refuses if REGISTRY.md cannot be checked or has active lead rows.
   --force-reload   Override only the registry safety check; still never SIGKILLs Claude.
 
 examples:
@@ -116,24 +116,98 @@ if [[ $RELOAD -eq 1 ]]; then
   fi
 
   if [[ ${#matches[@]} -eq 1 ]]; then
+    # Registry discovery mirrors hooks/orch-stop-gate.sh find_registry(): git toplevel and its
+    # ancestors, the process cwd and its ancestors, the git common dir's parent, then every linked
+    # worktree. First existing file wins. Git probes drop inherited GIT_* like the hooks do.
+    reload_git() { # <dir> <git args...>
+      local unset_args=() v
+      for v in "${!GIT_@}"; do unset_args+=(-u "$v"); done
+      env "${unset_args[@]}" GIT_OPTIONAL_LOCKS=0 timeout 2 git -C "$1" "${@:2}" 2>/dev/null || true
+      return 0
+    }
+    reload_check_candidate() { # <path>; dedupes checked paths; keeps the first regular file
+      local c
+      for c in "${RELOAD_CHECKED[@]-}"; do [[ "$c" == "$1" ]] && return 0; done
+      RELOAD_CHECKED+=("$1")
+      [[ -z "$RELOAD_REGISTRY" && -f "$1" ]] && RELOAD_REGISTRY="$1"
+      return 0
+    }
+    reload_find_registry() { # <dir>
+      local dir="$1" checkout common start p tree
+      RELOAD_REGISTRY=""; RELOAD_CHECKED=()
+      checkout="$(reload_git "$dir" rev-parse --show-toplevel)"
+      common="$(reload_git "$dir" rev-parse --git-common-dir)"
+      [[ -n "$common" && "$common" != /* ]] && common="$dir/$common"
+      [[ -n "$common" ]] && common="$(readlink -f "$common" 2>/dev/null || true)"
+      for start in "$checkout" "$dir"; do
+        [[ -n "$start" ]] || continue
+        p="$(readlink -f "$start" 2>/dev/null || true)"; [[ -n "$p" ]] || continue
+        while :; do
+          reload_check_candidate "$p/.orchestra/REGISTRY.md"
+          [[ -n "$RELOAD_REGISTRY" ]] && return 0
+          [[ "$p" == / ]] && break
+          p="$(dirname "$p")"
+        done
+      done
+      if [[ -n "$common" ]]; then
+        reload_check_candidate "$(dirname "$common")/.orchestra/REGISTRY.md"
+        [[ -n "$RELOAD_REGISTRY" ]] && return 0
+      fi
+      while IFS= read -r tree; do
+        [[ -n "$tree" ]] || continue
+        reload_check_candidate "$tree/.orchestra/REGISTRY.md"
+        [[ -n "$RELOAD_REGISTRY" ]] && return 0
+      done < <(reload_git "${checkout:-$dir}" worktree list --porcelain | sed -n 's/^worktree //p')
+      return 0
+    }
+
     old_pid="${matches[0]}"
     old_dir="$(readlink -f "/proc/$old_pid/cwd" 2>/dev/null || true)"
-    [[ -n "$old_dir" ]] && PROJECT_DIR="$old_dir"
-
-    registry="$PROJECT_DIR/.orchestra/REGISTRY.md"
-    active_rows=""
-    if [[ -r "$registry" ]]; then
-      active_rows="$(awk -F'|' '
-        /^\|[[:space:]]*lead-/ {
-          s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
-          if (s != "" && s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)$/) print $0
-        }' "$registry")"
-    fi
-    if [[ -n "$active_rows" && $FORCE_RELOAD -ne 1 ]]; then
-      echo "cc-orch: refusing to reload '$PROJECT_NAME': active lead rows in $registry" >&2
-      printf '%s\n' "$active_rows" >&2
-      echo "Finish/stop those leads, or use --force-reload after confirming their state is on disk." >&2
-      exit 1
+    if [[ -z "$old_dir" ]]; then
+      if [[ $FORCE_RELOAD -ne 1 ]]; then
+        echo "cc-orch: refusing to reload '$PROJECT_NAME': cannot resolve the working directory of pid $old_pid, so its REGISTRY.md cannot be checked." >&2
+        echo "Confirm no lead is running, then use --force-reload." >&2
+        exit 1
+      fi
+      echo "cc-orch: --force-reload: working directory of pid $old_pid unresolved; skipping the registry check" >&2
+    else
+      PROJECT_DIR="$old_dir"
+      reload_find_registry "$PROJECT_DIR"
+      registry="$RELOAD_REGISTRY"
+      if [[ -z "$registry" ]]; then
+        if [[ $FORCE_RELOAD -ne 1 ]]; then
+          echo "cc-orch: refusing to reload '$PROJECT_NAME': no .orchestra/REGISTRY.md found for pid $old_pid (cwd $PROJECT_DIR); checked:" >&2
+          printf '  %s\n' "${RELOAD_CHECKED[@]}" >&2
+          echo "Confirm no lead is running, then use --force-reload." >&2
+          exit 1
+        fi
+        echo "cc-orch: --force-reload: no REGISTRY.md found (${#RELOAD_CHECKED[@]} paths checked); proceeding" >&2
+      elif [[ ! -r "$registry" ]]; then
+        if [[ $FORCE_RELOAD -ne 1 ]]; then
+          echo "cc-orch: refusing to reload '$PROJECT_NAME': registry $registry exists but is not readable" >&2
+          echo "Confirm no lead is running, then use --force-reload." >&2
+          exit 1
+        fi
+        echo "cc-orch: --force-reload: unreadable $registry; proceeding" >&2
+      else
+        # Terminal statuses may carry an annotation ("PASS (done)", "CLOSED - merged"); anything
+        # else, including a lookalike ("PASS-ish") or an empty status, is active. Keep this awk
+        # filter byte-identical to bin/cc-orch-session's switch check.
+        active_rows="$(awk -F'|' '
+          /^\|[[:space:]]*lead-/ {
+            s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+            if (s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)([^A-Za-z0-9_-]|$)/) print $0
+          }' "$registry")"
+        if [[ -n "$active_rows" ]]; then
+          if [[ $FORCE_RELOAD -ne 1 ]]; then
+            echo "cc-orch: refusing to reload '$PROJECT_NAME': active lead rows in $registry" >&2
+            printf '%s\n' "$active_rows" >&2
+            echo "Finish/stop those leads, or use --force-reload after confirming their state is on disk." >&2
+            exit 1
+          fi
+          echo "cc-orch: --force-reload: overriding active lead rows in $registry" >&2
+        fi
+      fi
     fi
 
     echo "cc-orch: gracefully stopping orchestrator@${PROJECT_NAME} (pid $old_pid)"
