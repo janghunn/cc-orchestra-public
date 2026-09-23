@@ -293,11 +293,11 @@ dispatch=codex-first
 | Pressure | Profile | Model | Effort |
 |---|---|---|---|
 | healthy | critical | Opus | xhigh |
-| watch | normal | Opus | high |
+| watch | critical | Opus | xhigh |
 | tight | normal | Opus | high |
 | critical | normal | Opus | high |
 
-critical task는 Opus 5.5를 xhigh로 사용하고, Fable은 deep reasoning (`critical-xhigh`)을 위한 reserve로 남긴다.
+critical task는 `watch`까지 Opus 5.5의 xhigh를 유지하고, `tight`부터 Opus@high로 effort를 낮춘다. Fable은 deep reasoning (`critical-xhigh`)을 위한 reserve로 남긴다.
 
 ## critical + deep reasoning
 
@@ -314,7 +314,7 @@ critical task는 Opus 5.5를 xhigh로 사용하고, Fable은 deep reasoning (`cr
 
 `BUDGET_FABLE_RESERVE_PCT=85`가 기본값이다.
 
-Fable 전용 사용률이 85% 이상이면 새 `critical-xhigh` 선택을 Opus normal profile로 낮춰 Fable을 보존한다. 같은 규칙으로 `critical` 선택도 normal(Opus@high)로 낮아지지만, critical은 이미 Opus이므로 이 경우는 Fable을 절약하지 않고 effort만 xhigh→high로 내린다 (규칙 재조정은 `budget-policy.conf` 과제).
+Fable 전용 주간 사용률이 85% 이상이면 실제 모델이 Fable로 해석되는 profile만 Opus `normal` profile로 낮춰 Fable을 보존한다. 현재는 `critical-xhigh`만 해당한다. plain `critical`은 Opus@xhigh로 Fable을 사용하지 않으므로 Fable 사용률의 영향을 받지 않으며, 압박에 따른 effort 조정은 전적으로 `CLAUDE_ROUTE_CRITICAL_*` 표에서 정한다. 전역 Fable 소진 상태에서도 같은 모델 기준 규칙을 적용한다.
 
 ---
 

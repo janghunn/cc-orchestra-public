@@ -1,5 +1,18 @@
 # Runtime routing commands and install integration. Sourced by orch-model-guard-runtime.
 
+# True when a lead profile resolves to the Fable model, i.e. when it actually draws the Fable
+# weekly bucket that the reserve/exhaustion guards in cmd_route exist to protect. Matches on the
+# model family the way hooks/orch-model-notice.sh's family() does, so any fable* variant counts.
+# An unresolvable profile returns false; cmd_route hard-fails on it two lines later anyway.
+profile_uses_fable() {
+  local m
+  m="$(profile_values "$1" 2>/dev/null | cut -d'|' -f1)" || return 1
+  case "$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')" in
+    *fable*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 cmd_route() {
   local kind="${1:-}" arg="${2:-}" extra="${3:-}" slot="${4:-}"
   local state profile var values model effort suffix allow fable active pinned agent_type
@@ -27,13 +40,20 @@ cmd_route() {
         var="CLAUDE_ROUTE_CRITICAL_$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')_PROFILE"
         profile="${!var:-critical}"
       fi
+      # 2026-09-23: Both guards below protect the Fable weekly bucket. Since critical leads moved
+      # to Opus 5.5 (model-policy.conf), profile names no longer say which profiles draw Fable, so
+      # key on the resolved model instead: a profile whose model is not Fable is not conserving
+      # anything by being downgraded here, and pressure-based effort tuning is the route table's
+      # job, not this guard's.
       fable="$(lget fable_pct)"
       if is_numeric "$fable" && awk -v p="$fable" -v t="$BUDGET_FABLE_RESERVE_PCT" 'BEGIN { exit !(p >= t) }'; then
-        case "$profile" in critical|critical-xhigh) profile=normal ;; esac
+        profile_uses_fable "$profile" && profile=normal
       fi
       active="$(lget active)"; pinned="$(lget pinned)"
+      # Global Fable exhaustion rewrites lead-*.md but not the immutable route-lead-* agents, so a
+      # Fable-backed profile must still be steered away from here.
       if [ "$pinned" != 1 ] && [ "$active" = "$FALLBACK_MODEL" ]; then
-        case "$profile" in critical|critical-xhigh) profile=normal ;; esac
+        profile_uses_fable "$profile" && profile=normal
       fi
       values="$(profile_values "$profile")" || return 2
       IFS='|' read -r model effort suffix <<< "$values"
