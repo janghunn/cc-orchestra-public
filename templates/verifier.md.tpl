@@ -1,8 +1,8 @@
 ---
 name: verifier
 description: Critical-task independent zero-trust verifier (Tier 4, Opus max). Given only a repo path and a spec path, it re-runs verification from a clean slate. Mandatory for RISK critical; low/normal use codex-run verify and invoke verifier-normal only as fallback.
-model: opus[1m]
-effort: max
+model: __MODEL__
+effort: __EFFORT__
 tools: Bash, Read, Grep, Glob
 hooks:
   PreToolUse:

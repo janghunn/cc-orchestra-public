@@ -298,22 +298,50 @@ RUN_OUTPUT="$(printf '%s' "$payload" | PATH="$TMP/bin" "$bash_path" "$HOOK")"
 ok 'ALLOW: Python runtime failure fails open'
 
 # Check the real frontmatter registration and execute its command through the same
-# symlink layout as install.sh, without changing the real user installation or HOME.
-python3 - "$ROOT" "$TMP" <<'PY'
+# generated-file and symlink layout as install.sh, without changing the real installation.
+GENERATED="$TMP/generated-agents"
+CC_ORCH_AGENTS_DIR="$GENERATED" CC_ORCH_MANIFEST="$GENERATED/.install-manifest.json" \
+  CC_ORCH_STATE_DIR="$TMP/guard-state" "$ROOT/build-roster.sh" >/dev/null
+[ -f "$GENERATED/verifier.md" ] || fail 'build-roster.sh did not generate verifier.md'
+
+CONF_REPO="$TMP/conf-repo"
+mkdir -p "$CONF_REPO/templates"
+cp "$ROOT/build-roster.sh" "$ROOT/model-policy.conf" "$CONF_REPO/"
+cp "$ROOT/templates/lead.md.tpl" "$ROOT/templates/dev.md.tpl" "$ROOT/templates/verifier.md.tpl" \
+   "$CONF_REPO/templates/"
+chmod +x "$CONF_REPO/build-roster.sh"
+sed -i 's/^VERIFIER_CRITICAL_MODEL=.*/VERIFIER_CRITICAL_MODEL="sonnet[1m]"/; s/^VERIFIER_CRITICAL_EFFORT=.*/VERIFIER_CRITICAL_EFFORT="medium"/' \
+  "$CONF_REPO/model-policy.conf"
+grep -q '^VERIFIER_CRITICAL_MODEL="sonnet\[1m\]"$' "$CONF_REPO/model-policy.conf" \
+  || fail 'conf fixture edit did not apply (variable renamed?)'
+CONF_AGENTS="$TMP/conf-agents"
+CC_ORCH_AGENTS_DIR="$CONF_AGENTS" CC_ORCH_MANIFEST="$CONF_AGENTS/.install-manifest.json" \
+  CC_ORCH_STATE_DIR="$TMP/guard-state" "$CONF_REPO/build-roster.sh" >/dev/null
+[ -f "$CONF_AGENTS/verifier.md" ] || fail 'conf-varied build did not generate verifier.md'
+
+python3 - "$ROOT" "$TMP" "$GENERATED" "$CONF_AGENTS" <<'PY'
 import json
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
-root, scratch = map(Path, sys.argv[1:])
+root, scratch, generated, conf_agents = map(Path, sys.argv[1:])
 installed = scratch / "installed path" / ".claude"
 (installed / "agents").mkdir(parents=True)
 (installed / "orchestra").symlink_to(root, target_is_directory=True)
-for agent in ("verifier", "verifier-normal"):
-    (installed / "agents" / (agent + ".md")).symlink_to(root / "agents" / (agent + ".md"))
-    frontmatter = (installed / "agents" / (agent + ".md")).read_text().split("---", 2)[1]
+cases = [("verifier", generated / "verifier.md", False),
+         ("verifier-normal", root / "agents" / "verifier-normal.md", True),
+         ("verifier-conf-varied", conf_agents / "verifier.md", False)]
+for agent, source, as_symlink in cases:
+    target = installed / "agents" / (agent + ".md")
+    if as_symlink:
+        target.symlink_to(source)             # unchanged repo-symlink layout
+    else:
+        shutil.copy2(source, target)          # generated: a real file, as install.sh leaves it
+    frontmatter = target.read_text().split("---", 2)[1]
     match = re.search(
         r'(?m)^hooks:\n  PreToolUse:\n    - matcher: "Bash"\n      hooks:\n'
         r"        - type: command\n          command: '([^\n]+)'\n          timeout: 10\n",
@@ -332,7 +360,11 @@ for agent in ("verifier", "verifier-normal"):
             assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
         else:
             assert not result.stdout
+# The conf-varied render must really carry a different model, or the third case proves nothing.
+varied = (conf_agents / "verifier.md").read_text()
+assert re.search(r"(?m)^model: sonnet\[1m\]$", varied), "conf-varied verifier kept the default model"
+assert re.search(r"(?m)^effort: medium$", varied), "conf-varied verifier kept the default effort"
 PY
-ok 'both installed frontmatter hooks DENY mutations and ALLOW inspection/test commands'
+ok 'generated, conf-varied and normal verifier frontmatter hooks DENY mutations and ALLOW inspection/test commands'
 
 echo "PASS: $pass verifier-bash-guard cases"

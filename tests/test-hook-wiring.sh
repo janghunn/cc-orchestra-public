@@ -137,8 +137,12 @@ old_links, new_links = install_links(old_installer), install_links(installer)
 # Additive backend aliases are intentional. Preserve every existing hybrid link in order;
 # the safety-only filesystem assertion below still prohibits creating any of these links.
 added = {'cc-orch-codex', 'codex-run-codex', 'orch-codex-route'}
-assert old_links == [line for line in new_links
-                     if line in old_links or line.rsplit('/', 1)[-1].rstrip('"') not in added]
+# agents/verifier.md is generated from templates/verifier.md.tpl since the verifier became a
+# roster artifact; its installer symlink is intentionally gone. Every other historical link
+# must still be present, in order, and re-introducing a verifier.md link still fails below.
+expected = [line for line in old_links if 'agents/verifier.md' not in line]
+assert expected == [line for line in new_links
+                    if line in expected or line.rsplit('/', 1)[-1].rstrip('"') not in added]
 PY
 ok 'existing prompt hook, permissions, runtime installer function and hybrid links are preserved'
 

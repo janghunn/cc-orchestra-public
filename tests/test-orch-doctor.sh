@@ -58,29 +58,32 @@ bash -n "$DOCTOR"
 ok "doctor shell syntax"
 
 CC_ORCH_AGENTS_DIR="$TMP/core-agents" "$ROOT/build-roster.sh" >/dev/null
-assert_complete "$TMP/core-agents/.install-manifest.json" 22
+assert_complete "$TMP/core-agents/.install-manifest.json" 23
+grep -q '"dest":"[^"]*/verifier\.md","template":"templates/verifier\.md\.tpl"' \
+  "$TMP/core-agents/.install-manifest.json" || fail "verifier missing from core manifest"
+ok "verifier is a manifest-tracked generated agent"
 CC_ORCH_AGENTS_DIR="$TMP/core-agents" run_doctor
 assert_eq "$rc" 0 "core all-clear and CC_ORCH_AGENTS_DIR default"
-assert_has "$out" 'SUMMARY: 22 entries, 22 ok, 0 missing, 0 drifted, 0 stale-template, 0 repo-version-mismatch' "core summary"
-ok "standalone manifest: 22 unique entries with independent output/template hashes"
+assert_has "$out" 'SUMMARY: 23 entries, 23 ok, 0 missing, 0 drifted, 0 stale-template, 0 repo-version-mismatch' "core summary"
+ok "standalone manifest: 23 unique entries with independent output/template hashes"
 
 CC_ORCH_AGENTS_DIR="$TMP/runtime-agents" "$ROOT/build-roster-runtime.sh" >/dev/null
 MANIFEST="$TMP/runtime-agents/.install-manifest.json"
-assert_complete "$MANIFEST" 38
+assert_complete "$MANIFEST" 39
 run_doctor "$MANIFEST"
 assert_eq "$rc" 0 "runtime all-clear"
-assert_eq "$(printf '%s\n' "$out" | grep -c '^OK ')" 38 "runtime OK count"
+assert_eq "$(printf '%s\n' "$out" | grep -c '^OK ')" 39 "runtime OK count"
 if printf '%s\n' "$out" | grep -Eq '^(MISSING|DRIFTED|STALE-TEMPLATE|REPO-VERSION-MISMATCH) '; then
   fail "fresh runtime install has problem markers"
 fi
-assert_has "$out" 'SUMMARY: 38 entries, 38 ok, 0 missing, 0 drifted, 0 stale-template, 0 repo-version-mismatch' "runtime summary"
+assert_has "$out" 'SUMMARY: 39 entries, 39 ok, 0 missing, 0 drifted, 0 stale-template, 0 repo-version-mismatch' "runtime summary"
 assert_no_staging "$MANIFEST"
-ok "runtime manifest: 38 unique entries with independent hashes and all-clear"
+ok "runtime manifest: 39 unique entries with independent hashes and all-clear"
 
 CC_ORCH_AGENTS_DIR="$TMP/runtime-agents" "$ROOT/build-roster.sh" >/dev/null
-assert_complete "$MANIFEST" 22
+assert_complete "$MANIFEST" 23
 [[ -f "$TMP/runtime-agents/route-lead-alpha-light.md" ]] || fail "standalone rebuild removed route profile"
-ok "standalone rebuild replaces tracked set with 22 entries and preserves route files"
+ok "standalone rebuild replaces tracked set with 23 entries and preserves route files"
 
 printf A > "$TMP/A"
 printf B > "$TMP/B"
@@ -137,14 +140,14 @@ ok "quotes and backslashes round-trip through both builders and doctor paths"
 
 CC_ORCH_AGENTS_DIR="$TMP/custom-agents" CC_ORCH_MANIFEST="$TMP/custom/manifest.json" \
   "$ROOT/build-roster-runtime.sh" >/dev/null
-assert_complete "$TMP/custom/manifest.json" 38
+assert_complete "$TMP/custom/manifest.json" 39
 CC_ORCH_MANIFEST="$TMP/custom/manifest.json" run_doctor
 assert_eq "$rc" 0 "CC_ORCH_MANIFEST override"
 CC_ORCH_MANIFEST="$TMP/does-not-exist" run_doctor "$TMP/custom/manifest.json"
 assert_eq "$rc" 0 "explicit manifest overrides environment"
 ok "custom manifest path and argument precedence"
 
-# Fail precisely between the core and runtime renders, when the staged manifest has 22 entries.
+# Fail precisely between the core and runtime renders, when the staged manifest has 23 entries.
 mkdir -p "$TMP/fail-bin"
 cat > "$TMP/fail-bin/sed" <<'SH'
 #!/usr/bin/env bash
@@ -152,8 +155,8 @@ for arg in "$@"; do
   case "$arg" in
     s/__AGENT_NAME__/route-lead-*)
       cmp -s "$CC_ORCH_MANIFEST" "$CC_ORCH_TEST_PUBLISHED" || exit 91
-      [[ "$(wc -l < "$CC_ORCH_MANIFEST.building.$PPID")" -eq 22 ]] || exit 92
-      echo 'injected route render failure after 22 staged entries' >&2
+      [[ "$(wc -l < "$CC_ORCH_MANIFEST.building.$PPID")" -eq 23 ]] || exit 92
+      echo 'injected route render failure after 23 staged entries' >&2
       exit 93
       ;;
   esac
@@ -169,7 +172,7 @@ out="$(PATH="$TMP/fail-bin:$PATH" CC_ORCH_TEST_SED="$REAL_SED" \
   CC_ORCH_AGENTS_DIR="$TMP/failure-agents" CC_ORCH_MANIFEST="$TMP/custom/manifest.json" \
   "$ROOT/build-roster-runtime.sh" 2>&1)" || rc=$?
 assert_eq "$rc" 93 "injected runtime failure exit"
-assert_has "$out" 'injected route render failure after 22 staged entries' "failure reached runtime render"
+assert_has "$out" 'injected route render failure after 23 staged entries' "failure reached runtime render"
 cmp -s "$TMP/custom/manifest.json" "$TMP/published-before.json" || fail "failed runtime build published a partial manifest"
 assert_no_staging "$TMP/custom/manifest.json"
 ok "runtime render failure preserves previously published complete manifest"
@@ -182,7 +185,7 @@ CONCURRENT_MANIFEST="$TMP/concurrent-agents/.install-manifest.json"
 mkdir -p "$CONCURRENT_REPO/bin" "$CONCURRENT_REPO/templates" "$CONTROL"
 cp "$ROOT/build-roster-runtime.sh" "$ROOT/model-policy.conf" "$CONCURRENT_REPO/"
 cp "$ROOT/build-roster.sh" "$CONCURRENT_REPO/core-roster.sh"
-cp "$ROOT/templates/lead.md.tpl" "$ROOT/templates/dev.md.tpl" "$CONCURRENT_REPO/templates/"
+cp "$ROOT/templates/lead.md.tpl" "$ROOT/templates/dev.md.tpl" "$ROOT/templates/verifier.md.tpl" "$CONCURRENT_REPO/templates/"
 cp "$DOCTOR" "$CONCURRENT_REPO/bin/orch-doctor"
 cat > "$CONCURRENT_REPO/build-roster.sh" <<'SH'
 #!/usr/bin/env bash
@@ -208,25 +211,25 @@ IFS= read -r -t 10 staging_b <&5 || fail "second concurrent build did not stage 
 [[ "$staging_a" != "$staging_b" ]] || fail "concurrent builds share one staging path"
 [[ "$staging_a" == "$CONCURRENT_MANIFEST".building.* && "$staging_b" == "$CONCURRENT_MANIFEST".building.* ]] \
   || fail "runtime builds did not pass their unique staging paths to core"
-assert_complete "$staging_a" 22 unknown
-assert_complete "$staging_b" 22 unknown
+assert_complete "$staging_a" 23 unknown
+assert_complete "$staging_b" 23 unknown
 staging_b_sha="$(hash "$staging_b")"
 printf 'publish\n' >&4
 wait "${worker_pids[0]}" || fail "first concurrent build failed"
 [[ ! -e "$staging_a" ]] || fail "first build left its staging file behind"
 assert_eq "$(hash "$staging_b")" "$staging_b_sha" "first publish leaves second staging file intact"
-assert_complete "$CONCURRENT_MANIFEST" 38 unknown
+assert_complete "$CONCURRENT_MANIFEST" 39 unknown
 DOCTOR="$CONCURRENT_REPO/bin/orch-doctor" run_doctor "$CONCURRENT_MANIFEST"
 assert_eq "$rc" 0 "first concurrent publication all-clear"
 printf 'publish\n' >&6
 wait "${worker_pids[1]}" || fail "second concurrent build failed"
 worker_pids=()
 exec 3>&- 4>&- 5>&- 6>&-
-assert_complete "$CONCURRENT_MANIFEST" 38 unknown
+assert_complete "$CONCURRENT_MANIFEST" 39 unknown
 assert_no_staging "$CONCURRENT_MANIFEST"
 DOCTOR="$CONCURRENT_REPO/bin/orch-doctor" run_doctor "$CONCURRENT_MANIFEST"
 assert_eq "$rc" 0 "second concurrent publication all-clear"
-ok "concurrent runtime builds keep separate staging files and each publish 38 entries"
+ok "concurrent runtime builds keep separate staging files and each publish 39 entries"
 
 run_doctor "$TMP/does-not-exist"
 assert_eq "$rc" 2 "absent manifest exit"

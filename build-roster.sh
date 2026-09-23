@@ -64,13 +64,15 @@ render() { # render <template> <slot> <agent-name> <profile> <model> <effort> <o
   local tpl="$1" slot="$2" agent_name="$3" profile="$4" model="$5" effort="$6" out="$7" upper
   local dest output_sha template_sha
   upper="$(printf '%s' "$slot" | tr '[:lower:]' '[:upper:]')"
+  local tmp="$out.tmp.$$"
   sed -e "s/__SLOTUP__/${upper}/g" \
       -e "s/__SLOT__/${slot}/g" \
       -e "s/__AGENT_NAME__/${agent_name}/g" \
       -e "s/__PROFILE__/${profile}/g" \
       -e "s|__MODEL__|${model}|g" \
       -e "s/__EFFORT__/${effort}/g" \
-      "$tpl" > "$out"
+      "$tpl" > "$tmp"
+  mv -f "$tmp" "$out"
   dest="$out"
   [[ "$dest" == /* ]] || dest="$PWD/$dest"
   output_sha="$(sha256_of "$out")"
@@ -109,11 +111,15 @@ for slot in "${DEV_SLOTS[@]}"; do
     "$DEV_FRESH_MODEL" "$DEV_FRESH_EFFORT" "$AGENTS_DIR/dev-opus-$slot.md"
 done
 
+echo "verifier:"
+render "$REPO_DIR/templates/verifier.md.tpl" verifier verifier critical \
+  "$VERIFIER_CRITICAL_MODEL" "$VERIFIER_CRITICAL_EFFORT" "$AGENTS_DIR/verifier.md"
+
 if grep -rlE '__(SLOT|MODEL|EFFORT|PROFILE|AGENT_NAME)' "$AGENTS_DIR"/lead-*.md \
-     "$AGENTS_DIR"/dev-*.md 2>/dev/null | grep -q .; then
+     "$AGENTS_DIR"/dev-*.md "$AGENTS_DIR"/verifier.md 2>/dev/null | grep -q .; then
   echo "ERROR: unsubstituted placeholder left in generated roster:" >&2
   grep -rlE '__(SLOT|MODEL|EFFORT|PROFILE|AGENT_NAME)' "$AGENTS_DIR"/lead-*.md \
-    "$AGENTS_DIR"/dev-*.md >&2
+    "$AGENTS_DIR"/dev-*.md "$AGENTS_DIR"/verifier.md >&2
   exit 1
 fi
 
@@ -122,4 +128,4 @@ if [[ "${CC_ORCH_MANIFEST_NO_COMMIT:-0}" != 1 ]]; then
 fi
 
 echo
-echo "roster written to $AGENTS_DIR (22 generated profiles)"
+echo "roster written to $AGENTS_DIR (23 generated profiles)"
