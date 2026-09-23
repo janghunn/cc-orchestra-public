@@ -31,8 +31,8 @@ assert_eq "$(field "$AGENTS/lead-alpha-light.md" model)" "sonnet[1m]" "light mod
 assert_eq "$(field "$AGENTS/lead-alpha-light.md" effort)" "medium" "light effort"
 assert_eq "$(field "$AGENTS/lead-alpha.md" model)" "opus[1m]" "normal lead model"
 assert_eq "$(field "$AGENTS/lead-alpha.md" effort)" "high" "normal lead effort"
-assert_eq "$(field "$AGENTS/lead-alpha-critical.md" model)" "fable[1m]" "critical model"
-assert_eq "$(field "$AGENTS/lead-alpha-critical.md" effort)" "high" "critical effort"
+assert_eq "$(field "$AGENTS/lead-alpha-critical.md" model)" "opus[1m]" "critical model"
+assert_eq "$(field "$AGENTS/lead-alpha-critical.md" effort)" "xhigh" "critical effort"
 assert_eq "$(field "$AGENTS/lead-alpha-critical-xhigh.md" model)" "fable[1m]" "deep model"
 assert_eq "$(field "$AGENTS/lead-alpha-critical-xhigh.md" effort)" "xhigh" "deep effort"
 assert_eq "$(field "$AGENTS/dev-1.md" model)" "sonnet[1m]" "Claude exception model"
@@ -48,7 +48,8 @@ assert_eq "$(sed -n 's/^active=//p' "$STATE/state")" "opus[1m]" "fallback state"
 CC_ORCH_STATE_DIR="$STATE" CC_ORCH_AGENTS_DIR="$AGENTS" "$ROOT/bin/orch-model-guard" set primary >/dev/null
 assert_eq "$(field "$AGENTS/lead-alpha-light.md" model)" "sonnet[1m]" "restored light"
 assert_eq "$(field "$AGENTS/lead-alpha.md" model)" "opus[1m]" "restored normal"
-assert_eq "$(field "$AGENTS/lead-alpha-critical.md" model)" "fable[1m]" "restored critical"
+assert_eq "$(field "$AGENTS/lead-alpha-critical.md" model)" "opus[1m]" "restored critical"
+assert_eq "$(field "$AGENTS/lead-alpha-critical-xhigh.md" model)" "fable[1m]" "restored deep"
 ok "Fable fallback and role-specific restore"
 
 FAKEBIN="$TMP/fakebin"
@@ -1552,7 +1553,7 @@ sed -i 's/^active=.*/active=opus[1m]/' "$STATE/state"
 )
 args="$(cat "$TMP/claude-args")"
 assert_has "$args" "--model opus[1m]" "critical fallback model"
-assert_has "$args" "--effort high" "critical fallback effort"
+assert_has "$args" "--effort xhigh" "critical fallback effort"
 ok "launcher profile preservation and global Opus fallback"
 
 cat > "$STATE/state" <<'EOF'

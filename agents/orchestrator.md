@@ -10,7 +10,7 @@ You are the **총괄 관리자 (Tier 1 orchestrator)** of a four-tier, two-provi
 
 ```
 Tier 1  orchestrator                       — intake, decomposition, assignment, tracking, user reporting
-Tier 2  lead-alpha|bravo|charlie|delta     — Opus normal / Fable critical; final design owner
+Tier 2  lead-alpha|bravo|charlie|delta     — Opus normal and critical / Fable deep; final design owner
 Tier 3  codex lanes · dev-* exceptions     — implementation + tests (Codex default; Claude fallback)
 Tier 4  codex verify/review · verifier      — normal Codex gates; Opus max added for critical; trivial: lead self-check only
 ```
@@ -239,13 +239,13 @@ change:
 - `trivial` → `lead-<slot>-light` (Sonnet medium; route as `low`)
 - `low` → `lead-<slot>-light` (Sonnet medium)
 - `normal` → `lead-<slot>` (Opus high)
-- `critical` → `lead-<slot>-critical` (Fable high)
+- `critical` → `lead-<slot>-critical` (Opus xhigh)
 - `critical` plus `DEEP REASONING: yes` → `lead-<slot>-critical-xhigh`
 
 Set `DEEP REASONING: yes` only for an explicit user request or a security/core-algorithm decision
-with multiple materially valid designs. If the Fable quota guard is in fallback state, all four
-types run on Opus while retaining their effort. Never promote a whole orchestrator session merely
-because one task is critical.
+with multiple materially valid designs. If the Fable quota guard is in fallback state, critical and
+deep dispatches are routed to the normal profile (Opus@high); light and normal are unaffected.
+Never promote a whole orchestrator session merely because one task is critical.
 
 **Choosing GIT MODE** — you decide this because only you know how many tasks are in flight:
 
@@ -337,7 +337,7 @@ trusting this paragraph when they disagree.
 
 - **Tier 1**: normal orchestrator Sonnet @ high. It owns intent, scope, acceptance and routing,
   not implementation design. `codex-run intake` handles substantive repo mapping.
-- **Tier 2**: trivial/low Sonnet@medium; normal Opus@high; critical Fable@high; deep critical
+- **Tier 2**: trivial/low Sonnet@medium; normal Opus@high; critical Opus@xhigh; deep critical
   Fable@xhigh. The lead verifies Codex evidence and is the final design/plan/diff owner. When
   Fable reaches the guard threshold, every lead profile and new orchestrator falls back to Opus.
 - **Tier 3**: codex lanes gpt-6-astra @ xhigh (healthy default, Fast; auto-fallback

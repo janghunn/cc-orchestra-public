@@ -520,7 +520,8 @@ Launch these critical forms with `run_in_background: true` too; the same automat
 no-manual-repoll, and single bounded-`Monitor` discipline above applies.
 
 In parallel spawn `verifier` with only: repo, plan path, verdict path. Critical PASS requires all
-three green. Fable exhaustion changes the lead to Opus but never weakens this gate set.
+three green. Fable exhaustion routes deep leads to Opus (critical already runs Opus) but never
+weakens this gate set.
 
 **Fallbacks:**
 
@@ -549,7 +550,7 @@ Write `summary.md`, then return **only** this block as your final text:
 ```
 [lead-__SLOT__] STATUS: PASS | FAIL | BLOCKED
 TASK: <title>
-CLAUDE PROFILE: <light sonnet@medium|normal opus@high|critical fable@high|critical-xhigh fable@xhigh|fallback opus@effort>
+CLAUDE PROFILE: <light sonnet@medium|normal opus@high|critical opus@xhigh|critical-xhigh fable@xhigh|fallback opus@effort>
 PROMOTIONS: <none, or from→to + concrete reason>
 BRIEF AUDIT: clean | amended (<what I fixed and why>) | defective (<what needs your fix>)
 BRANCH: <orch/NN-slug>  MODE: <worktree|inplace>  WORKTREE: <path, or "main">

@@ -292,19 +292,19 @@ dispatch=codex-first
 
 | Pressure | Profile | Model | Effort |
 |---|---|---|---|
-| healthy | critical | Fable | high |
+| healthy | critical | Opus | xhigh |
 | watch | normal | Opus | high |
 | tight | normal | Opus | high |
 | critical | normal | Opus | high |
 
-Fable은 critical task를 위한 reserve로 사용한다.
+critical task는 Opus 5.5를 xhigh로 사용하고, Fable은 deep reasoning (`critical-xhigh`)을 위한 reserve로 남긴다.
 
 ## critical + deep reasoning
 
 | Pressure | Profile | Model | Effort |
 |---|---|---|---|
 | healthy | critical-xhigh | Fable | xhigh |
-| watch | critical | Fable | high |
+| watch | critical | Opus | xhigh |
 | tight | normal | Opus | high |
 | critical | normal | Opus | high |
 
@@ -314,7 +314,7 @@ Fable은 critical task를 위한 reserve로 사용한다.
 
 `BUDGET_FABLE_RESERVE_PCT=85`가 기본값이다.
 
-Fable 전용 사용률이 85% 이상이면 새 `critical` / `critical-xhigh` 선택을 Opus normal profile로 낮춰 Fable을 보존한다.
+Fable 전용 사용률이 85% 이상이면 새 `critical-xhigh` 선택을 Opus normal profile로 낮춰 Fable을 보존한다. 같은 규칙으로 `critical` 선택도 normal(Opus@high)로 낮아지지만, critical은 이미 Opus이므로 이 경우는 Fable을 절약하지 않고 effort만 xhigh→high로 내린다 (규칙 재조정은 `budget-policy.conf` 과제).
 
 ---
 
@@ -844,6 +844,12 @@ cc-orch --reload <project>
 ```
 
 을 사용한다.
+
+`model-policy.conf`의 lead tier 값(model/effort)을 바꾼 경우에는
+`cc-orch --reload`만으로는 부족하다.
+reload는 rendered roster(`~/.claude/agents/lead-*.md`, `route-lead-*.md`)를 다시 생성하지 않으므로,
+먼저 `./install.sh`(내부에서 `build-roster-runtime.sh` 실행)로 roster를 재생성한 뒤
+`cc-orch --reload <project>`를 실행한다.
 
 `--reload`는 실행 중 lead가 있으면 기본적으로 거부한다.
 

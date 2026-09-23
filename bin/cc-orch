@@ -32,7 +32,7 @@ usage: cc-orch [options] <project-name> [project-dir] [extra claude args...]
                    and $CC_ORCH_PROJECT. Letters, digits, dot, dash, underscore.
   [project-dir]    Defaults to the current directory.
   --no-rc          Local only; skip the Remote Control bridge.
-  --profile P      normal (Sonnet@high), critical (Fable@high), or deep (Fable@xhigh).
+  --profile P      normal (Sonnet@high), critical (Opus@xhigh), or deep (Fable@xhigh).
   --model M        Explicit model override for this orchestrator session.
   --effort E       Explicit effort override (low|medium|high|xhigh|max).
   --reload         Gracefully replace the running named session and continue its conversation.
