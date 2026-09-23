@@ -292,19 +292,19 @@ dispatch=codex-first
 
 | Pressure | Profile | Model | Effort |
 |---|---|---|---|
-| healthy | critical | Fable | high |
+| healthy | critical | Opus | xhigh |
 | watch | normal | Opus | high |
 | tight | normal | Opus | high |
 | critical | normal | Opus | high |
 
-Fable은 critical task를 위한 reserve로 사용한다.
+critical task는 Opus 5.5를 xhigh로 사용하고, Fable은 deep reasoning (`critical-xhigh`)을 위한 reserve로 남긴다.
 
 ## critical + deep reasoning
 
 | Pressure | Profile | Model | Effort |
 |---|---|---|---|
 | healthy | critical-xhigh | Fable | xhigh |
-| watch | critical | Fable | high |
+| watch | critical | Opus | xhigh |
 | tight | normal | Opus | high |
 | critical | normal | Opus | high |
 

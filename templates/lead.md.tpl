@@ -549,7 +549,7 @@ Write `summary.md`, then return **only** this block as your final text:
 ```
 [lead-__SLOT__] STATUS: PASS | FAIL | BLOCKED
 TASK: <title>
-CLAUDE PROFILE: <light sonnet@medium|normal opus@high|critical fable@high|critical-xhigh fable@xhigh|fallback opus@effort>
+CLAUDE PROFILE: <light sonnet@medium|normal opus@high|critical opus@xhigh|critical-xhigh fable@xhigh|fallback opus@effort>
 PROMOTIONS: <none, or from→to + concrete reason>
 BRIEF AUDIT: clean | amended (<what I fixed and why>) | defective (<what needs your fix>)
 BRANCH: <orch/NN-slug>  MODE: <worktree|inplace>  WORKTREE: <path, or "main">

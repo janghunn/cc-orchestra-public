@@ -39,7 +39,7 @@ out="$(run_notice 'opus[1m]' high normal 1 1)"
 [ -z "$out" ] || { echo "FAIL: explicit runtime normal model override must be accepted" >&2; echo "$out" >&2; exit 1; }
 
 out="$(run_notice 'fable[1m]' high critical 1)"
-printf '%s' "$out" | grep -qF 'critical orchestrator는 opus[1m]@high' || {
+printf '%s' "$out" | grep -qF 'critical orchestrator는 opus[1m]@xhigh' || {
   echo "FAIL: critical runtime must retain legacy Fable exhaustion fallback warning" >&2
   echo "$out" >&2
   exit 1

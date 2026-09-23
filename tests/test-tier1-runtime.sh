@@ -51,7 +51,7 @@ assert_has "$out" "routing=1"        "facade publishes runtime provenance to the
 assert_has "$out" "launch_marker=unset" "one-shot launch marker never reaches the session"
 
 out="$(run_capture "$TMP/critical" "$ROOT/bin/cc-orch-runtime" --no-rc --profile critical crit "$PROJECT")"
-assert_has "$out" "--model opus[1m] --effort high" "runtime critical keeps Fable exhaustion protection"
+assert_has "$out" "--model opus[1m] --effort xhigh" "runtime critical keeps Fable exhaustion protection"
 
 out="$(run_capture "$TMP/direct" "$ROOT/bin/cc-orch" --no-rc legacy "$PROJECT")"
 assert_has "$out" "--model opus[1m] --effort high" "direct core preserves legacy behavior"
