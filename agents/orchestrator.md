@@ -243,8 +243,8 @@ change:
 - `critical` plus `DEEP REASONING: yes` → `lead-<slot>-critical-xhigh`
 
 Set `DEEP REASONING: yes` only for an explicit user request or a security/core-algorithm decision
-with multiple materially valid designs. If the Fable quota guard is in fallback state, all four
-types run on Opus while retaining their effort. Never promote a whole orchestrator session merely
+with multiple materially valid designs. If the Fable quota guard is in fallback state, critical and deep
+dispatches are routed to the normal profile (Opus@high); light and normal are unaffected. Never promote a whole orchestrator session merely
 because one task is critical.
 
 **Choosing GIT MODE** — you decide this because only you know how many tasks are in flight:
