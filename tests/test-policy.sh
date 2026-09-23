@@ -1234,6 +1234,15 @@ triv_check
 assert_eq "$TRIV_RC" "1" "T23 normal missing executable fallback exit"
 assert_has "$TRIV_OUT" "executable verification did not PASS" "T23 normal missing executable fallback message"
 
+triv_summary 'normal opus@high' 'GATES: codex-verify INCONCLUSIVE · codex-review CLEAR · claude-verifier PASS'
+triv_check
+assert_eq "$TRIV_RC" "0" "T23a normal INCONCLUSIVE fallback exit"
+
+triv_summary 'normal opus@high' 'GATES: codex-verify INCONCLUSIVE · codex-review CLEAR · claude-verifier not-required'
+triv_check
+assert_eq "$TRIV_RC" "1" "T23b normal INCONCLUSIVE without fallback exit"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "T23b normal INCONCLUSIVE without fallback message"
+
 triv_brief 'RISK: low'
 triv_summary 'light sonnet@medium' 'GATES: codex-verify PASS · codex-review waived (docs) · claude-verifier not-required'
 triv_check
