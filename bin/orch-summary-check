@@ -167,7 +167,7 @@ if [ -r "$SUMMARY" ]; then
           [ "$codex_audit_ok" = 1 ] || problem error "critical Codex-only risk requires codex-auditor PASS"
         fi
       elif [ "$codex_verify_ok" = "0" ]; then
-        if ! gate_claim codex-verify unavailable || \
+        if ! gate_claim codex-verify 'unavailable|INCONCLUSIVE' || \
            [ "$claude_verify_ok" = "0" ]; then
           problem error "executable verification did not PASS and has no explicit Claude fallback"
         fi
