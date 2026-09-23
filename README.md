@@ -845,6 +845,12 @@ cc-orch --reload <project>
 
 을 사용한다.
 
+`model-policy.conf`의 lead tier 값(model/effort)을 바꾼 경우에는
+`cc-orch --reload`만으로는 부족하다.
+reload는 rendered roster(`~/.claude/agents/lead-*.md`, `route-lead-*.md`)를 다시 생성하지 않으므로,
+먼저 `./install.sh`(내부에서 `build-roster-runtime.sh` 실행)로 roster를 재생성한 뒤
+`cc-orch --reload <project>`를 실행한다.
+
 `--reload`는 실행 중 lead가 있으면 기본적으로 거부한다.
 
 managed session을 사용한다면 Claude를 `/exit`한 뒤:

@@ -520,7 +520,8 @@ Launch these critical forms with `run_in_background: true` too; the same automat
 no-manual-repoll, and single bounded-`Monitor` discipline above applies.
 
 In parallel spawn `verifier` with only: repo, plan path, verdict path. Critical PASS requires all
-three green. Fable exhaustion changes the lead to Opus but never weakens this gate set.
+three green. Fable exhaustion routes deep leads to Opus (critical already runs Opus) but never
+weakens this gate set.
 
 **Fallbacks:**
 
