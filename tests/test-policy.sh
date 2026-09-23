@@ -13,6 +13,11 @@ field() { sed -n "s/^$2: //p" "$1" | head -1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
 assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
 assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
+assert_verifier_matches_template() { # <rendered> <template> <label>
+  diff <(sed -e 's/^model: .*/model: __MODEL__/' -e 's/^effort: .*/effort: __EFFORT__/' "$1") "$2" \
+    >/dev/null || fail "generated verifier differs from its template beyond model/effort ($3)"
+  grep -q '^name: verifier$' "$1" || fail "generated verifier lost its identity ($3)"
+}
 
 for script in "$ROOT/build-roster.sh" "$ROOT/install.sh" "$ROOT/bin/cc-orch" "$ROOT/bin/codex-run" "$ROOT/bin/codex-run-runtime" "$ROOT/bin/orch-model-guard" "$ROOT/bin/orch-policy-rev" "$ROOT/bin/orch-summary-check" "$ROOT/bin/orch-usage-report" "$ROOT/hooks/orch-model-notice.sh" "$ROOT/lib/codex-catalog.sh"
 do
@@ -37,7 +42,43 @@ assert_eq "$(field "$AGENTS/lead-alpha-critical-xhigh.md" model)" "fable[1m]" "d
 assert_eq "$(field "$AGENTS/lead-alpha-critical-xhigh.md" effort)" "xhigh" "deep effort"
 assert_eq "$(field "$AGENTS/dev-1.md" model)" "sonnet[1m]" "Claude exception model"
 assert_eq "$(field "$AGENTS/dev-opus-1.md" model)" "opus[1m]" "fresh-eyes model"
+assert_eq "$(field "$AGENTS/verifier.md" model)" "opus[1m]" "verifier model from conf"
+assert_eq "$(field "$AGENTS/verifier.md" effort)" "max" "verifier effort from conf"
+assert_verifier_matches_template "$AGENTS/verifier.md" "$ROOT/templates/verifier.md.tpl" "default render"
 ok "primary roster models and efforts"
+
+CONF_REPO="$TMP/conf-repo"
+mkdir -p "$CONF_REPO/templates"
+cp "$ROOT/build-roster.sh" "$ROOT/model-policy.conf" "$CONF_REPO/"
+cp "$ROOT/templates/lead.md.tpl" "$ROOT/templates/dev.md.tpl" "$ROOT/templates/verifier.md.tpl" \
+   "$CONF_REPO/templates/"
+chmod +x "$CONF_REPO/build-roster.sh"
+sed -i 's/^VERIFIER_CRITICAL_MODEL=.*/VERIFIER_CRITICAL_MODEL="sonnet[1m]"/; s/^VERIFIER_CRITICAL_EFFORT=.*/VERIFIER_CRITICAL_EFFORT="medium"/' \
+  "$CONF_REPO/model-policy.conf"
+grep -q '^VERIFIER_CRITICAL_MODEL="sonnet\[1m\]"$' "$CONF_REPO/model-policy.conf" \
+  || fail "conf fixture edit did not apply (variable renamed?)"
+CONF_AGENTS="$TMP/conf-agents"
+CC_ORCH_STATE_DIR="$STATE" CC_ORCH_AGENTS_DIR="$CONF_AGENTS" "$CONF_REPO/build-roster.sh" >/dev/null
+assert_eq "$(field "$CONF_AGENTS/verifier.md" model)" "sonnet[1m]" "conf edit reaches verifier model"
+assert_eq "$(field "$CONF_AGENTS/verifier.md" effort)" "medium" "conf edit reaches verifier effort"
+assert_verifier_matches_template "$CONF_AGENTS/verifier.md" "$ROOT/templates/verifier.md.tpl" "conf-varied render"
+ok "model-policy.conf is the verifier's single source of truth"
+
+LEGACY="$TMP/legacy-agents"
+mkdir -p "$LEGACY"
+printf 'REPO SOURCE — must not be overwritten\n' > "$TMP/legacy-source.md"
+ln -s "$TMP/legacy-source.md" "$LEGACY/verifier.md"
+CC_ORCH_STATE_DIR="$STATE" CC_ORCH_AGENTS_DIR="$LEGACY" "$ROOT/build-roster.sh" >/dev/null
+if [ -L "$LEGACY/verifier.md" ]; then fail "legacy verifier symlink survived the render"; fi
+if [ ! -f "$LEGACY/verifier.md" ]; then fail "verifier.md is not a regular file after the render"; fi
+assert_eq "$(cat "$TMP/legacy-source.md")" "REPO SOURCE — must not be overwritten" \
+  "render wrote through a legacy symlink into the checkout"
+assert_eq "$(field "$LEGACY/verifier.md" model)" "opus[1m]" "regenerated verifier model"
+assert_verifier_matches_template "$LEGACY/verifier.md" "$ROOT/templates/verifier.md.tpl" "symlink upgrade"
+if [ -n "$(find "$LEGACY" -maxdepth 1 -name '*.tmp.*' -print -quit)" ]; then
+  fail "render left a temporary file behind"
+fi
+ok "a pre-upgrade verifier symlink is replaced, never written through"
 
 CC_ORCH_STATE_DIR="$STATE" CC_ORCH_AGENTS_DIR="$AGENTS" "$ROOT/bin/orch-model-guard" set fallback >/dev/null
 while IFS= read -r lead; do
@@ -1511,6 +1552,31 @@ HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR/.claude/agents" "$HOME_DIR/.local/bin"
 ln -s "$ROOT" "$HOME_DIR/.claude/orchestra"
 ln -s "$ROOT/agents/orchestrator.md" "$HOME_DIR/.claude/agents/orchestrator.md"
+
+mkdir -p "$HOME_DIR/.claude/agents"
+cp "$AGENTS/verifier.md" "$HOME_DIR/.claude/agents/verifier.md"
+run_check() { HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$STATE" \
+  CC_ORCH_BIN_DIR="$HOME_DIR/.local/bin" bash "$ROOT/install.sh" --check 2>&1 || true; }
+
+check_out="$(run_check)"
+assert_has "$check_out" "ok       $HOME_DIR/.claude/agents/verifier.md" "check accepts a fresh generated verifier"
+assert_not_has "$check_out" "STALE    $HOME_DIR/.claude/agents/verifier.md" "fresh verifier is not reported stale"
+
+sed -i 's/^model: .*/model: sonnet[1m]/' "$HOME_DIR/.claude/agents/verifier.md"
+check_out="$(run_check)"
+assert_has "$check_out" "STALE    $HOME_DIR/.claude/agents/verifier.md" "check catches a stale installed verifier"
+assert_has "$check_out" "model-policy.conf says opus[1m] @ max" "stale diagnostic names the configured value"
+
+rm -f "$HOME_DIR/.claude/agents/verifier.md"
+ln -s "$ROOT/templates/verifier.md.tpl" "$HOME_DIR/.claude/agents/verifier.md"
+check_out="$(run_check)"
+assert_has "$check_out" "legacy repo symlink" "check catches the pre-upgrade symlink layout"
+
+rm -f "$HOME_DIR/.claude/agents/verifier.md"
+check_out="$(run_check)"
+assert_has "$check_out" "MISSING  $HOME_DIR/.claude/agents/verifier.md" "check reports an absent verifier"
+ok "install.sh --check validates the generated verifier contract"
+
 cat > "$FAKEBIN/claude" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" > "$TMP/claude-args"
@@ -1533,6 +1599,21 @@ assert_has "$args" "--effort xhigh" "deep launch effort"
 rev="$("$ROOT/bin/orch-policy-rev" "$ROOT")"
 assert_eq "$(cat "$TMP/claude-policy-rev")" "$rev" "launcher policy revision"
 assert_eq "$("$ROOT/bin/orch-policy-rev" "$HOME_DIR/.claude/orchestra")" "$rev" "symlink-independent policy revision"
+
+REV_REPO="$TMP/rev-repo"
+mkdir -p "$REV_REPO/templates" "$REV_REPO/agents"
+cp "$ROOT/model-policy.conf" "$ROOT/build-roster.sh" "$ROOT/build-roster-runtime.sh" "$REV_REPO/"
+cp "$ROOT/templates/lead.md.tpl" "$ROOT/templates/dev.md.tpl" "$ROOT/templates/verifier.md.tpl" \
+   "$REV_REPO/templates/"
+cp "$ROOT/agents/orchestrator.md" "$ROOT/agents/verifier-normal.md" "$REV_REPO/agents/"
+rev_before="$("$ROOT/bin/orch-policy-rev" "$REV_REPO")"
+printf '\n<!-- structural change -->\n' >> "$REV_REPO/templates/verifier.md.tpl"
+rev_tpl="$("$ROOT/bin/orch-policy-rev" "$REV_REPO")"
+[ "$rev_before" != "$rev_tpl" ] || fail "policy revision ignores templates/verifier.md.tpl"
+sed -i 's/^VERIFIER_CRITICAL_MODEL=.*/VERIFIER_CRITICAL_MODEL="fable[1m]"/' "$REV_REPO/model-policy.conf"
+rev_conf="$("$ROOT/bin/orch-policy-rev" "$REV_REPO")"
+[ "$rev_conf" != "$rev_tpl" ] || fail "policy revision ignores VERIFIER_CRITICAL_MODEL"
+ok "structural revision covers every input to the verifier's model/effort"
 
 (
   cd "$TMP"

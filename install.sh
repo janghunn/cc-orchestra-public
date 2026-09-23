@@ -197,7 +197,6 @@ check() {
   for pair in \
     "$CLAUDE_DIR/orchestra:$REPO_DIR" \
     "$CLAUDE_DIR/agents/orchestrator.md:$REPO_DIR/agents/orchestrator.md" \
-    "$CLAUDE_DIR/agents/verifier.md:$REPO_DIR/agents/verifier.md" \
     "$CLAUDE_DIR/agents/verifier-normal.md:$REPO_DIR/agents/verifier-normal.md" \
     "$BIN_DIR/cc-orch:$REPO_DIR/bin/cc-orch-runtime" \
     "$BIN_DIR/codex-run:$REPO_DIR/bin/codex-run-runtime" \
@@ -220,6 +219,39 @@ check() {
     2>/dev/null | wc -l)"
   echo "  roster   $base base profiles (expect 22), $routed runtime routes (expect 16)"
   [[ "$base" -eq 22 && "$routed" -eq 16 ]] || rc=1
+
+  # verifier.md is generated from templates/verifier.md.tpl + model-policy.conf. Validate it by
+  # re-rendering with the real builder into a throwaway directory and comparing bytes, so this
+  # check can never drift from render(). CC_ORCH_STATE_DIR is redirected because the builder
+  # calls orch-model-guard, which creates its state directory; --check must stay read-only.
+  local vdest="$CLAUDE_DIR/agents/verifier.md" vtmp vmodel veffort
+  # shellcheck source=/dev/null
+  . "$REPO_DIR/model-policy.conf"
+  if [[ -L "$vdest" ]]; then
+    echo "  STALE    $vdest is a legacy repo symlink; re-run ./install.sh to generate it"; rc=1
+  elif [[ ! -f "$vdest" ]]; then
+    echo "  MISSING  $vdest (generated from templates/verifier.md.tpl)"; rc=1
+  else
+    if ! vtmp="$(mktemp -d)" || [[ -z "$vtmp" ]]; then
+      echo "  MISSING  cannot allocate a temporary directory to validate $vdest"; rc=1
+    else
+      if CC_ORCH_AGENTS_DIR="$vtmp" CC_ORCH_MANIFEST="$vtmp/.install-manifest.json" \
+           CC_ORCH_STATE_DIR="$vtmp/state" \
+           "$REPO_DIR/build-roster.sh" >/dev/null 2>&1 && [[ -f "$vtmp/verifier.md" ]]; then
+        if cmp -s "$vtmp/verifier.md" "$vdest"; then
+          echo "  ok       $vdest ($VERIFIER_CRITICAL_MODEL @ $VERIFIER_CRITICAL_EFFORT from model-policy.conf)"
+        else
+          vmodel="$(sed -n 's/^model: //p' "$vdest" | head -1)"
+          veffort="$(sed -n 's/^effort: //p' "$vdest" | head -1)"
+          echo "  STALE    $vdest is ${vmodel:-?} @ ${veffort:-?}; model-policy.conf says $VERIFIER_CRITICAL_MODEL @ $VERIFIER_CRITICAL_EFFORT — re-run ./install.sh"
+          rc=1
+        fi
+      else
+        echo "  MISSING  cannot render templates/verifier.md.tpl to validate $vdest"; rc=1
+      fi
+      rm -rf "$vtmp"
+    fi
+  fi
 
   if command -v systemctl >/dev/null 2>&1 && \
      systemctl --user is-enabled orch-model-guard.timer >/dev/null 2>&1; then
@@ -423,7 +455,6 @@ install_repo() {
 
   link "$REPO_DIR"                              "$CLAUDE_DIR/orchestra"
   link "$REPO_DIR/agents/orchestrator.md"       "$CLAUDE_DIR/agents/orchestrator.md"
-  link "$REPO_DIR/agents/verifier.md"           "$CLAUDE_DIR/agents/verifier.md"
   link "$REPO_DIR/agents/verifier-normal.md"    "$CLAUDE_DIR/agents/verifier-normal.md"
   link "$REPO_DIR/bin/cc-orch-runtime"           "$BIN_DIR/cc-orch"
   link "$REPO_DIR/bin/codex-run-runtime"         "$BIN_DIR/codex-run"
