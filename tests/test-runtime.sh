@@ -11,6 +11,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
 assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
+route_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 
 for script in \
   "$ROOT/install.sh" "$ROOT/build-roster-runtime.sh" "$ROOT/bin/cc-orch-runtime" \
@@ -103,6 +104,64 @@ route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW
 assert_has "$route" "agent_type=route-lead-alpha-normal" "exact immutable agent type"
 assert_has "$route" "model=opus[1m]" "critical lead fallback model"
 ok "Claude 5h/7d reset-aware lead routing"
+
+# A1 keeps the original Fable-backed critical fixture; B1 switches only that mapping to stock.
+# Columns: case | pressure | Fable usage | active | pinned | kind | risk | deep | agent | model | effort.
+while IFS='|' read -r case_id pressure fable active pinned kind risk deep expected_agent expected_model expected_effort; do
+  if [ "$case_id" = B1 ]; then
+    sed -i 's/^LEAD_CRITICAL_MODEL=.*/LEAD_CRITICAL_MODEL="opus[1m]"; LEAD_CRITICAL_EFFORT="xhigh"/' \
+      "$HARNESS/model-policy.conf"
+  fi
+  case "$pressure" in
+    healthy) five_pct=10; five_reset=$((NOW+9000)); week_pct=10; week_reset=$((NOW+86400)); limiting=five ;;
+    watch) five_pct=70; five_reset=$((NOW+12000)); week_pct=10; week_reset=$((NOW+86400)); limiting=five ;;
+    tight) five_pct=50; five_reset=$((NOW+9000)); week_pct=80; week_reset=$((NOW+518400)); limiting=week ;;
+  esac
+  claude_json="$(printf '{"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' \
+    "$five_pct" "$five_reset" "$week_pct" "$week_reset")"
+  printf '%s' "$claude_json" | HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+    CC_ORCH_NOW_EPOCH="$NOW" "$HARNESS/bin/orch-model-guard-runtime" ingest-claude
+
+  # Fresh ingest prevents the legacy check from replacing these independent Fable signals.
+  # B4/B5 prove this file reaches the guard: high usage demotes deep, low usage preserves Fable.
+  rm -f "$TMP/state/state"
+  if [ "$fable" != - ]; then printf 'fable_pct=%s\n' "$fable" > "$TMP/state/state"; fi
+  if [ "$active" != - ]; then
+    printf 'active=%s\npinned=%s\n' "$active" "$pinned" >> "$TMP/state/state"
+  fi
+  budget="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
+    "$HARNESS/bin/orch-model-guard-runtime" budget)"
+  assert_eq "$(printf '%s\n' "$budget" | sed -n '/^claude  /p')" \
+    "claude  $pressure (limiting: $limiting)" "$case_id pressure fixture"
+
+  route_args=(route "$kind" "$risk")
+  if [ "$kind" = lead ]; then
+    if [ "$deep" = deep ]; then route_args+=(deep); fi
+    route_args+=(alpha)
+  fi
+  route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
+    "$HARNESS/bin/orch-model-guard-runtime" "${route_args[@]}")"
+  if [ "$kind" = lead ]; then
+    assert_eq "$(route_field "$route" agent_type)" "$expected_agent" "$case_id agent_type"
+  fi
+  assert_eq "$(route_field "$route" model)" "$expected_model" "$case_id model"
+  assert_eq "$(route_field "$route" effort)" "$expected_effort" "$case_id effort"
+done <<'CASES'
+A1|healthy|90|-|-|lead|critical|-|route-lead-alpha-normal|opus[1m]|high
+B1|watch|-|-|-|lead|critical|-|route-lead-alpha-critical|opus[1m]|xhigh
+B2|tight|-|-|-|lead|critical|-|route-lead-alpha-normal|opus[1m]|high
+B3|healthy|90|-|-|lead|critical|-|route-lead-alpha-critical|opus[1m]|xhigh
+B4|healthy|90|-|-|lead|critical|deep|route-lead-alpha-normal|opus[1m]|high
+B5|healthy|10|-|-|lead|critical|deep|route-lead-alpha-critical-xhigh|fable[1m]|xhigh
+B6|healthy|-|opus[1m]|0|lead|critical|-|route-lead-alpha-critical|opus[1m]|xhigh
+B7|healthy|-|opus[1m]|0|lead|critical|deep|route-lead-alpha-normal|opus[1m]|high
+B8|watch|-|-|-|lead|normal|-|route-lead-alpha-normal|opus[1m]|high
+B9|watch|90|-|-|lead|critical|deep|route-lead-alpha-critical|opus[1m]|xhigh
+B10|watch|-|-|-|orchestrator|critical|-|-|opus[1m]|xhigh
+B11|watch|90|-|-|orchestrator|deep|-|-|opus[1m]|xhigh
+CASES
+rm -f "$TMP/state/state"
+ok "critical pressure table and model-keyed Fable guards"
 
 CODEX_HOME_DIR="$TMP/codex"
 DAY="$(date -d "@$NOW" +%Y/%m/%d)"
