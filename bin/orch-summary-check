@@ -39,7 +39,10 @@ strip_fences() { # file -> stdout without fenced blocks
       if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
         run = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", run)
         ch = substr(run, 1, 1); len = length(run)
-        if (fence == "") { fence = ch; flen = len; next }
+        # An inline span starting with ``` and containing a later backtick opened an
+        # unclosed fence, hiding later RISK: lines. CommonMark forbids backticks in
+        # backtick fence info strings, so keep such lines visible as text.
+        if (fence == "" && !(ch == "`" && index(substr($0, RSTART + RLENGTH), "`") > 0)) { fence = ch; flen = len; next }
         if (ch == fence && len >= flen && substr($0, RSTART + RLENGTH) ~ /^[[:space:]]*$/) { fence = ""; next }
       }
       if (fence == "") print
