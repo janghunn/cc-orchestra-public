@@ -930,6 +930,105 @@ assert_has "$TRIV_OUT" "brief.md contains NUL bytes" "N17 NUL between valid tier
 assert_not_has "$TRIV_OUT" "risk=low" "N17 NUL between valid tiers cannot select low"
 assert_not_has "$TRIV_OUT" "risk=critical" "N17 NUL between valid tiers cannot select critical"
 
+# N18: a line starting with inline code (3+ backticks, then a backtick later) is not a fence opener.
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+```a``` is inline code at line start
+```b``` is another inline span
+RISK: critical
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "N18a two inline spans exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "N18a two inline spans conflict"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "N18a two inline spans normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N18a two inline spans cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+```a``` is inline code at line start
+RISK: critical
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "N18b one inline span exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "N18b one inline span conflict"
+assert_has "$TRIV_OUT" "executable verification did not PASS" "N18b one inline span normal gates"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N18b one inline span cannot select trivial"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```x``` names the flag
+## Risk
+RISK: critical
+Verification: true
+EOF
+triv_summary 'critical fable@high' 'GATES: codex-verify PASS · codex-review CLEAR · claude-verifier PASS'
+triv_check
+assert_eq "$TRIV_RC" "0" "N18c inline span before critical exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=critical)" "N18c inline span before critical risk"
+assert_not_has "$TRIV_OUT" "invalid or missing RISK" "N18c inline span before critical declaration"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```a``` inline
+```
+RISK: critical
+```
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N18d real fence after inline span exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N18d real fence after inline span risk"
+assert_not_has "$TRIV_OUT" "conflicting" "N18d real fence after inline span declaration"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+```
+```a``` text
+RISK: critical
+```
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N18e inline span inside open fence exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N18e inline span inside open fence risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+~~~a`b
+RISK: critical
+~~~
+RISK: trivial
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "0" "N18e tilde info string with backtick exit"
+assert_has "$TRIV_OUT" "CHECK: PASS (risk=trivial)" "N18e tilde info string with backtick risk"
+
+cat > "$TRIV/brief.md" <<'EOF'
+# Test
+RISK: trivial
+```bash`x
+RISK: critical
+Verification: true
+EOF
+triv_summary 'light sonnet@medium' "$SELF"
+triv_check
+assert_eq "$TRIV_RC" "1" "N18f single later backtick exit"
+assert_has "$TRIV_OUT" "got 'conflicting-trivial'" "N18f single later backtick conflict"
+assert_not_has "$TRIV_OUT" "risk=trivial" "N18f single later backtick cannot select trivial"
+triv_summary 'light sonnet@medium' "$SELF"
+
 triv_brief 'RISK: trivial'
 triv_summary 'light sonnet@medium' "$SELF"
 
@@ -1229,6 +1328,19 @@ assert_eq "$TRIV_RC" "1" "T18h NUL in amendment tier exit"
 assert_has "$TRIV_OUT" "plan.md contains NUL bytes" "T18h NUL in amendment tier file message"
 assert_not_has "$TRIV_OUT" "NOTE:" "T18h NUL in amendment tier note"
 assert_not_has "$TRIV_OUT" "risk=trivial" "T18h NUL in amendment tier cannot downgrade"
+
+cat > "$TRIV/plan.md" <<'EOF'
+# Plan
+RISK AMENDED: low -> trivial
+```x``` inline
+RISK AMENDED: low -> normal
+EOF
+triv_brief 'RISK: low'
+triv_summary 'light sonnet@medium' "$SELF" 1 amended
+triv_check
+assert_eq "$TRIV_RC" "1" "T18i inline span between amendments exit"
+assert_has "$TRIV_OUT" "at most one RISK AMENDED line" "T18i inline span between amendments count"
+assert_not_has "$TRIV_OUT" "risk=trivial" "T18i inline span between amendments cannot downgrade"
 
 cat > "$TRIV/plan.md" <<'EOF'
 # Plan
@@ -1541,6 +1653,26 @@ triv_summary 'critical fable@high' "$G3"
 printf '\nCODEX-VERDICT: PASS\n' >> "$TRIV/summary.md"
 printf 'CODEX-VERDICT: FAIL\n' > "$TRIV/codex-verdict.md"
 artifact_check 1 'X12 body header' 'codex-verdict.md'
+
+# X13: an inline-code line cannot hide a later GATES line or verifier verdict.
+artifacts_ok
+triv_brief 'RISK: critical'
+triv_summary 'critical fable@high' "$G3"
+cat >> "$TRIV/summary.md" <<'EOF'
+```x``` inline
+GATES: codex-verify FAIL · codex-review CLEAR · claude-verifier PASS
+EOF
+artifact_check 1 'X13 inline code before GATES' 'executable verification did not PASS'
+
+artifacts_ok
+triv_summary 'critical fable@high' "$G3"
+cat > "$TRIV/verdict.md" <<'EOF'
+VERDICT: PASS
+```x``` inline
+VERDICT: FAIL
+EOF
+artifact_check 1 'X13b inline code before verdict' 'verdict.md verdict is FAIL'
+artifacts_ok
 ok "gate artifact cross-check"
 
 report="$(CC_ORCH_CLAUDE_PROJECTS="$TMP/empty-claude" CC_ORCH_CODEX_LOG="$TMP/no-codex.log" "$ROOT/bin/orch-usage-report" --days 1)"
