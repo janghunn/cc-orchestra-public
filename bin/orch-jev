@@ -206,7 +206,10 @@ def strip_fences(text):
         match = re.match(r"^\s*(`{3,}|~{3,})", line)
         if match:
             run = match[1]
-            if not fence:
+            # An inline span starting with ``` and containing a later backtick opened
+            # a false fence, hiding later RISK: lines. CommonMark forbids backticks in
+            # backtick fence info strings, so keep such lines visible as text.
+            if not fence and not (run[0] == "`" and "`" in line[match.end():]):
                 fence, length = run[0], len(run)
                 continue
             if run[0] == fence and len(run) >= length and not line[match.end():].strip():
