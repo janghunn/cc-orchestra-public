@@ -490,6 +490,36 @@ class JevBehaviour:
                 self.assertNotIn("second-section-marker", json.dumps(body))
                 self.assertNotIn("second-verification-marker", json.dumps(body))
 
+    def test_inline_code_is_not_a_fence_opener(self):
+        text = "# T\n```x``` names the flag\n## Risk\nRISK: critical\n"
+        self.assertEqual(jev.strip_fences(text), text)
+        text = "```bash`x\nRISK: critical\n"
+        self.assertEqual(jev.strip_fences(text), text)
+        text = "````x```` names\nRISK: critical\n"
+        self.assertEqual(jev.strip_fences(text), text)
+        self.assertEqual(
+            jev.strip_fences("```a``` inline\n```\nRISK: critical\n```\nRISK: low\n"),
+            "```a``` inline\nRISK: low\n",
+        )
+        self.assertEqual(
+            jev.strip_fences("visible\n```\n```a``` text\nhidden\n```\n"), "visible\n",
+        )
+        self.assertEqual(jev.strip_fences("visible\n~~~a`b\nhidden\n~~~\n"), "visible\n")
+
+        path = self.fixture("inline-risk.md", "# T\n```x``` names the flag\n## Risk\nRISK: critical\n")
+        self.server.values = {"tier": {"choice": "critical", "confidence": 0.95}}
+        output = self.invoke("risk", path).stdout
+        self.assertIn("declared critical", output)
+        self.assertNotIn("no tier declared", output)
+
+        path = self.fixture("inline-lint.md", "```x``` inline\n## Acceptance\n1. Run true.\n## Verification\ntrue\n")
+        self.server.requests.clear()
+        output = self.invoke("lint-brief", path).stdout
+        self.assertNotIn("no numbered acceptance items found", output)
+        self.assertEqual(len(self.server.requests), 1)
+        body = self.server.requests[0]["body"]
+        self.assertEqual(body["state"]["acceptance"], [{"item": "1", "text": "Run true."}])
+
     def test_t6_risk_and_summary_parser(self):
         self.server.values = {"tier": {"choice": "critical", "confidence": 0.95}}
         suggestion = self.invoke("risk", self.brief).stdout

@@ -191,6 +191,16 @@ def parser_tests():
     assert builder.declared_risk(fenced) == "normal"
     assert common.strip_fences("~~~\nRISK: low\n~~~ tail\nRISK: low\n~~~\nRISK: normal").endswith("RISK: normal")
     assert common.strip_fences("RISK: low\0") == ""
+    # Inline backticks stay visible without changing real fence pairing or source lines.
+    assert common.strip_fences("# T\n```x``` names\nRISK: critical") == "# T\n```x``` names\nRISK: critical"
+    assert builder.declared_risk("# T\n```x``` names the flag\n## Risk\nRISK: critical\n") == "critical"
+    assert builder.declared_risk("# T\n```bash`x\nRISK: critical\n") == "critical"
+    assert builder.declared_risk("# T\n````x```` names\nRISK: critical\n") == "critical"
+    assert common.strip_fences("```a``` inline\n```\nRISK: critical\n```\nRISK: low") == "```a``` inline\n\n\n\nRISK: low"
+    assert builder.declared_risk("```a``` inline\n```\nRISK: critical\n```\nRISK: low\n") == "low"
+    assert [(e["to_tier"], e["source_line"]) for e in builder.risk_events("# Plan\n```x``` inline\nRISK AMENDED: low -> critical\n", "plan.md")] == [("critical", 3)]
+    assert builder.declared_risk("```\n```a``` text\nRISK: critical\n```\nRISK: low\n") == "low"
+    assert builder.declared_risk("~~~a`b\nRISK: critical\n~~~\nRISK: low\n") == "low"
     assert builder.acceptance_items("# Acceptance\n1. Do this\n   continuation\n2) Check 7\n# Next\n") == ["Do this continuation", "Check 7"]
     assert builder.acceptance_items("##Acceptance\n- Check 3\n## Next\n") == ["Check 3"]
     assert builder.acceptance_items("# Other\n- no criteria") == []
