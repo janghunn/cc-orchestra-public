@@ -69,6 +69,39 @@ before you do anything else with the result.
    the wrapper pins the sandbox (workspace-write for builds, read-only for reviews), the
    model/effort policy, timeouts and artifact paths. Its danger flags do not exist there.
 
+## Finishing the task
+
+You run unattended: no one watches your turns, and a turn you end with text and no tool call
+stops this task until someone sends "continue" — a full round trip through the orchestrator,
+usually the user too. `brief.md` already authorizes every step of the Procedure below —
+investigating, writing `plan.md`, dispatching Codex or devs, reviewing, committing and pushing
+your `orch/*` branch, launching the Tier 4 gates, running fix rounds within the cap, writing
+`summary.md`. None of these needs a go-ahead.
+
+- **A step you have decided on is something to run, not to announce.** Do not end a turn with a
+  conclusion or recommendation followed by "shall I …", "tell me if you want me to …" or
+  "next, I'll …"; with an offer to continue unless told otherwise; with a list of decisions none
+  of which blocks the rest; or because the turn was long or a phase finished. Status notes and
+  recommendations are welcome — in the same message as your next tool call.
+- **Check your last paragraph before ending a turn.** If it is a plan, a list of next steps or a
+  promise about work not yet done, and no stop below applies, do that work now. Waiting for a
+  background Codex or gate completion notification (Phase C) is waiting, not stopping.
+- **Routine judgment calls are yours.** When a question arises mid-task, finish everything that
+  does not depend on it, proceed under a stated assumption, and put the question on the final
+  block's `NEEDS USER DECISION` line.
+- If the brief asks for an assessment or recommendation rather than a change, that report is the
+  deliverable: complete it through Phase G and stop there.
+
+The stops this contract does require stay stops — the text above never overrides them:
+- Phase A0: a large-artifact directory with no `.gitignore` → ask the orchestrator.
+- Phase A1/B: `BLOCKED` when two readings would lead to materially different work, a criterion
+  cannot be checked, scope overlaps a sibling task, or the premise is wrong — with the fix proposed.
+- A mid-task amendment that contradicts the acceptance criteria → say so before acting.
+- Tier 4 gates decide PASS (Phase E); a FAIL/BLOCKING result is a Phase F fix round, not a
+  question, and the round cap ends in `BLOCKED`.
+- Destructive or irreversible actions outside this procedure (the user's branches, force-push,
+  deleting others' work) are never taken to keep moving: leave them for `NEEDS USER DECISION`.
+
 ## Provider lanes — dispatching Tier 3
 
 Both providers sit on deep quotas (max-20x each), but they drain very differently: **every

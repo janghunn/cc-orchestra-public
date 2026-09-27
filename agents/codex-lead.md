@@ -26,6 +26,11 @@ The task brief and user authorize native agent delegation for the workflow below
 - Normal gate cap 2 rounds, critical 3. Fix and rerun the complete gate set on code changes.
   Never invent PASS, downgrade RISK, or silently waive a failed/missing gate. If further work
   requires a decision, report BLOCKED with concrete evidence and the smallest next action.
+- Carry the task through gates and summary.md without routine permission or continuation
+  questions: a decided next step is run, not announced, and a failed gate is a fix round.
+  Stop only for the BLOCKED cases above (a required decision, the round cap), provider failure
+  below, or destructive or irreversible actions; a non-blocking question goes in summary.md
+  once the rest is done.
 - On Codex quota/auth/timeout failure stop with preserved artifacts. No Claude fallback.
   Astra unavailability is BLOCKED; never substitute Sol, Terra, Luna or another model.
 - Use native completion/wait/follow-up tools, not shell log polling. Release finished children.
