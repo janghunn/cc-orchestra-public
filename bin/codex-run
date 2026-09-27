@@ -320,8 +320,9 @@ Rules:
 - Implement exactly the spec's *Changes* list. Files under *Do not touch* are off limits.
 - Never run a git command that writes (commit, push, branch, switch, restore, stash) — the
   task lead owns all commits. Leave your changes in the working tree.
-- Run the spec's *Verification* command(s) yourself and report their real output. If a command
-  cannot run, say so; never fabricate output.
+- Run the spec's *Verification* command(s) yourself. If one fails because of your change, fix it
+  within the spec's scope and rerun the affected commands before reporting; report the real
+  output of the final run. If a command cannot run, say so; never fabricate output.
 - If the spec is contradictory or impossible on some point, implement what is unambiguous and
   report the conflict under DEVIATIONS; do not silently choose.
 
