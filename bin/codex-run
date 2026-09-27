@@ -226,9 +226,10 @@ esac
 
 [ "$CRITICAL" = "1" ] && EFFORT="$CODEX_CRITICAL_EFFORT"
 
+# gpt-6-sol is Sol-tier, like gpt-5.6-sol, for Fast mode and ultra effort.
 if [ "$FAST_MODE" = "1" ]; then
   case "$MODEL" in
-    gpt-5.6-sol|gpt-5.6-terra|gpt-6-astra) ;;
+    gpt-5.6-sol|gpt-6-sol|gpt-5.6-terra|gpt-6-astra) ;;
     *) die "--fast-mode keeps an Astra/Sol/Terra model; resolved model is '$MODEL'" ;;
   esac
 fi
@@ -236,7 +237,7 @@ fi
 case "$EFFORT" in low|medium|high|xhigh|max|ultra) ;; *) die "invalid effort '$EFFORT'" ;; esac
 # luna tops out at max; and "ultra" auto-delegates inside Codex — Tier 2 owns decomposition,
 # so ultra never happens implicitly (a lead must type --effort ultra on explicit user request).
-if [ "$EFFORT" = "ultra" ] && [ "$MODEL" != "gpt-5.6-sol" ] && [ "$MODEL" != "gpt-5.6-terra" ] && [ "$MODEL" != "gpt-6-astra" ]; then
+if [ "$EFFORT" = "ultra" ] && [ "$MODEL" != "gpt-5.6-sol" ] && [ "$MODEL" != "gpt-6-sol" ] && [ "$MODEL" != "gpt-5.6-terra" ] && [ "$MODEL" != "gpt-6-astra" ]; then
   die "effort 'ultra' is only supported by sol/terra/astra (got $MODEL)"
 fi
 

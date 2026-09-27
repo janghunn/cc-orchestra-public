@@ -175,6 +175,14 @@ fi
 if run_dry investigate "$WORK" "$TASK" "find the owner" --model luna --fast-mode >/dev/null 2>&1; then
   fail "--fast-mode with Luna should be rejected"
 fi
+
+out="$(run_dry investigate "$WORK" "$TASK" "find the owner" --model gpt-6-sol --fast-mode)"
+assert_has "$out" "gpt-6-sol" "Fast mode accepts gpt-6-sol"
+assert_has "$out" "features.fast_mode=true" "Fast mode feature for gpt-6-sol"
+
+out="$(run_dry implement "$WORK" "$TASK" --model gpt-6-sol --effort ultra)"
+assert_has "$out" "gpt-6-sol" "ultra effort accepts gpt-6-sol"
+assert_has "$out" "model_reasoning_effort=ultra" "ultra effort for gpt-6-sol"
 ok "Codex mode model, effort, sandbox, and flag policy"
 
 CAT_ASTRA="$TMP/cat-astra"
