@@ -461,7 +461,7 @@ export TYPESAFE_API_KEY=<your-key>
 자르기 전에 각 원본 전체에서 secret 형태의 literal을 검사하고, 발견된 source 전체를
 제외합니다. 크기와 항목/chunk 상한을 적용한 경우 명시적인 note를 출력합니다.
 
-egress guard의 알려진 한계(수정하지 않고 수용): (a) bin/orch-jev:164의 count cancellation — 의도적으로 구성된 문서에서 placeholder로 억제된 한 줄 assignment 하나가 여러 줄에 걸쳐서만 조립되는 credential 하나를 상쇄할 수 있어 그 cross-line 값이 전송됩니다. (b) 한 LF 줄 안에서 placeholder 표식과 credential 사이에 bare CR이 있으면 탐지가 억제됩니다. 기존 Bash scanner(bin/orch-security-scan)도 같은 종류를 놓칩니다. scan은 사용자가 지정한 파일(또는 stdin)만 읽으며 guard를 통과한 내용은 모두 Jev API로 전송되므로, 그곳에 보내지 않을 파일은 지정하지 마세요.
+egress guard의 알려진 한계(수정하지 않고 수용): (a) `secret_shaped()` in bin/orch-jev의 count cancellation — 의도적으로 구성된 문서에서 placeholder로 억제된 한 줄 assignment 하나가 여러 줄에 걸쳐서만 조립되는 credential 하나를 상쇄할 수 있어 그 cross-line 값이 전송됩니다. (b) 한 LF 줄 안에서 placeholder 표식과 credential 사이에 bare CR이 있으면 탐지가 억제됩니다. 기존 Bash scanner(bin/orch-security-scan)도 같은 종류를 놓칩니다. scan은 사용자가 지정한 파일(또는 stdin)만 읽으며 guard를 통과한 내용은 모두 Jev API로 전송되므로, 그곳에 보내지 않을 파일은 지정하지 마세요.
 
 기본 상한은 직렬화한 state 24,000 bytes, 항목 20개, 4,000 bytes chunk 24개입니다.
 
@@ -571,6 +571,99 @@ shadow record를 만들지 않습니다. Shadow가 켜져 있을 때 `resume`, �
 `skipped:no-route`로 기록합니다. 다른 모드는 기록하지 않습니다.
 잘못된 인자(예: 유효하지 않은 `--lane` 이름이나 빈 task dir)로 시작된 worker는
 Jev를 호출하지 않고 `skipped:invalid-args`로 기록합니다.
+
+### 로컬 llama.cpp scan 세컨드 오피니언 (선택 사항, 로그만 기록)
+
+이 보조 기능은 기본적으로 꺼져 있으며 hybrid 세션을 지원합니다. `JEV_LOCAL_ENABLED=1`이면
+`orch-jev scan`은 TypeSafe 호출 후 준비된 요청과 Jev의 답변을 분리된
+`bin/orch-jev-local worker`에 전달합니다. TypeSafe를 사용할 수 없는 결과도 포함하며,
+worker를 기다리지 않습니다. 이 기능은 orch-jev의 stdout, stderr, exit code, `jev.log`
+record를 바꾸지 않으며 gate나 라우팅 결정에도 영향을 주지 않습니다. 플래그가 꺼져 있으면
+이 기능은 프로세스를 시작하거나 파일·로그를 만들지 않습니다. `lint-brief`와 `risk`는
+worker에 요청을 전달하지 않습니다.
+
+검증된 llama.cpp 빌드를 설치하고 고정된 모델을 한 번 내려받으세요. `<env>`와 `<state>`를
+절대 경로로 바꾸세요. `<state>`는 `CC_ORCH_STATE_DIR`이며, 미설정 시
+`~/.claude/orchestra-state`입니다. 검증된 패키지는 conda-forge의
+`llama.cpp-10588-cuda130`이며 다른 빌드는 실행 플래그를 거부할 수 있습니다.
+
+```bash
+conda create -y -p <env> -c conda-forge "llama.cpp=10588=cuda130_hd5b56ce_0"
+mkdir -p <state>/models && curl -fL -o <state>/models/Qwen3-8B-Q8_0.gguf https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q8_0.gguf
+```
+
+`jev-policy.conf`의 `JEV_LOCAL_SERVER_BIN`을 `<env>/bin/llama-server`로 지정한 뒤 실행합니다.
+
+```bash
+~/.claude/orchestra/bin/orch-jev-local serve
+```
+
+`serve`는 서버를 시작하기 전에 모델의 SHA-256을 검증합니다. 모델이 없으면 획득 방법을
+출력하고 exit 1로 끝나며, 해시가 달라도 exit 1입니다. 하네스는 모델을 자동으로 내려받거나
+서버를 자동으로 시작하지 않습니다. `serve`는 foreground에서 실행되므로 tmux나 systemd
+사용자 서비스에서 실행하세요. `JEV_LOCAL_GPU`가 지정한 GPU(기본 0)에 약 **10.5 GiB의
+상주 VRAM**을 사용하며 context는 16k, slot은 하나입니다.
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`를 설정하고 `LLAMA_ARG_*` 환경 변수 override를 제거합니다.
+서버 실행 후 `JEV_LOCAL_ENABLED=1`로 설정하세요. 배포 기본값은 다음과 같습니다.
+
+```bash
+JEV_LOCAL_ENABLED=0
+JEV_LOCAL_SOCKET="jev-local/llama.sock"
+JEV_LOCAL_MODEL_PATH="models/Qwen3-8B-Q8_0.gguf"
+JEV_LOCAL_MODEL_DIGEST="408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6"
+JEV_LOCAL_SERVER_BIN="llama-server"
+JEV_LOCAL_GPU="0"
+JEV_LOCAL_TIMEOUT_SECONDS=10
+JEV_LOCAL_DEADLINE_SECONDS=60
+JEV_LOCAL_LOG="jev-local.jsonl"
+```
+
+Worker는 두 egress guard를 통과하여 Jev에 보낸 것과 정확히 같은 준비된 요청 및 Jev의
+숫자 답변을 받습니다. 추론 전에 변환 후 guard를 다시 실행합니다. Unix socket으로만
+통신하며 네트워크 연결, proxy, redirect를 사용하지 않습니다. `serve`는 socket 디렉터리
+(기본 `<state>/jev-local`)를 생성하고 mode 0700으로 설정하므로 socket 전용 디렉터리를
+사용하세요. 디렉터리는 운영자가 소유하므로 브라우저나 다른 로컬 사용자가 접근할 수 없습니다.
+Worker와 서버 환경에서 `TYPESAFE_API_KEY`를 제거합니다. 모델 파일, socket, 로그의
+상대 경로는 `<state>` 기준으로 해석합니다.
+
+Worker는 `jev.log`와 별도로 `<state>/jev-local.jsonl`(mode 0600)에 record 하나를 append하며,
+`JEV_LOCAL_LOG`로 경로를 바꿀 수 있습니다. 고정 필드는 다음과 같습니다.
+
+```text
+timestamp, id, status, model, jev_model, jev_outcome, chunks, local_p, jev_p,
+min_option_mass, requests, latency_ms, prompt_tokens, cached_tokens
+```
+
+로그에는 본문, source 이름, 줄 범위, prompt가 없습니다. `id`는
+`<orch-jev pid>:<t0>`(요청 전달 시각을 Unix 초 정수로 표시하며, 잘못된 전달 데이터는
+`unknown`)이고 알 수 없는 값은 null입니다. `local_p`와 `jev_p`는 chunk 순서를 유지합니다.
+Status는 `ok`, `skipped:secret-shaped`, 또는 `unavailable:` 뒤에 `handoff`, `config`,
+`server`, `socket-denied`, `timeout`, `deadline`, `http <code>`, `malformed response`,
+`model-mismatch`, `no-option`, `non-option`, `option-mass-unknown`, `network`, `internal error`가
+붙는 형태입니다. Worker는 `guard.log`나 다른 파일을 쓰지 않으며 로그 append가 실패하면
+조용히 버립니다. 모든 로컬 응답은 `serve`가 설정한 alias인
+`jev-local-<SHA-256 앞 16자>`를 반환해야 합니다. 이는 모델 불일치를 탐지하는 것이며,
+의도적으로 alias를 그대로 반환하는 프로세스에 대한 attestation은 아닙니다. 비공개 socket
+디렉터리가 접근 경계입니다.
+
+```bash
+~/.claude/orchestra/bin/orch-jev-local report
+~/.claude/orchestra/bin/orch-jev-local report --log <path>
+```
+
+보고서는 저장된 확률에 현재 `JEV_SCAN_THRESHOLD`를 `p >= threshold`로 다시 적용합니다.
+Status 건수, chunk 및 record의 탐지 일치 건수, 확률의 평균 절대 차이, 로컬 지연 시간의
+median/p95를 출력합니다. 비교에는 로컬과 Jev 결과가 모두 `ok`인 기록만 사용하며,
+비교 가능한 기록이 10개 미만이면 표시합니다. 마지막 줄은
+`counts only — this report draws no conclusion.`입니다. Worker에는 별도의 로컬 threshold나
+조언 출력이 없습니다.
+
+Codex-only 모드는 worker에 요청을 전달하지 않습니다. Hybrid Codex sandbox에서는 Unix
+socket이 거부되고(`unavailable:socket-denied`), state 디렉터리의 로그 쓰기도 거부되므로
+아무 기록도 남지 않습니다. 지원되는 실행 환경은 사용자 shell과 Claude lead/dev Bash입니다.
+서버가 중지되어 있으면 `unavailable:server`가 되며 orch-jev는 worker를 기다리느라 지연되지
+않습니다. Phase-0 합성 injection set의 FPR은 로컬 **0.375**, Jev **0.00**이었으므로
+이 신호는 데이터 수집용으로만 사용합니다.
 
 ## reload 없이 즉시 반영되는 항목
 

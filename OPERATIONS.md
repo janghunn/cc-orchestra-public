@@ -432,7 +432,7 @@ Only named input files or stdin are read, alongside the policy, question templat
 Every source is checked for secret-shaped literals before truncation: a matching source is
 skipped in full. Size and item/chunk limits bound what leaves the machine, with explicit notes.
 
-Known limits of the egress guard (accepted, not fixed): (a) count cancellation at bin/orch-jev:164 — in an adversarially constructed document, one placeholder-suppressed single-line assignment can cancel one credential that is only assembled across lines, so that cross-line value is sent; (b) a placeholder marker separated from a credential by a bare carriage return inside one LF line suppresses the hit. The existing Bash scanner (bin/orch-security-scan) shares the same class of misses. scan reads only the files you name (or stdin), and everything that passes the guard is sent to the Jev API, so do not point it at files you would not send there.
+Known limits of the egress guard (accepted, not fixed): (a) count cancellation at `secret_shaped()` in bin/orch-jev — in an adversarially constructed document, one placeholder-suppressed single-line assignment can cancel one credential that is only assembled across lines, so that cross-line value is sent; (b) a placeholder marker separated from a credential by a bare carriage return inside one LF line suppresses the hit. The existing Bash scanner (bin/orch-security-scan) shares the same class of misses. scan reads only the files you name (or stdin), and everything that passes the guard is sent to the Jev API, so do not point it at files you would not send there.
 
 The default limits are 24,000 serialized state bytes, 20 items, and 24 chunks of 4,000 bytes.
 
@@ -539,6 +539,97 @@ are recorded as `skipped:resume`, `skipped:explicit-flags`, `skipped:dry-run`, o
 automatic routing is recorded as `skipped:no-route`. Other modes are not recorded.
 A worker started with malformed arguments (for example an invalid `--lane` name or an empty
 task dir) records `skipped:invalid-args` without calling Jev.
+
+### Local llama.cpp scan second opinion (opt-in, log only)
+
+This companion is off by default and supports hybrid sessions. With `JEV_LOCAL_ENABLED=1`,
+`orch-jev scan` hands its prepared request and Jev's answers to a detached
+`bin/orch-jev-local worker` after the TypeSafe call, including unavailable outcomes. It never
+waits for that worker. The companion changes no stdout, stderr, exit code, or `jev.log`
+record from orch-jev and influences no gate or routing decision. With the flag off, the
+companion starts no process and creates no file or log. `lint-brief` and `risk` never hand off.
+
+Install the tested llama.cpp build and acquire the pinned model once. Replace `<env>` and
+`<state>` with absolute paths; `<state>` is `CC_ORCH_STATE_DIR`, or
+`~/.claude/orchestra-state` when unset. The tested package is conda-forge
+`llama.cpp-10588-cuda130`; other builds may reject the launch flags.
+
+```bash
+conda create -y -p <env> -c conda-forge "llama.cpp=10588=cuda130_hd5b56ce_0"
+mkdir -p <state>/models && curl -fL -o <state>/models/Qwen3-8B-Q8_0.gguf https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q8_0.gguf
+```
+
+Set `JEV_LOCAL_SERVER_BIN` in `jev-policy.conf` to `<env>/bin/llama-server`, then start:
+
+```bash
+~/.claude/orchestra/bin/orch-jev-local serve
+```
+
+`serve` verifies the model's SHA-256 before starting the server. A missing model prints an
+acquisition hint and exits 1; a mismatch also exits 1. The harness never downloads a model
+or starts a server automatically. `serve` stays in the foreground: run it under tmux or a
+systemd user service. It reserves about **10.5 GiB of resident VRAM** on the GPU selected by
+`JEV_LOCAL_GPU` (default 0), with a 16k context and one slot. It sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` and removes `LLAMA_ARG_*` environment overrides. Once the
+server is running, set `JEV_LOCAL_ENABLED=1`. The shipped defaults are:
+
+```bash
+JEV_LOCAL_ENABLED=0
+JEV_LOCAL_SOCKET="jev-local/llama.sock"
+JEV_LOCAL_MODEL_PATH="models/Qwen3-8B-Q8_0.gguf"
+JEV_LOCAL_MODEL_DIGEST="408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6"
+JEV_LOCAL_SERVER_BIN="llama-server"
+JEV_LOCAL_GPU="0"
+JEV_LOCAL_TIMEOUT_SECONDS=10
+JEV_LOCAL_DEADLINE_SECONDS=60
+JEV_LOCAL_LOG="jev-local.jsonl"
+```
+
+The worker receives exactly the prepared request sent to Jev, after both egress guards,
+plus Jev's numeric answers. It repeats the post-transformation guard before inference.
+It talks only to a Unix socket: no network connection, proxy, or redirects. `serve` creates
+the socket's directory (default `<state>/jev-local`) and sets it to mode 0700, so use a
+dedicated directory for the socket. The directory is owned by the operator, so it is not
+reachable from browsers or other local users. `TYPESAFE_API_KEY` is removed from the worker and server environments.
+The model file, socket, and log paths resolve relative to `<state>` unless absolute.
+
+The worker appends one record to `<state>/jev-local.jsonl` (mode 0600), separate from
+`jev.log`; `JEV_LOCAL_LOG` overrides the path. Its fixed fields are:
+
+```text
+timestamp, id, status, model, jev_model, jev_outcome, chunks, local_p, jev_p,
+min_option_mass, requests, latency_ms, prompt_tokens, cached_tokens
+```
+
+There is no text, source names, line ranges or prompts in the log. `id` is
+`<orch-jev pid>:<t0>` (the handoff timestamp in whole Unix seconds; `unknown` for invalid
+handoffs); unknown values are null. `local_p` and `jev_p` preserve chunk order. Status is
+`ok`, `skipped:secret-shaped`, or `unavailable:` followed by `handoff`, `config`, `server`,
+`socket-denied`, `timeout`, `deadline`, `http <code>`, `malformed response`, `model-mismatch`,
+`no-option`, `non-option`, `option-mass-unknown`, `network`, or `internal error`.
+The worker writes no `guard.log` or other file; a failed log append is silently dropped.
+Every local response must identify the alias `jev-local-<first 16 SHA-256 characters>`
+set by `serve`. This detects model mismatches; it is not attestation against a process
+that deliberately echoes the alias. The private socket directory is the access boundary.
+
+```bash
+~/.claude/orchestra/bin/orch-jev-local report
+~/.claude/orchestra/bin/orch-jev-local report --log <path>
+```
+
+The report reads stored probabilities and re-applies the current `JEV_SCAN_THRESHOLD`
+using `p >= threshold`. It prints status counts, chunk and record flag agreement, mean
+absolute probability difference, and local latency median/p95. Comparisons require both
+local and Jev outcomes to be `ok`; fewer than 10 comparable records are marked. It ends
+with `counts only — this report draws no conclusion.` There is no local threshold or
+advice output from the worker.
+
+Codex-only mode never hands off. In a hybrid Codex sandbox, the Unix socket is denied
+(`unavailable:socket-denied`) and the state-directory log write is denied too, so nothing
+is recorded. Supported contexts are the user's shell and Claude lead/dev Bash. A stopped
+server yields `unavailable:server`, never a delay waiting for the worker in orch-jev.
+The phase-0 synthetic injection set measured local FPR **0.375** versus Jev **0.00**;
+this signal is for data collection only.
 
 ## What changes without reload
 

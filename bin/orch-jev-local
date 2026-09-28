@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""Opt-in, log-only local llama.cpp second opinion for orch-jev scan."""
+import sys
+sys.dont_write_bytecode = True
+
+import datetime
+import fcntl
+import hashlib
+import http.client
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import statistics
+import threading
+import time
+
+loader = importlib.machinery.SourceFileLoader("orch_jev", str(Path(__file__).resolve().parent / "orch-jev"))
+orch = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(orch)
+
+SHA_RE = r"[0-9a-f]{64}"
+GPU_RE = r"[0-9]+"
+TOP_LOGPROBS = 20
+MIN_OPTION_MASS = 0.5
+MISSING_BOUND = 1e-3
+CTX = 16384
+HANDOFF_MAX_BYTES = 1_048_576
+RESPONSE_MAX_BYTES = 1_048_576
+LETTERS = "ABCDEFGHIJKLMNOPQRST"
+FINAL_INSTRUCTION = "Answer with the letter of the best option only."
+MODEL_URL = ("https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/"
+             "7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q8_0.gguf")
+MODEL_SHA256 = "408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6"
+LOCAL_KEYS = (
+    "timestamp", "id", "status", "model", "jev_model", "jev_outcome", "chunks", "local_p",
+    "jev_p", "min_option_mass", "requests", "latency_ms", "prompt_tokens", "cached_tokens",
+)
+HANDOFF_KEYS = {"version", "pid", "t0", "state", "questions", "jev_model", "jev_outcome", "jev_noul"}
+USAGE = "usage: orch-jev-local worker | serve | report [--log <path>]"
+
+
+class LocalError(Exception):
+    pass
+
+
+def state_path(value):
+    path = Path(value)
+    return path if path.is_absolute() else orch.state_dir() / path
+
+
+def alias(sha):
+    return "jev-local-" + sha[:16]
+
+
+class NoOptionToken(Exception):
+    pass
+
+
+class NonOptionAnswer(Exception):
+    def __init__(self, option_mass):
+        self.option_mass = option_mass
+        super().__init__(f"option mass {option_mass}")
+
+
+class OptionMassUnknown(Exception):
+    def __init__(self, missing, missing_bound, option_mass):
+        self.missing = missing
+        self.missing_bound = missing_bound
+        self.option_mass = option_mass
+        super().__init__(f"missing {missing}, bound {missing_bound}")
+
+
+def score_letters(candidates, letters, min_option_mass=0.5):
+    """Require an option answer before merging and bounding option weights."""
+    letters = list(letters)
+    if not letters or len(set(letters)) != len(letters):
+        raise ValueError("option letters must be nonempty and unique")
+    if not 0 < min_option_mass <= 1:
+        raise ValueError("min_option_mass must be in (0, 1]")
+    matches = {letter: [] for letter in letters}
+    logprobs = []
+    for candidate in candidates:
+        token, logprob = candidate["token"], candidate["logprob"]
+        if (not isinstance(token, str) or type(logprob) not in (int, float)
+                or not math.isfinite(logprob) or logprob > 0):
+            raise ValueError("invalid token logprob")
+        logprobs.append(logprob)
+        key = token.strip().strip("[]").strip()
+        if key in matches:
+            matches[key].append(logprob)
+    if not any(matches.values()):
+        raise NoOptionToken()
+    missing = [letter for letter, values in matches.items() if not values]
+    option_mass = math.fsum(math.exp(value) for values in matches.values() for value in values)
+    if option_mass < min_option_mass:
+        error = NonOptionAnswer(option_mass)
+        error.missing = missing
+        raise error
+    merged = {}
+    for letter, values in matches.items():
+        if values:
+            peak = max(values)
+            merged[letter] = peak + math.log(sum(math.exp(v - peak) for v in values))
+    peak = max(merged.values())
+    weights = {letter: math.exp(value - peak) for letter, value in merged.items()}
+    if missing:
+        weight = math.exp(min(logprobs) - peak)
+        # A zero from float underflow cannot satisfy the nonzero bound contract.
+        if weight == 0:
+            raise ValueError("missing option bound underflows floating-point range")
+        weights.update((letter, weight) for letter in missing)
+    total = sum(weights.values())
+    missing_bound = sum(weights[letter] for letter in missing) / total
+    if missing_bound >= 1e-3:
+        raise OptionMassUnknown(missing, missing_bound, option_mass)
+    return {letter: weights[letter] / total for letter in letters}, missing, missing_bound, option_mass
+
+
+def option_letters(question):
+    criteria = question["criteria"]
+    keys = ["true", "false"] if question["type"] == "noul" else list(criteria)
+    if not 1 <= len(keys) <= len(LETTERS):
+        raise ValueError("questions require 1 to 20 options")
+    return [(letter, key, criteria[key]) for letter, key in zip(LETTERS, keys)]
+
+
+def build_prompt(state, question):
+    options = "\n".join(f"[{letter}] {key}: {text}"
+                        for letter, key, text in option_letters(question))
+    return ("State:\n" + json.dumps(state, ensure_ascii=False)
+            + f"\n\nQuestion: {question['instructions']}\nOptions:\n{options}"
+            + "\n\n" + FINAL_INSTRUCTION)
+
+
+def connect_unix(sock, path):
+    path = Path(path)
+    if len(os.fsencode(path)) > 100:
+        cwd = os.getcwd()
+        try:
+            os.chdir(path.parent)
+            sock.connect(path.name)
+        finally:
+            os.chdir(cwd)
+    else:
+        sock.connect(str(path))
+
+
+def post_unix(path, body, timeout):
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError
+        return left
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn = http.client.HTTPConnection("localhost", timeout=timeout)
+    conn.sock = sock
+
+    # Socket timeouts alone restart on each recv inside read()/getresponse().
+    # Interrupt even a continuously dripping body or header at the total deadline.
+    def expire():
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    timer = threading.Timer(remaining(), expire)
+    timer.daemon = True
+    try:
+        timer.start()
+        sock.settimeout(remaining())
+        connect_unix(sock, path)
+        sock.settimeout(remaining())
+        conn.request("POST", "/v1/chat/completions",
+                     body=json.dumps(body, ensure_ascii=False).encode(),
+                     headers={"Content-Type": "application/json", "Accept": "application/json",
+                              "User-Agent": "cc-orchestra-orch-jev-local"})
+        sock.settimeout(remaining())
+        response = conn.getresponse()
+        remaining()
+        if response.status != 200:
+            raise LocalError(f"http {response.status}")
+        data = bytearray()
+        while True:
+            sock.settimeout(remaining())
+            part = response.read(65536)
+            remaining()
+            data.extend(part)
+            if len(data) > RESPONSE_MAX_BYTES:
+                raise LocalError("malformed response")
+            if not part or response.isclosed():
+                break
+        try:
+            return json.loads(data)
+        except (ValueError, RecursionError):
+            raise LocalError("malformed response") from None
+    except (OSError, http.client.HTTPException):
+        remaining()
+        raise
+    finally:
+        timer.cancel()
+        conn.close()
+        sock.close()
+
+
+def append_record(path, record):
+    fd = None
+    try:
+        line = (json.dumps(record, ensure_ascii=True) + "\n").encode()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        return os.write(fd, line) == len(line)
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def finite_number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def probability(value):
+    return finite_number(value) and 0 <= value <= 1
+
+
+def read_handoff(stream):
+    try:
+        raw = stream.read(HANDOFF_MAX_BYTES + 1)
+        if len(raw) > HANDOFF_MAX_BYTES:
+            raise ValueError
+        data = json.loads(raw)
+        if (not isinstance(data, dict) or set(data) != HANDOFF_KEYS
+                or type(data["version"]) is not int or data["version"] != 1
+                or type(data["pid"]) is not int or data["pid"] < 0
+                or not finite_number(data["t0"])
+                or not isinstance(data["jev_model"], str)
+                or not isinstance(data["jev_outcome"], str)
+                or len(data["jev_outcome"]) > 64
+                or any(not 32 <= ord(c) <= 126 for c in data["jev_outcome"])):
+            raise ValueError
+        state, questions = data["state"], data["questions"]
+        if not isinstance(state, dict) or set(state) != {"chunks"}:
+            raise ValueError
+        chunks = state["chunks"]
+        if not isinstance(chunks, list) or not chunks:
+            raise ValueError
+        if any(not isinstance(c, dict) or set(c) != {"source", "lines", "text", "id"}
+               or any(not isinstance(v, str) for v in c.values()) for c in chunks):
+            raise ValueError
+        ids = [c["id"] for c in chunks]
+        if not isinstance(questions, dict) or list(questions) != ids:
+            raise ValueError
+        for question in questions.values():
+            if (not isinstance(question, dict) or set(question) != {"type", "instructions", "criteria"}
+                    or question["type"] != "noul" or not isinstance(question["instructions"], str)
+                    or not isinstance(question["criteria"], dict)
+                    or set(question["criteria"]) != {"true", "false"}
+                    or any(not isinstance(v, str) for v in question["criteria"].values())):
+                raise ValueError
+        jev = data["jev_noul"]
+        if jev is not None and (not isinstance(jev, dict) or set(jev) != set(ids)
+                                or any(not probability(v) for v in jev.values())):
+            raise ValueError
+        return data
+    except (ValueError, TypeError, RecursionError):
+        raise LocalError("handoff") from None
+
+
+def worker():
+    policy = orch.Policy()
+    if (policy["LOCAL_ENABLED"] != "1" or policy["ENABLED"] != "1"
+            or os.environ.get("CC_ORCH_BACKEND") == "codex"):
+        return 0
+    record = dict.fromkeys(LOCAL_KEYS)
+    record.update(timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  status="unavailable:internal error", requests=0, id="unknown")
+    path = state_path(policy["LOCAL_LOG"])
+    expired = False
+
+    def deadline_expired(signum, frame):
+        nonlocal expired
+        expired = True
+        signal.alarm(0)
+        record["status"] = "unavailable:deadline"
+        append_record(path, record)
+        os._exit(0)
+
+    previous = signal.signal(signal.SIGALRM, deadline_expired)
+    try:
+        signal.alarm(policy["LOCAL_DEADLINE_SECONDS"])
+        handoff = read_handoff(sys.stdin.buffer)
+        state, questions = handoff["state"], handoff["questions"]
+        record.update(id=f"{handoff['pid']}:{int(handoff['t0'])}", jev_model=handoff["jev_model"],
+                      jev_outcome=handoff["jev_outcome"], chunks=len(state["chunks"]),
+                      jev_p=([handoff["jev_noul"][c] for c in questions]
+                             if handoff["jev_noul"] is not None else None))
+        if (any(orch.secret_shaped(text) for text in orch.state_strings(questions))
+                or orch.secret_shaped(json.dumps(questions, ensure_ascii=False))
+                or any(orch.secret_shaped(text) for text in orch.state_strings(state))
+                or orch.secret_shaped(json.dumps(state, ensure_ascii=False))):
+            record["status"] = "skipped:secret-shaped"
+            return 0
+        sha = policy["LOCAL_MODEL_DIGEST"]
+        if not re.fullmatch(SHA_RE, sha):
+            raise LocalError("config")
+        expected = alias(sha)
+        record["model"] = expected
+        path_socket = state_path(policy["LOCAL_SOCKET"])
+        answers = {}
+        start = time.monotonic()
+        for name, question in questions.items():
+            body = {"model": expected, "messages": [{"role": "user", "content": build_prompt(state, question)}],
+                    "max_tokens": 1, "temperature": 0, "logprobs": True, "top_logprobs": TOP_LOGPROBS,
+                    "chat_template_kwargs": {"enable_thinking": False}}
+            record["requests"] += 1
+            response = post_unix(path_socket, body, policy["LOCAL_TIMEOUT_SECONDS"])
+            try:
+                if response["model"] != expected:
+                    raise LocalError("model-mismatch")
+                candidates = response["choices"][0]["logprobs"]["content"][0]["top_logprobs"]
+                if not isinstance(candidates, list) or any(not isinstance(c, dict) for c in candidates):
+                    raise ValueError
+                probs, _, _, mass = score_letters(candidates, ["A", "B"], MIN_OPTION_MASS)
+            except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+                raise LocalError("malformed response") from None
+            answers[name] = {"type": "noul", "noul": probs["A"]}
+            previous_mass = record["min_option_mass"]
+            record["min_option_mass"] = mass if previous_mass is None else min(previous_mass, mass)
+            timings = response.get("timings")
+            if isinstance(timings, dict):
+                for source, target in (("prompt_n", "prompt_tokens"), ("cache_n", "cached_tokens")):
+                    if type(timings.get(source)) is int:
+                        record[target] = (record[target] or 0) + timings[source]
+        if not orch.valid_response({"model": expected, "answers": answers}, questions):
+            raise LocalError("malformed response")
+        record.update(local_p=[answers[c]["noul"] for c in questions], status="ok",
+                      latency_ms=int((time.monotonic() - start) * 1000))
+    except LocalError as error:
+        record["status"] = "unavailable:" + str(error)
+    except (FileNotFoundError, ConnectionRefusedError):
+        record["status"] = "unavailable:server"
+    except PermissionError:
+        record["status"] = "unavailable:socket-denied"
+    except TimeoutError:
+        record["status"] = "unavailable:timeout"
+    except NoOptionToken:
+        record["status"] = "unavailable:no-option"
+    except NonOptionAnswer:
+        record["status"] = "unavailable:non-option"
+    except OptionMassUnknown:
+        record["status"] = "unavailable:option-mass-unknown"
+    except (OSError, http.client.HTTPException):
+        record["status"] = "unavailable:network"
+    except Exception:
+        record["status"] = "unavailable:internal error"
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+        if not expired:
+            append_record(path, record)
+    return 0
+
+
+def serve():
+    policy = orch.Policy()
+    for key, pattern in (("LOCAL_MODEL_DIGEST", SHA_RE), ("LOCAL_GPU", GPU_RE)):
+        if not re.fullmatch(pattern, policy[key]):
+            print(f"JEV: local — config: JEV_{key} invalid", file=sys.stderr)
+            return 2
+    model = state_path(policy["LOCAL_MODEL_PATH"]).absolute()
+    sha = policy["LOCAL_MODEL_DIGEST"]
+    if not model.is_file():
+        print(f"JEV: local — model not found: {model}", file=sys.stderr)
+        if sha == MODEL_SHA256:
+            print(f"mkdir -p {shlex.quote(str(model.parent))} && curl -fL -o "
+                  f"{shlex.quote(str(model))} {MODEL_URL}", file=sys.stderr)
+        else:
+            print("Acquire the configured GGUF and verify its configured SHA-256.", file=sys.stderr)
+        return 1
+    digest = hashlib.sha256()
+    with model.open("rb") as stream:
+        for block in iter(lambda: stream.read(1_048_576), b""):
+            digest.update(block)
+    if digest.hexdigest() != sha:
+        print(f"JEV: local — model SHA-256 mismatch (expected {sha})", file=sys.stderr)
+        return 1
+    path = state_path(policy["LOCAL_SOCKET"]).absolute()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.stat().st_uid != os.getuid():
+        print("JEV: local — socket directory not owned by this user", file=sys.stderr)
+        return 1
+    path.parent.chmod(0o700)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None:
+        if not stat.S_ISSOCK(info.st_mode):
+            print(f"JEV: local — refusing non-socket path: {path}", file=sys.stderr)
+            return 1
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1)
+            try:
+                connect_unix(probe, path)
+            except ConnectionRefusedError:
+                path.unlink()
+            else:
+                print(f"JEV: local — already running on {path}", file=sys.stderr)
+                return 1
+    binary = shutil.which(policy["LOCAL_SERVER_BIN"])
+    if binary is None:
+        print(f"JEV: local — llama-server not found ({policy['LOCAL_SERVER_BIN']})", file=sys.stderr)
+        return 1
+    binary = str(Path(binary).absolute())
+    gpu = policy["LOCAL_GPU"]
+    print(f"JEV: local — serving {alias(sha)} on {path} (GPU {gpu})", file=sys.stderr)
+    env = {name: value for name, value in os.environ.items()
+           if name != "TYPESAFE_API_KEY" and not name.startswith("LLAMA_ARG_")}
+    env.update(CUDA_DEVICE_ORDER="PCI_BUS_ID", CUDA_VISIBLE_DEVICES=gpu)
+    argv = [binary, "-m", str(model), "--host", path.name, "--alias", alias(sha), "-c", str(CTX),
+            "-np", "1", "-ngl", "999", "--jinja", "--reasoning-budget", "0", "--cache-reuse", "256",
+            "--no-webui", "--no-slots", "--offline"]
+    os.chdir(path.parent)
+    os.execve(binary, argv, env)
+
+
+def valid_record(record):
+    if not isinstance(record, dict) or set(record) != set(LOCAL_KEYS):
+        return False
+    for name in ("timestamp", "id", "status"):
+        if not isinstance(record[name], str):
+            return False
+    for name in ("model", "jev_model", "jev_outcome"):
+        if record[name] is not None and not isinstance(record[name], str):
+            return False
+    for name in ("chunks", "latency_ms", "prompt_tokens", "cached_tokens"):
+        if record[name] is not None and type(record[name]) is not int:
+            return False
+    if type(record["requests"]) is not int:
+        return False
+    mass = record["min_option_mass"]
+    if mass is not None and not finite_number(mass):
+        return False
+    for name in ("local_p", "jev_p"):
+        values = record[name]
+        if values is not None and (not isinstance(values, list)
+                                   or type(record["chunks"]) is not int
+                                   or len(values) != record["chunks"]
+                                   or any(not probability(v) for v in values)):
+            return False
+    return True
+
+
+def report(args):
+    if args and (len(args) != 2 or args[0] != "--log"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    policy = orch.Policy()
+    path = Path(args[1]) if args else state_path(policy["LOCAL_LOG"])
+    records, malformed = [], 0
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                    if not valid_record(record):
+                        raise ValueError
+                    records.append(record)
+                except (ValueError, RecursionError):
+                    malformed += 1
+    except OSError:
+        pass
+    threshold = policy["SCAN_THRESHOLD"]
+    statuses = {}
+    chunk_counts, record_counts, differences, latencies = [0] * 4, [0] * 4, [], []
+    comparable = 0
+
+    def bucket(local, jev):
+        return 0 if local and jev else 1 if jev else 2 if local else 3
+
+    for record in records:
+        status = record["status"]
+        statuses[status] = statuses.get(status, 0) + 1
+        if status == "ok" and record["latency_ms"] is not None:
+            latencies.append(record["latency_ms"])
+        if (status != "ok" or record["jev_outcome"] != "ok"
+                or record["local_p"] is None or record["jev_p"] is None):
+            continue
+        comparable += 1
+        for local, jev in zip(record["local_p"], record["jev_p"]):
+            chunk_counts[bucket(local >= threshold, jev >= threshold)] += 1
+            differences.append(abs(local - jev))
+        record_counts[bucket(any(p >= threshold for p in record["local_p"]),
+                             any(p >= threshold for p in record["jev_p"]))] += 1
+    count = sum(chunk_counts)
+    agreement = f"{100 * (chunk_counts[0] + chunk_counts[3]) / count:.1f}%" if count else "n/a"
+    small = " — fewer than 10 comparable records" if comparable < 10 else ""
+    mean = f"{statistics.mean(differences):.3f}" if differences else "n/a"
+    median = f"{statistics.median(latencies):g}" if latencies else "n/a"
+    p95 = str(sorted(latencies)[math.ceil(len(latencies) * 0.95) - 1]) if latencies else "n/a"
+    print(f"JEV local report — {path}")
+    print(f"records: {len(records)}  malformed: {malformed}")
+    print("status: " + " · ".join(f"{status} {n}" for status, n in sorted(statuses.items())))
+    print(f"comparable (local ok and Jev ok): {comparable} records, {count} chunks{small}")
+    a, b, c, d = chunk_counts
+    print(f"chunks at JEV_SCAN_THRESHOLD={threshold:g}: both flagged {a} · Jev only {b} · local only {c}"
+          f" · both clear {d} · agreement {agreement}")
+    a, b, c, d = record_counts
+    print(f"records with any chunk flagged: both {a} · Jev only {b} · local only {c} · neither {d}")
+    print(f"mean |local p - Jev p| per chunk: {mean}")
+    print(f"local latency ms (ok records): median {median} · p95 {p95}")
+    print("counts only — this report draws no conclusion.")
+    return 0
+
+
+def main(args):
+    if args == ["worker"]:
+        try:
+            return worker()
+        except Exception:
+            return 0
+    if args == ["serve"]:
+        try:
+            return serve()
+        except (OSError, ValueError) as error:
+            print(f"JEV: local — unavailable ({type(error).__name__})", file=sys.stderr)
+            return 1
+    if args and args[0] == "report":
+        try:
+            return report(args[1:])
+        except Exception as error:
+            print(f"local-report: failed ({type(error).__name__})", file=sys.stderr)
+            return 0
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
