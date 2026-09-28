@@ -146,3 +146,17 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
   result decidable without rationalizing a new cutoff afterward; a near miss is still a miss
   under that rule. With three runs per arm per case, the rare catches were weak signals, not
   proof that medium is worse.
+
+### A model-as-classifier idea needs three separate checks: API field, credential class, egress
+- **Observed:** a "use the model we already pay for as a logprobs classifier" design fell apart on
+  checks that have nothing to do with model quality: the Claude Messages API has no logprobs field
+  at all; Codex's ChatGPT OAuth is not a Platform API credential and the default model rejects
+  logprobs parameters; and the sanctioned scriptable paths (`claude -p`, `codex exec`) return
+  verbalized numbers, with `claude -p` adding ~10-16k tokens of Claude Code context per call
+  unless `--system-prompt`/`--tools ""` are used from an empty cwd.
+- **Where:** `.orchestra/27-jev-alternative-design/plan.md` (F4, F5) in the `self-hosting-27`
+  checkout.
+- **Lesson:** before designing on "we already have access to model X", verify separately (1) that
+  the API exposes the field you need, (2) that the credential class you hold is documented for
+  standalone use, and (3) what extra context/egress the scriptable path adds; a local
+  llama.cpp server is the only path here that satisfies all three for token log-probabilities.
