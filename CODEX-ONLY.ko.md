@@ -25,6 +25,12 @@ critical은 별도 Astra auditor까지 통과해야 한다. trivial은 구체적
 대체 실행 경로인 `codex-run-codex`는 맡은 작업 하나만 수행하며 하위 agent 생성을 끈다.
 작업 분해와 추가 위임은 native orchestrator/lead가 담당한다.
 
+Lead는 승인된 작업을 gate와 `summary.md`까지 일상적인 재승인 질문 없이 완료한다.
+Worker는 자신의 변경이 일으킨 실패를 범위 안에서 수정하고 해당 검사를 다시 실행한 뒤
+실제 결과를 보고한다. Gate 실패는 상한 내 fix round로 처리하되, 필요한 결정으로 인한
+`BLOCKED`, round 상한, provider의 quota/auth/timeout 실패, 파괴적·비가역적 작업은
+기존 중단 규칙을 따른다. 진행을 막지 않는 질문은 나머지 작업을 마친 뒤 summary에 남긴다.
+
 ## 설치와 실행
 
 Linux의 Bash, Python 3, Git과 로그인된 Codex CLI가 필요하다. 관리 세션은 tmux도 사용한다.

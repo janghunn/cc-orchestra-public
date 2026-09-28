@@ -95,3 +95,28 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
 - **Lesson:** cross-check positive claims against current top-level artifacts, with exact verdict
   tokens and documented header shapes. Test contradictory, missing, archived, prose, and fenced
   lookalikes; every fixture claiming a positive gate must carry the artifact it claims.
+
+### Fence-opener false positives can hide later gate/risk declarations, in every parser copy
+- **Observed:** a line-start run of 3+ backticks was treated as opening a fence even when another
+  backtick occurred later on the same line (an inline code span, not a real fence), which could
+  hide a later conflicting risk declaration, amendment, `GATES:` line, or verifier verdict from
+  detection. The same opener condition existed independently in an AWK implementation and two
+  Python `strip_fences` copies.
+- **Where:** `.orchestra/*-fix-strip-fences-*` (orch/20, orch/21); `bin/orch-summary-check`,
+  `bin/orch-jev`, `eval/jev-phase0/common.py`.
+- **Lesson:** when a text format is parsed by more than one implementation for the same purpose
+  (here: fenced-block-aware scanning for gate/risk keywords), a single fixture testing "inline
+  backticks at column 0 before a real declaration" needs to be run against every copy, not just the
+  one you touched first — the bug reappears wherever the condition was duplicated.
+
+### A routed model slug needs matching wrapper capability coverage, not just the routing table
+- **Observed:** `budget-policy.conf`'s Codex WATCH-tier fallback moved from `gpt-5.6-sol` to
+  `gpt-6-sol`, but the Fast-mode and explicit `--effort ultra` allowlists in `bin/codex-run` and
+  `bin/codex-run-runtime` still only recognized the older slug, so `--model gpt-6-sol --fast-mode`
+  / `--effort ultra` failed until a separate follow-up fix.
+- **Where:** `budget-policy.conf` (orch/18); `bin/codex-run`, `bin/codex-run-runtime`,
+  `tests/test-policy.sh` (orch/24).
+- **Lesson:** when a policy file starts routing to a new model slug, grep every wrapper-side
+  allowlist/capability check for the old slug (Fast-mode compatibility, effort caps, resume
+  metadata checks) in the same change — routing and capability recognition are separate checks
+  that silently drift apart otherwise.
