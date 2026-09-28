@@ -45,5 +45,7 @@ jobs:
         run: bash tests/test-jev.sh
       - name: Jev Codex-routing shadow suite
         run: bash tests/test-jev-shadow.sh
+      - name: Jev local second-opinion suite
+        run: bash tests/test-jev-local.sh
       - name: Codex-only orchestration and backend switching
         run: bash tests/test-codex-only.sh
