@@ -79,3 +79,5 @@ direct edits with `"Edit(//home/janghun/cc-orchestra/**)"` and
 so the running hierarchy cannot rewrite its own instructions mid-run.
 Do self-hosting work in the assigned isolated checkout and hand changes back through
 the task branch.
+
+There is no root `CLAUDE.md` because Claude Code >= 2.1.277 reads `AGENTS.md` natively; restore a `CLAUDE.md` containing `@AGENTS.md` if an older Claude Code version or a restricted context that cannot load `AGENTS.md` directly needs support.

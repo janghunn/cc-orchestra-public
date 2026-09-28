@@ -29,7 +29,6 @@ bash tests/test-runtime.sh
 ```
 
 cc-orchestra 자체를 수정할 때는 [AGENTS.md](AGENTS.md)를 읽습니다.
-[CLAUDE.md](CLAUDE.md)는 Claude Code 세션에 이 가이드를 import합니다.
 새 서버 준비는 [BOOTSTRAP.ko.md](BOOTSTRAP.ko.md)를 참고하십시오.
 
 설치되는 주요 경로:

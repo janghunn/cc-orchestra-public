@@ -28,8 +28,7 @@ tests/test-policy.sh
 tests/test-runtime.sh
 ```
 
-For work on cc-orchestra itself, read [AGENTS.md](AGENTS.md); [CLAUDE.md](CLAUDE.md)
-imports that guide for Claude Code sessions. New-server setup is covered in
+For work on cc-orchestra itself, read [AGENTS.md](AGENTS.md). New-server setup is covered in
 [BOOTSTRAP.ko.md](BOOTSTRAP.ko.md).
 
 The main installed paths are:

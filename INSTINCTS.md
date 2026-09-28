@@ -120,3 +120,29 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
   allowlist/capability check for the old slug (Fast-mode compatibility, effort caps, resume
   metadata checks) in the same change — routing and capability recognition are separate checks
   that silently drift apart otherwise.
+
+### Aggregate effort scores can hide rare gate-skipping defects
+- **Observed:** in a live verifier A/B, xhigh cost about 0.41x as much as max and both caught
+  the known defect in 3/3 runs, but max found additional real gate-skipping defects in 4/5 runs
+  versus xhigh's 0/5 (one xhigh run mentioned a defect but dismissed it). One defect was still live
+  at measurement time despite earlier passes from the historical max verifier, Codex verify and
+  Codex review.
+- **Where:** `.orchestra/19-verifier-effort-measurement/plan.md` and `summary.md` in the
+  `self-hosting-19` checkout.
+- **Lesson:** effort comparisons need to score rare, consequential defect classes separately
+  from aggregate cost and known-defect scores; cheaper runs that tie on known failures can miss
+  the gate's distinct value. Five paired runs in one subsystem with unblinded scoring support a
+  local decision, not a claim that one effort level is universally better.
+
+### Pre-registered thresholds keep near-miss effort results from moving the goalposts
+- **Observed:** a 24-run normal-lead A/B fixed its quality criteria and medium/high cost ceiling
+  of 0.80x before running. Medium passed both quality tests but cost 0.801x, missing the reported
+  threshold by 0.001, so the rule kept high. Review scores were close (high 24 versus medium 22
+  out of 54), yet the two distinguishing catches — blocking the manifest staging race and fully
+  identifying the PROCESS-heading subtree defect — both came from high runs.
+- **Where:** `.orchestra/23-lead-normal-effort-measurement/plan.md` and `summary.md` in the
+  `self-hosting-19` checkout.
+- **Lesson:** recording quality and cost thresholds before an effort comparison makes a close
+  result decidable without rationalizing a new cutoff afterward; a near miss is still a miss
+  under that rule. With three runs per arm per case, the rare catches were weak signals, not
+  proof that medium is worse.
