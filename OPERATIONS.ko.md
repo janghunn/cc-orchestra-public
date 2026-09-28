@@ -28,6 +28,32 @@ bash tests/test-policy.sh
 bash tests/test-runtime.sh
 ```
 
+cc-orchestra 자체를 수정할 때는 [AGENTS.md](AGENTS.md)를 읽습니다.
+[CLAUDE.md](CLAUDE.md)는 Claude Code 세션에 이 가이드를 import합니다.
+새 서버 준비는 [BOOTSTRAP.ko.md](BOOTSTRAP.ko.md)를 참고하십시오.
+
+설치되는 주요 경로:
+
+```text
+~/.claude/orchestra                         -> repo
+~/.claude/agents/orchestrator.md
+~/.claude/agents/verifier.md
+~/.claude/agents/verifier-normal.md
+~/.claude/agents/route-lead-*.md
+
+~/.local/bin/cc-orch                       -> bin/cc-orch-runtime
+~/.local/bin/codex-run                     -> bin/codex-run-runtime
+~/.local/bin/orch-model-guard              -> bin/orch-model-guard-runtime
+~/.local/bin/orch-summary-check
+~/.local/bin/orch-usage-report
+```
+
+이 밖에 Fable legacy guard timer, Claude 5h/7d status-line quota tap, live runtime routing
+`UserPromptSubmit` hook, structural stale-policy notice hook을 설치합니다.
+선택형 poll guard는 [수동 폴링 방지 hook](#pretooluse-수동-폴링-방지-hook-선택-사항),
+agent frontmatter로 자동 활성화되는 verifier guard는
+[Verifier Bash 명령 guard](#verifier-bash-명령-guard)를 참고하십시오.
+
 설치 과정에서는 기존 model guard를 설정하고, Claude 사용량을 읽기 위한 status-line tap도 추가합니다. 이 tap은 Claude Code가 제공하는 구조화된 `rate_limits.five_hour` 및 `rate_limits.seven_day` 값을 받아 사용률과 리셋 시각(epoch)을 저장한 뒤, 기존에 사용하던 status-line 명령도 계속 호출합니다. Guard를 제거하면 설치 전의 status-line 설정으로 복구됩니다.
 
 이 런타임 기능을 처음 설치한 뒤 이미 실행 중이던 cc-orch 세션이 있다면, 새로 생성된 16개의 `route-lead-*` agent type을 Claude Code가 캐시하도록 **한 번만 reload**하는 것이 좋습니다. 그 이후에는 일반적인 사용량 변화나 리셋 시각 변화 때문에 다시 reload할 필요가 없습니다.
@@ -90,6 +116,43 @@ cc-orch session new main ~/projects/api --project-name api --inplace
 - 여러 기능을 병렬로 개발: 기본 worktree 모드
 - SSH 연결이 끊겨도 작업을 계속 유지: `cc-orch session ...` 사용
 
+기본 branch는 `orch/<session-name>`, base는 현재 branch 또는 `HEAD`이며,
+worktree는 `~/.claude/orchestra-state/worktrees/<project>/<session-name>`에 생성됩니다.
+`--branch` / `--base`로 바꾸거나, 기존 branch를 다시 붙일 때 `--reuse-branch`를 사용합니다.
+
+```bash
+cc-orch session new cache ~/projects/api --branch orch/cache-v2 --reuse-branch
+cc-orch session path main
+```
+
+`--inplace`는 연구 코드, 대형 데이터, conda/GPU 환경, 기존 build artifact를 그대로
+사용할 때 편합니다. 병렬 feature별 세션은 branch/index/worktree/tmux를 분리합니다.
+`main` 세션의 tmux 이름은 `ccorch-main`, launcher 이름은 `api-main`처럼 project와
+session을 포함합니다. SSH가 끊겨도 tmux는 계속 실행됩니다. `stop`은 registry, branch,
+worktree를 유지합니다. `Ctrl-b, d`로 detach하고 Claude 안의 `/exit`로 정상 종료합니다.
+
+### 직접 실행과 Remote Control
+
+```bash
+cc-orch api ~/projects/api
+cc-orch --no-rc api ~/projects/api
+cc-orch --profile critical api ~/projects/api
+cc-orch --profile deep api ~/projects/api
+cc-orch --model opus[1m] --effort high api ~/projects/api
+cc-orch session new main ~/projects/api --project-name api --inplace --no-rc
+```
+
+Remote Control은 기본적으로 `--remote-control orch-<project-name>`으로 켜집니다.
+Managed session은 `orch-api-main`처럼 session 이름도 포함하며, 터미널·휴대폰·다른
+머신에서 동일 대화를 제어할 수 있습니다. 보통 Tier 1은 normal로 유지하고 개별 task의
+risk로 lead profile을 올립니다.
+
+세션 생성·재시작 시 Claude Code와 Codex CLI의 npm `latest` 버전을 확인합니다.
+업데이트와 버전 검증이 끝난 뒤 실행하며, 조회나 설치에 실패하면 시작하지 않습니다.
+Codex-only는 Codex만 확인하고 backend 전환은 기존 세션 중단 전에 대상 CLI를 확인합니다.
+현재 npm global prefix의 CLI 설치를 지원하며, 실행 중 프로세스는 자동 재시작하지 않습니다.
+오프라인 재현·가짜 provider 테스트는 `CC_ORCH_CLI_AUTO_UPDATE=0`으로 검사를 생략할 수 있습니다.
+
 ## 런타임 예산 모델
 
 Guard는 단순 사용률만 보는 대신 **리셋까지 남은 시간에 비해 quota가 얼마나 남았는지**를 정규화합니다.
@@ -148,9 +211,44 @@ BUDGET_CRITICAL_RATIO
 
 Claude는 5시간 window와 7일 window를 각각 평가한 뒤 **더 압박이 큰 쪽**을 전체 Claude 상태로 사용합니다.
 
+Status-line 필드는 `rate_limits.five_hour.used_percentage` / `.resets_at`,
+`rate_limits.seven_day.used_percentage` / `.resets_at`이며 Codex는
+`rate_limits.primary.used_percent` / `.resets_at`을 사용합니다. Claude의 두 window가
+같은 pressure이면 headroom이 더 낮은 쪽을 limiting window로 봅니다. Fable 전용 주간
+사용률도 별도로 읽어 deep reasoning reserve를 보호합니다.
+
+현재 정책은 subscription을 적극적으로 사용하도록 다음 경계값을 사용합니다.
+
+| Pressure | Headroom ratio | reset을 모를 때 사용률 fallback |
+|---|---|---|
+| healthy | >= 0.55 | < 88% |
+| watch | >= 0.30 and < 0.55 | >= 88% and < 96% |
+| tight | >= 0.10 and < 0.30 | >= 96% and < 99% |
+| critical | < 0.10 | >= 99% |
+
+리셋까지 10분 이하이면 이미 100%를 소진한 경우 외에는 healthy입니다.
+Window의 절반이 남으면 사용률 경계는 72.5%, 85%, 95%, 10%가 남으면 94.5%, 97%, 99%이며,
+경계와 같을 때는 낮은 pressure에 속합니다. 같은 사용률도 reset에 가까우면 더 적극적으로
+사용할 수 있습니다. Quota와 시간이 각각 절반 남으면 headroom은 `1.0`입니다.
+
 ## 동적 라우팅
 
 ### Claude lead 선택
+
+| Risk | healthy | watch | tight | critical |
+|---|---|---|---|---|
+| low / trivial | light: Sonnet medium | light: Sonnet medium | light: Sonnet medium | light: Sonnet medium |
+| normal | normal: Opus high | normal: Opus high | light: Sonnet medium | light: Sonnet medium |
+| critical | critical: Opus xhigh | critical: Opus xhigh | normal: Opus high | normal: Opus high |
+| critical + deep | critical-xhigh: Fable xhigh | critical: Opus xhigh | normal: Opus high | normal: Opus high |
+
+`deep`은 사용자의 명시적 요청이나 보안·핵심 알고리즘처럼 여러 설계가 실제로 경쟁하는
+경우에만 사용합니다. Plain critical은 watch까지 Opus 5.5 xhigh를 유지하고 tight부터
+high로 effort를 낮춥니다. Fable 주간 사용률이 85%(`BUDGET_FABLE_RESERVE_PCT=85`)
+이상이면 실제 모델이 Fable인 profile(현재 `critical-xhigh`)만 Opus `normal`로 낮춥니다.
+Plain critical은 Fable 사용률의
+영향을 받지 않으며 effort는 `CLAUDE_ROUTE_CRITICAL_*`를 따릅니다. 전역 Fable 소진
+상태에서도 같은 모델 기준 규칙을 적용합니다.
 
 새 작업을 시작할 때마다 lead profile을 다시 결정합니다.
 
@@ -167,6 +265,14 @@ verify/review와 Claude verifier를 실행하지 않고 lead가
 `GATES: self-check only (trivial) — <what was checked>`를 보고한다.
 `orch-summary-check --strict`가 이 형식을 강제한다. 적용 기준은
 `agents/orchestrator.md`의 "Choosing RISK"를 참고한다.
+
+Trivial 선언은 `brief.md`의 fenced block 밖 0열에 `RISK: trivial`로 쓰며 들여쓰기나
+bullet을 쓰면 안 되고, fence 밖에서 `RISK:`로 시작하는 유일한 줄이어야 한다.
+사유는 대시 뒤에만 쓸 수 있고 `plan.md`에는 `RISK AMENDED` 줄이 최대 하나만 있어야 한다.
+다른 tier는 fence 밖 0열에서 선택적으로 대시 하나 뒤에 필드 마커로 시작하는 별도
+선언형 줄인 경우에만 충돌하며 일반 문장이나 fenced 예시의 언급은 충돌로 보지 않는다.
+Self-check의 `GATES:` 설명에는 명령·파일·숫자를 나타내는 ASCII 영문자나 숫자가
+하나 이상 있어야 한다. 적용 범위와 low→trivial 변경은 [README Gate 정책](README.md#gate-정책)을 참고한다.
 
 trivial이 아닌 작업에서는 `orch-summary-check --strict`가 양성 `GATES:` 주장을
 작업 디렉터리의 artifact와 대조한다.
@@ -195,6 +301,8 @@ ASCII `-` 앞에는 반드시 공백 문자가 하나 이상 있어야 한다. `
 붙거나 공백 뒤에 와도 된다.
 1 MiB를 넘는 파일은 파싱하지 않는다. Summary와 Claude verifier의
 fenced block은 무시하며, Codex artifact는 첫 번째 비어 있지 않은 줄 자체가 header여야 한다.
+줄 앞의 inline backtick span은 fence를 열지 않는다. 3개 이상 backtick 뒤 같은 줄에
+backtick이 더 있으면 이후 선언을 fence 안으로 숨길 수 없다.
 Fence 밖의 마지막 `GATES:` 줄을 사용하고 status는 접두사가 아닌 완전한 token으로 판정한다.
 각 주장은 `·`, `;`, `,`로 구분한 구간의 시작에 있어야 하며 `no codex-verify PASS`처럼
 앞에 다른 문구가 붙으면 주장으로 인정하지 않는다.
@@ -225,30 +333,26 @@ Git 기준점을 사용할 수 없으면 skipped로 보고하며 credential이 �
 
 이미 실행 중인 Tier-1 모델은 quota 상태가 변해도 실행 도중 hot-swap하지 않습니다.
 
+Legacy guard가 `active=opus[1m]`여도 runtime-managed normal Tier 1은
+`sonnet[1m] @ high`를 유지합니다. `orch-model-guard active`는 legacy compatibility
+상태이므로 실제 프로세스 모델과 다를 수 있습니다. Brief 작성, lead 배정, registry와
+결과 보고도 Tier 1의 책임입니다.
+
 ### Codex 모델과 effort 선택
 
 새 `codex-run` 호출마다 모델과 effort를 자동으로 다시 결정합니다.
 
-대표적인 구현(implement) 정책은 다음과 같습니다.
-
-```text
-healthy   implement -> Astra xhigh (Fast; Astra를 쓸 수 없으면 Sol xhigh)
-watch     implement -> Sol high
-tight     implement -> Terra high
-critical  implement -> 보류(withheld); Claude fallback 사용
-```
-
-리뷰(review)는 독립적인 cross-family gate를 보존하기 위해 critical에서도 완전히 끄지 않습니다.
-
-```text
-healthy   review -> Astra high (Fast; Astra를 쓸 수 없으면 Sol high)
-watch     review -> Sol medium
-tight     review -> Terra high
-critical  review -> Terra medium (gate reserve)
-```
+| Mode | healthy | watch | tight | critical |
+|---|---|---|---|---|
+| `intake` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
+| `investigate` | Astra high (폴백 Sol high) | Terra high | Terra medium | **withheld** |
+| `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6-sol` high | Terra high | **withheld** |
+| `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
+| `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
+| `verify` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
 
 전체 라우팅 표는 `budget-policy.conf`에 있습니다.
-자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반적인 Sol/Terra 기본값으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
+자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반적인 Sol/Terra 기본값으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `CODEX-RUN: MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
 
 명시적으로 전달한 옵션은 자동 라우팅보다 항상 우선합니다.
 
@@ -258,6 +362,24 @@ codex-run ... --critical
 codex-run ... --fast-mode
 codex-run ... --mech
 ```
+
+WATCH에서 `gpt-6-sol`을 쓰는 것은 implement, review, plan-review입니다.
+`--model sol` alias와 healthy에서 Astra를 쓸 수 없을 때의 Sol 기본 폴백은 여전히
+`gpt-5.6-sol`입니다. Healthy의 Astra(`gpt-6-astra`) 가용성은 계정/CLI별 live catalog와
+`~/.codex/models_cache.json`으로 확인합니다. Critical에서는 cross-family review와 실행
+검증 quota를 보존하려고 자동 investigate/implement를 보류합니다. 조사는 Claude/Explore,
+구현은 Claude dev fallback을 사용할 수 있고 intake/review/plan-review/verify는 유지합니다.
+별도 Luna lane은 `templates/lead.md.tpl`의 lane 표를 참고하십시오.
+
+### Fast mode
+
+`CODEX_ALWAYS_FAST_MODE=1`이므로 자동으로 선택된 지원 Astra/Sol/Terra 호출은 Fast mode를
+사용합니다. `--fast-mode`는 선택된 model/effort를 유지하고 해당 호출만 공식 Fast tier로
+실행합니다. `gpt-5.6-sol`, WATCH의 `gpt-6-sol`, `gpt-6-astra`, `gpt-5.6-terra`는 wrapper의
+Fast-mode와 명시적 `--effort ultra` allowlist에 모두 포함됩니다.
+`ultra`는 자동 선택하지 않으며 사용자의 명시적 요청에 따라 `--effort ultra`로 지정합니다.
+`--mech`와 legacy `--fast`는 별도의 명시적 Luna 경량 경로입니다.
+`resume`은 기존 thread의 context/model 연속성을 우선하여 새 자동 route를 강제하지 않습니다.
 
 특정 명령 한 번만 자동 Codex 라우팅을 끄려면:
 
@@ -270,6 +392,26 @@ CC_ORCH_AUTO_ROUTE=0 codex-run ...
 ```bash
 export CC_ORCH_AUTO_ROUTE=0
 ```
+
+### Codex 명령
+
+모든 자동 Codex 실행은 `codex-run` facade를 통합니다.
+
+```bash
+codex-run intake      <workdir> <task-dir> "<goal>"
+codex-run investigate <workdir> <task-dir> "<question>"
+codex-run implement   <workdir> <task-dir>
+codex-run implement   <workdir> <task-dir> --lane b
+codex-run implement   <workdir> <task-dir> --mech
+codex-run resume      <workdir> <task-dir> "<follow-up>" [--lane b]
+codex-run plan-review <workdir> <task-dir> [--critical]
+codex-run verify      <workdir> <task-dir> [--critical]
+codex-run review      <workdir> <task-dir> --base <branch> [--critical]
+codex-run status      <task-dir>
+```
+
+`--model astra` / `--model <slug>`, `--effort`, `--critical`로 명시적으로 지정할 수 있고,
+`--dry-run`은 모델 실행 없이 조합된 명령만 출력합니다.
 
 ## provider 간 dispatch 결정
 
@@ -284,6 +426,13 @@ dispatch=codex-sparing
 - `codex-sparing`: Codex quota 압박이 Claude보다 더 큰 경우 Codex를 절약하고, 남은 quota를 독립적인 review/verify gate에 우선 보존
 
 이 판단도 단순 사용률이 아니라 리셋까지 남은 시간을 포함한 headroom을 사용합니다.
+
+Codex가 healthy/watch/tight이면 `codex-first`를 유지하며 provider를 바꾸기 전에
+Codex 내부 model/effort를 낮춥니다. Claude는 이미 control cost를 지불하므로 무거운
+실행에는 별도 Codex pool을 사용합니다. `codex-sparing`은 critical reserve boundary
+(`BUDGET_CODEX_SPARING_MIN_RANK=3`)에서 Codex가 Claude보다 압박이 클 때 시작합니다.
+둘 다 critical이면 `BUDGET_PROVIDER_SWITCH_MARGIN`으로 headroom 차이를 비교합니다.
+Claude만 critical이고 Codex는 그 아래이면 `codex-first`를 유지합니다.
 
 ## Jev 자문 사이드카 (선택 사항, hybrid 모드 전용)
 
@@ -441,6 +590,13 @@ Jev를 호출하지 않고 `skipped:invalid-args`로 기록합니다.
 - 새 정책은 **다음 lead 생성 또는 다음 Codex 호출 경계**부터 적용
 
 `cc-orch --reload`는 prompt, template, agent 정의처럼 **구조적인 설정이 바뀐 경우**에 사용합니다. UserPromptSubmit hook은 이런 구조 변경과 단순 quota 변화를 구분합니다.
+
+`agents/*.md`, `templates/*.tpl`, structural `model-policy.conf` 설정이 이 구조 변경에
+해당합니다. `model-policy.conf`의 lead model/effort를 바꾸면
+`~/.claude/agents/lead-*.md`, `~/.claude/agents/route-lead-*.md`도 재생성해야 합니다. `./install.sh`(내부에서 `build-roster-runtime.sh` 호출)와
+`./install.sh --check` 뒤 `cc-orch --reload <project>`를 실행하십시오.
+Reload만으로 roster는 재생성되지 않습니다. Managed session은 `/exit` 뒤
+`cc-orch session restart <name>`으로 기존 대화를 이어 재시작할 수도 있습니다.
 
 실행 중인 세션을 reload할 때는 hook과 같은 순서로 `.orchestra/REGISTRY.md`를 찾는다.
 Git toplevel과 그 상위 디렉터리, 프로세스 cwd와 그 상위 디렉터리, git common directory의
@@ -698,6 +854,9 @@ journal에도 경고를 보존합니다.
 
 ## 설정 튜닝
 
+`model-policy.conf`는 고정 role/profile의 model/effort 기본값,
+`budget-policy.conf`는 pressure별 Claude profile, Codex model/effort, provider 선택을 정의합니다.
+
 라우팅 정책을 조정하려면 `budget-policy.conf`를 수정합니다.
 
 이 파일은 `orch-policy-rev` 계산에서 제외되어 있으므로, quota threshold나 모델 배분표를 조정하는 것만으로 prompt cache가 무효화되지는 않습니다.
@@ -710,6 +869,7 @@ BUDGET_TIGHT_RATIO
 BUDGET_CRITICAL_RATIO
 BUDGET_NEAR_RESET_MINUTES
 BUDGET_PROVIDER_SWITCH_MARGIN
+BUDGET_CODEX_SPARING_MIN_RANK
 BUDGET_FABLE_RESERVE_PCT
 CLAUDE_ROUTE_*_PROFILE
 CODEX_AUTO_<MODE>_<PRESSURE>_{MODEL,EFFORT,ALLOW}
@@ -771,3 +931,25 @@ ps -eo pid,args | grep '[c]laude.*--agent orchestrator'
 ```
 
 일반적인 normal 세션이라면 `--model sonnet[1m] --effort high`가 표시되는 것이 정상입니다.
+
+`orch-model-guard status`는 legacy Fable guard와 runtime budget을 함께 보여 줍니다.
+`budget`은 reset/pressure/headroom, `lanes`는 provider 결정과 이유를 표시합니다.
+다음 dispatch의 lead profile/model/effort 또는 Codex model/effort/allow를 미리 확인하려면:
+
+```bash
+orch-model-guard route lead normal alpha
+orch-model-guard route codex implement
+```
+
+## 회귀 검사
+
+```bash
+bash tests/test-policy.sh
+bash tests/test-runtime.sh
+bash tests/test-tier1-runtime.sh
+bash tests/test-notice-runtime.sh
+```
+
+Model-policy profile, reset-aware pressure, Claude/Codex routing, Fast 호환성, provider reserve,
+Tier 1 normal=Sonnet, stale-policy notice 오탐, tmux/worktree lifecycle, status-line 보존,
+runtime hook JSON contract를 검사합니다.

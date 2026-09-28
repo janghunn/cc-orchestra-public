@@ -28,6 +28,32 @@ tests/test-policy.sh
 tests/test-runtime.sh
 ```
 
+For work on cc-orchestra itself, read [AGENTS.md](AGENTS.md); [CLAUDE.md](CLAUDE.md)
+imports that guide for Claude Code sessions. New-server setup is covered in
+[BOOTSTRAP.ko.md](BOOTSTRAP.ko.md).
+
+The main installed paths are:
+
+```text
+~/.claude/orchestra                         -> repo
+~/.claude/agents/orchestrator.md
+~/.claude/agents/verifier.md
+~/.claude/agents/verifier-normal.md
+~/.claude/agents/route-lead-*.md
+
+~/.local/bin/cc-orch                       -> bin/cc-orch-runtime
+~/.local/bin/codex-run                     -> bin/codex-run-runtime
+~/.local/bin/orch-model-guard              -> bin/orch-model-guard-runtime
+~/.local/bin/orch-summary-check
+~/.local/bin/orch-usage-report
+```
+
+The installer also configures the legacy Fable guard timer, Claude 5h/7d status-line quota tap,
+live routing `UserPromptSubmit` hook, and structural stale-policy notice hook. The optional
+poll guard is documented under [PreToolUse poll guard](#pretooluse-poll-guard-opt-in);
+verifier guards are activated through agent frontmatter, as described under
+[Verifier Bash command guard](#verifier-bash-command-guard).
+
 Installation runs the existing model guard and adds a Claude status-line tap. The tap receives
 structured `rate_limits.five_hour` and `rate_limits.seven_day` values, saves percentages and reset
 epochs, and then invokes the previous status-line command. Uninstalling the guard restores the
@@ -91,6 +117,45 @@ State lives under:
 
 Override the worktree root with `CC_ORCH_WORKTREE_ROOT`.
 
+For Git repositories, the default branch is `orch/<session-name>`, based on the current branch
+or `HEAD`, and the worktree is under `~/.claude/orchestra-state/worktrees/<project>/<session-name>`.
+Use `--branch` / `--base` to override these, or `--reuse-branch` to use an existing branch:
+
+```bash
+cc-orch session new cache ~/projects/api --branch orch/cache-v2 --reuse-branch
+cc-orch session new main ~/projects/api --project-name api --inplace
+cc-orch session path main
+```
+
+`--inplace` keeps the existing checkout, useful for research, large datasets, conda/GPU environments,
+and existing build artifacts. Separate sessions for parallel features isolate branches, indexes,
+worktrees, and tmux processes. A session named `main` uses tmux `ccorch-main`; its launcher name
+includes project and session, such as `api-main`.
+Detach without stopping Claude with `Ctrl-b, d`; use `/exit` inside Claude to end it normally.
+SSH disconnection leaves the tmux session running. `stop` keeps the registry, branch, and worktree.
+
+### Direct launch and Remote Control
+
+```bash
+cc-orch api ~/projects/api
+cc-orch --no-rc api ~/projects/api
+cc-orch --profile critical api ~/projects/api
+cc-orch --profile deep api ~/projects/api
+cc-orch --model opus[1m] --effort high api ~/projects/api
+cc-orch session new main ~/projects/api --project-name api --inplace --no-rc
+```
+
+Remote Control is enabled by default as `--remote-control orch-<project-name>`; managed sessions
+include the session name, for example `orch-api-main`. It lets a terminal, phone, or another machine
+control the same conversation. Usually keep Tier 1 normal and raise individual task risks instead
+of making the entire orchestrator critical/deep.
+
+Session creation/restart checks Claude Code and Codex against npm `latest` and completes any
+update and version check before launch. Codex-only checks only Codex; backend switches check the
+target CLI before stopping the old session. The current npm global prefix installation is supported.
+Lookup or installation failure prevents launch; already-running processes are not restarted.
+`CC_ORCH_CLI_AUTO_UPDATE=0` explicitly skips this for offline reproduction or fake-provider tests.
+
 ## Runtime budget model
 
 The guard normalizes usage by time left until reset:
@@ -126,7 +191,45 @@ Claude data comes from the status-line tap. Codex data comes from the newest
 `rate_limits.primary` object in `~/.codex/sessions/**/rollout-*.jsonl`; no extra model call is
 made.
 
+The status-line fields are `rate_limits.five_hour.used_percentage` / `.resets_at` and
+`rate_limits.seven_day.used_percentage` / `.resets_at`; Codex uses
+`rate_limits.primary.used_percent` / `.resets_at`. Claude evaluates both 5h and 7d windows,
+takes the worse pressure, and breaks equal-rank ties by lower headroom. Fable's separate weekly
+usage also protects the deep-reasoning reserve.
+
+Current thresholds in `budget-policy.conf` deliberately favor using the subscriptions:
+
+| Pressure | Headroom ratio | Usage fallback when reset is unknown |
+|---|---|---|
+| healthy | >= 0.55 | < 88% |
+| watch | >= 0.30 and < 0.55 | >= 88% and < 96% |
+| tight | >= 0.10 and < 0.30 | >= 96% and < 99% |
+| critical | < 0.10 | >= 99% |
+
+A window with at most 10 minutes to reset is healthy unless already 100% used. With half the
+window remaining, the usage boundaries are 72.5%, 85%, and 95%; with 10% remaining they are
+94.5%, 97%, and 99%. Equality stays in the lower-pressure tier. Thus the same usage can permit
+more work near reset. Half the quota and half the time remaining gives headroom `1.0`;
+a ratio above `1.0` means more room to spend.
+
 ## Dynamic routing
+
+### Claude lead profiles
+
+| Risk | healthy | watch | tight | critical |
+|---|---|---|---|---|
+| low / trivial | light: Sonnet medium | light: Sonnet medium | light: Sonnet medium | light: Sonnet medium |
+| normal | normal: Opus high | normal: Opus high | light: Sonnet medium | light: Sonnet medium |
+| critical | critical: Opus xhigh | critical: Opus xhigh | normal: Opus high | normal: Opus high |
+| critical + deep | critical-xhigh: Fable xhigh | critical: Opus xhigh | normal: Opus high | normal: Opus high |
+
+`deep` is reserved for an explicit user request or genuinely competing designs, such as security
+or core algorithms. Plain critical keeps Opus 5.5 xhigh through watch and lowers effort to high at
+tight. When Fable weekly usage reaches 85% (`BUDGET_FABLE_RESERVE_PCT=85`), only profiles
+resolving to Fable (currently `critical-xhigh`) fall back to Opus `normal`. Plain critical is
+unaffected by Fable usage;
+its effort follows `CLAUDE_ROUTE_CRITICAL_*`. The same model-based rule applies to global
+Fable exhaustion.
 
 Lead selection is resolved at each new task boundary:
 
@@ -142,6 +245,14 @@ orch-model-guard route lead critical deep delta
 Codex verify/review or Claude verifier, and the lead reports
 `GATES: self-check only (trivial) — <what was checked>`. `orch-summary-check --strict` enforces
 that line. See "Choosing RISK" in `agents/orchestrator.md` for the applicability rules.
+
+For trivial declarations, `brief.md` must have exactly one unfenced column-zero `RISK:` line,
+written `RISK: trivial` without indentation or a bullet. A reason may follow only a dash.
+`plan.md` allows at most one `RISK AMENDED` line. Another tier conflicts only on a separate
+unfenced column-zero declaration beginning with a field marker, optionally preceded by one dash;
+ordinary prose and fenced examples do not conflict. The self-check `GATES:` explanation must
+contain at least one ASCII letter or digit identifying a command, file, or count.
+See [README gate policy](README.md#gate-정책) for applicability and the low-to-trivial amendment.
 
 For non-trivial tasks, `orch-summary-check --strict` cross-checks positive `GATES:` claims
 against artifacts in the task directory:
@@ -170,7 +281,9 @@ while `PASS-FAIL`, `PASS-ish`, and `CLEAR-BLOCKING 1` are rejected. The other de
 follow the token directly or after whitespace.
 Files over 1 MiB are not parsed.
 Fenced blocks are ignored in the summary and Claude verifier; Codex artifacts require the
-header itself as their first non-blank line. The last `GATES:` line outside fences is used,
+header itself as their first non-blank line. A line-start inline backtick span does not open a
+fence: a run of 3+ backticks with another backtick later on that line cannot hide later declarations.
+The last `GATES:` line outside fences is used,
 with complete status tokens rather than prefixes. Claims must begin a segment separated by
 `·`, `;`, or `,`; prefixed text such as `no codex-verify PASS` is not a claim.
 Missing or contradicting artifacts produce
@@ -198,23 +311,36 @@ Scanning `bin/orch-security-scan` itself produces two expected instruction-phras
 on its pattern definition and diagnostic label lines. These remain advisory and have no
 exemption in the scanner.
 
+### Tier-1 orchestrator
+
+Normal runtime-managed Tier 1 stays `sonnet[1m] @ high` for intent, decomposition, briefs,
+lead assignment, registry/status tracking, and reporting; costly design and review go to lower tiers.
+A legacy `active=opus[1m]` fallback does not change this normal runtime profile.
+`orch-model-guard active` reports legacy compatibility state, which can differ from the live model.
+Check the actual process:
+
+```bash
+ps -eo pid,args | grep '[c]laude.*--agent orchestrator'
+```
+
+A normal session shows `--model sonnet[1m] --effort high`.
+
+### Codex model and effort
+
 Codex model and effort are resolved automatically on each new `codex-run` invocation:
 
-```text
-healthy   implement -> Astra xhigh (Fast; Sol xhigh when Astra is unavailable)
-watch     implement -> Sol high
-tight     implement -> Terra high
-critical  implement -> withheld; Claude fallback
-
-healthy   review -> Astra high (Fast; Sol high when Astra is unavailable)
-watch     review -> Sol medium
-tight     review -> Terra high
-critical  review -> Terra medium (gate reserve)
-```
+| Mode | healthy | watch | tight | critical |
+|---|---|---|---|---|
+| `intake` | Astra high (fallback Terra high) | Terra medium | Terra medium | Terra low |
+| `investigate` | Astra high (fallback Sol high) | Terra high | Terra medium | **withheld** |
+| `implement` | Astra xhigh (fallback Sol xhigh) | `gpt-6-sol` high | Terra high | **withheld** |
+| `review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
+| `plan-review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
+| `verify` | Astra high (fallback Terra high) | Terra medium | Terra medium | Terra low |
 
 The complete table is in `budget-policy.conf`. Auto-routed healthy calls emit
 `CODEX-RUN: MODEL_FALLBACK` and use the lane's plain Sol/Terra default when Astra is unavailable;
-explicit Astra requests instead exit 6 with `MODEL_UNAVAILABLE`. Set
+explicit Astra requests instead exit 6 with `CODEX-RUN: MODEL_UNAVAILABLE`. Set
 `CC_ORCH_CODEX_CATALOG_CHECK=0` to disable the live/cached catalog pre-flight. Explicit flags always win:
 
 ```bash
@@ -225,12 +351,59 @@ codex-run ... --fast-mode
 codex-run ... --mech
 ```
 
+WATCH uses `gpt-6-sol` only for implement, review, and plan-review; `--model sol` and the healthy
+Astra-unavailable Sol defaults still mean `gpt-5.6-sol`. Healthy Astra (`gpt-6-astra`) availability
+is checked using the account/CLI live catalog and `~/.codex/models_cache.json`.
+At critical pressure, automatic investigate/implement are withheld to reserve quota for
+cross-family review and executable verification; Claude/Explore investigation and Claude dev
+implementation remain fallback options. Intake, review, plan-review, and verify stay available.
+The separate Luna lanes are documented in `templates/lead.md.tpl`.
+
+### Fast mode
+
+`CODEX_ALWAYS_FAST_MODE=1` enables Fast mode for supported automatically selected Astra/Sol/Terra
+calls. `--fast-mode` keeps the selected model and effort and requests the official Fast service
+tier for that invocation. Both `gpt-5.6-sol` and WATCH's `gpt-6-sol`, plus `gpt-6-astra` and
+`gpt-5.6-terra`, pass the wrappers' Fast-mode and explicit `--effort ultra` allowlists.
+`ultra` is never selected implicitly; it requires an explicit user request and `--effort ultra`.
+`--mech` and legacy `--fast` are explicit Luna lanes, distinct from Fast mode.
+`resume` preserves the existing thread's context/model rather than forcing a new automatic route.
+
 Disable automatic Codex routing for one command or shell:
 
 ```bash
 CC_ORCH_AUTO_ROUTE=0 codex-run ...
 export CC_ORCH_AUTO_ROUTE=0
 ```
+
+### Codex command reference
+
+All automatic Codex calls go through the `codex-run` facade:
+
+```bash
+codex-run intake      <workdir> <task-dir> "<goal>"
+codex-run investigate <workdir> <task-dir> "<question>"
+codex-run implement   <workdir> <task-dir>
+codex-run implement   <workdir> <task-dir> --lane b
+codex-run implement   <workdir> <task-dir> --mech
+codex-run resume      <workdir> <task-dir> "<follow-up>" [--lane b]
+codex-run plan-review <workdir> <task-dir> [--critical]
+codex-run verify      <workdir> <task-dir> [--critical]
+codex-run review      <workdir> <task-dir> --base <branch> [--critical]
+codex-run status      <task-dir>
+```
+
+Use `--model astra` / `--model <slug>`, `--effort`, or `--critical` for explicit overrides;
+`--dry-run` prints the assembled command without running a model.
+
+### Provider dispatch
+
+`orch-model-guard lanes` defaults to `codex-first` through healthy/watch/tight: Claude already
+pays the control cost, so heavy execution uses the separate Codex pool. Pressure first reduces
+Codex model/effort, before switching provider. `codex-sparing` starts only at the critical reserve
+boundary (`BUDGET_CODEX_SPARING_MIN_RANK=3`) when Codex is more constrained than Claude.
+If both are critical, `BUDGET_PROVIDER_SWITCH_MARGIN` compares their headroom. Claude critical
+with Codex below critical stays `codex-first`. Sparing preserves Codex review/verify quota.
 
 ## Jev advisory sidecar (optional, hybrid mode only)
 
@@ -384,8 +557,15 @@ An already-running model process is not hot-swapped mid-turn:
 - a running lead keeps its current model and context;
 - new policy applies at the next lead or Codex dispatch boundary.
 
-`cc-orch --reload` remains appropriate after structural prompt/template/agent-definition changes.
+`cc-orch --reload` remains appropriate after structural prompt/template/agent-definition changes
+(`agents/*.md`, `templates/*.tpl`, and structural `model-policy.conf` settings).
 The prompt hook distinguishes that case from ordinary budget movement.
+
+Changing lead model/effort tiers in `model-policy.conf` also requires rebuilding the rendered
+`~/.claude/agents/lead-*.md` and `~/.claude/agents/route-lead-*.md` roster: run `./install.sh` (which calls
+`build-roster-runtime.sh`), then `./install.sh --check`, then `cc-orch --reload <project>`.
+Reload alone does not regenerate the roster. A managed session can instead exit with `/exit`
+and use `cc-orch session restart <name>` to continue the conversation.
 
 With a live session, reload discovers `.orchestra/REGISTRY.md` like the hooks: git toplevel
 and its ancestors, process cwd and its ancestors, the git common directory's parent, then
@@ -628,6 +808,9 @@ display on `SubagentStop` is also unconfirmed; stderr and the journal preserve w
 
 ## Tuning
 
+`model-policy.conf` owns static role/profile model and effort defaults;
+`budget-policy.conf` owns pressure-based Claude profiles, Codex model/effort, and provider choice.
+
 Edit `budget-policy.conf`. It is excluded from `orch-policy-rev`, so tuning does not invalidate
 the prompt cache.
 
@@ -639,6 +822,7 @@ BUDGET_TIGHT_RATIO
 BUDGET_CRITICAL_RATIO
 BUDGET_NEAR_RESET_MINUTES
 BUDGET_PROVIDER_SWITCH_MARGIN
+BUDGET_CODEX_SPARING_MIN_RANK
 BUDGET_FABLE_RESERVE_PCT
 CLAUDE_ROUTE_*_PROFILE
 CODEX_AUTO_<MODE>_<PRESSURE>_{MODEL,EFFORT,ALLOW}
@@ -646,3 +830,26 @@ CODEX_AUTO_<MODE>_<PRESSURE>_{MODEL,EFFORT,ALLOW}
 
 Use `orch-model-guard budget` after a change to verify the resulting pressure and routing before
 starting a large task.
+
+## Status and regression checks
+
+```bash
+orch-model-guard status
+orch-model-guard route lead normal alpha
+orch-model-guard route codex implement
+```
+
+`status` combines the legacy Fable guard and runtime budget; `budget` reports pressure/headroom
+and reset times; `lanes` reports the provider decision and reason. The route commands preview
+the next lead profile/model/effort or Codex model/effort/allow result.
+
+```bash
+bash tests/test-policy.sh
+bash tests/test-runtime.sh
+bash tests/test-tier1-runtime.sh
+bash tests/test-notice-runtime.sh
+```
+
+These cover model-policy profiles, reset-aware pressure, Claude/Codex routing, Fast compatibility,
+provider reserves, normal Tier 1 Sonnet, stale-policy notice false positives, managed tmux/worktree
+lifecycle, status-line preservation, and runtime-hook JSON contracts.
