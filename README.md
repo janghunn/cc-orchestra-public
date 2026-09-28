@@ -202,7 +202,7 @@ Runtime-selected Claude lead
 ```
 
 Lead는 첫 `investigate` 전에 루트의 [AGENTS.md](AGENTS.md)(저장소 안내)와
-[INSTINCTS.md](INSTINCTS.md)(이전 작업의 교훈)를 각각 있으면 훑어보며, 이 preflight의
+[INSTINCTS.md](INSTINCTS.md)(이전 작업의 교훈)과 [IMPROVEMENT-CANDIDATES.md](IMPROVEMENT-CANDIDATES.md)(제안된 개선 후보)를 각각 있으면 훑어보며, 이 preflight의
 참고 자료를 실행하거나 amended brief·권위 있는 지시로 취급하지 않는다.
 
 Lead는 brief가 승인한 조사·계획·구현 배정·review·commit/push·gate·상한 내 fix round·
