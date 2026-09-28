@@ -27,6 +27,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import warnings
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "bin/orch-jev-local"
@@ -509,6 +510,132 @@ class JevResponse:
         return self.fp.read1(size)
 
 
+class DetachedFixture:
+    """Real child processes and relative configuration, without a listening socket."""
+    def __init__(self, case):
+        self.case = case
+        self.repo = case.base / "copy"
+        (self.repo / "bin").mkdir(parents=True)
+        for name in ("orch-jev", "orch-jev-local"):
+            shutil.copy2(ROOT / "bin" / name, self.repo / "bin" / name)
+        shutil.copy2(ROOT / "jev-policy.conf", self.repo / "jev-policy.conf")
+        shutil.copytree(ROOT / "templates/jev", self.repo / "templates/jev")
+        self.work = case.base / "work"
+        self.work.mkdir()
+        self.source = self.work / "input.txt"
+        self.source.write_text("Synthetic detached-worker input.\n")
+        self.policy = self.work / "policy"
+        self.log = self.work / "state/jev-local.jsonl"
+        self.env = dict(os.environ, CC_ORCH_JEV_POLICY="policy", CC_ORCH_STATE_DIR="state",
+                        CC_ORCH_JEV_TEMPLATES="../copy/templates/jev", TYPESAFE_API_KEY=SENTINEL)
+        for key in ("PYTHONWARNINGS", "PYTHONDEVMODE"):
+            self.env.pop(key, None)
+        self.markers = []
+        case.addCleanup(self.cleanup)
+        self.configure("1")
+
+    def configure(self, enabled):
+        values = {"JEV_LOCAL_ENABLED": enabled, "JEV_ENDPOINT": "http://127.0.0.1:9/v1/systemone",
+                  "JEV_TIMEOUT_SECONDS": 1, "JEV_LOCAL_TIMEOUT_SECONDS": 1,
+                  "JEV_LOCAL_DEADLINE_SECONDS": 3,
+                  "JEV_LOCAL_SOCKET": str(self.case.base / "nonexistent.sock")}
+        self.policy.write_text((self.repo / "jev-policy.conf").read_text() + "\n"
+                               + "\n".join(f"{key}={json.dumps(value)}" for key, value in values.items()) + "\n")
+
+    def sleeping_worker(self):
+        (self.repo / "bin/orch-jev-local").write_text(
+            "import os, time\nfrom pathlib import Path\n"
+            "marker = Path(os.environ['JEV_TEST_WORKER_PID'])\n"
+            "pending = marker.with_suffix('.tmp')\n"
+            "pending.write_text(str(os.getpid()))\npending.replace(marker)\ntime.sleep(3)\n")
+
+    def marker(self, name):
+        path = self.case.base / (name + ".pid")
+        self.markers.append(path)
+        return path
+
+    def wait_pid(self, marker):
+        deadline = time.monotonic() + 2
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.case.assertTrue(marker.exists(), "fake worker did not record its PID")
+        return int(marker.read_text())
+
+    def stop_worker(self, marker):
+        if not marker.exists():
+            return
+        pid = int(marker.read_text())
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # The in-process test owns this child; subprocess tests cannot reap a grandchild.
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                reaped, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if reaped:
+                break
+            self.case.assertLess(time.monotonic(), deadline, "fake worker was not reaped")
+            time.sleep(0.01)
+        marker.unlink()
+
+    def cleanup(self):
+        for marker in self.markers:
+            self.stop_worker(marker)
+
+    def scan(self, python_args=(), env=None):
+        return subprocess.run([sys.executable, *python_args, str(self.repo / "bin/orch-jev"),
+                               "scan", str(self.source)], cwd=self.work,
+                              env=self.env if env is None else env, capture_output=True, timeout=12)
+
+
+class DetachedWorkerTests(Case):
+    def test_relative_policy_state_and_templates_reach_real_worker(self):
+        fixture = DetachedFixture(self)
+        result = fixture.scan()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"JEV: unavailable \xe2\x80\x94 network", result.stdout)
+        deadline = time.monotonic() + 10
+        rows = []
+        while time.monotonic() < deadline:
+            if fixture.log.exists():
+                rows = [json.loads(line) for line in fixture.log.read_text().splitlines()]
+                if rows:
+                    break
+            time.sleep(0.02)
+        self.assertEqual(len(rows), 1, "relative state directory must receive exactly one local record")
+        self.assertEqual(rows[0]["jev_outcome"], "network")
+        self.assertIn(rows[0]["status"], ("unavailable:server", "unavailable:socket-denied"))
+
+    def test_warning_enabled_subprocess_output_is_byte_identical(self):
+        fixture = DetachedFixture(self)
+        fixture.sleeping_worker()
+        for mode in ("dev", "warnings"):
+            with self.subTest(mode=mode):
+                marker = fixture.marker(mode)
+                env = dict(fixture.env, JEV_TEST_WORKER_PID=str(marker))
+                python_args = ("-X", "dev") if mode == "dev" else ()
+                if mode == "warnings":
+                    env["PYTHONWARNINGS"] = "default"
+                fixture.configure("0")
+                off = fixture.scan(python_args, env)
+                self.assertFalse(marker.exists())
+                fixture.configure("1")
+                try:
+                    on = fixture.scan(python_args, env)
+                    fixture.wait_pid(marker)
+                    self.assertEqual(off.returncode, 0)
+                    self.assertEqual(off.stderr, b"")
+                    self.assertEqual((off.stdout, off.stderr, off.returncode),
+                                     (on.stdout, on.stderr, on.returncode))
+                    self.assertEqual(on.stderr, b"")
+                finally:
+                    fixture.stop_worker(marker)
+
+
 class HookTests(Case):
     def setUp(self):
         super().setUp()
@@ -550,7 +677,7 @@ class HookTests(Case):
         self.assertEqual(args, [sys.executable, "-B", str(TOOL), "worker"])
         self.assertTrue(kwargs["start_new_session"])
         self.assertTrue(kwargs["close_fds"])
-        self.assertEqual(kwargs["cwd"], "/")
+        self.assertNotIn("cwd", kwargs.keys())
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         self.assertNotIn("TYPESAFE_API_KEY", kwargs["env"])
@@ -606,6 +733,27 @@ class HookTests(Case):
             _, popen = self.run_jev("scan")
         temporary.assert_not_called()
         popen.assert_not_called()
+
+    def test_real_popen_emits_no_resource_warning(self):
+        fixture = DetachedFixture(self)
+        fixture.sleeping_worker()
+        marker = fixture.marker("in-process")
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with patch.object(jev, "REPO_DIR", fixture.repo), \
+                 patch.object(jev.urllib.request, "build_opener", return_value=self), \
+                 patch.dict(os.environ, JEV_TEST_WORKER_PID=str(marker)), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                 warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                code = jev.main(["scan", str(self.brief)])
+            fixture.wait_pid(marker)
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertFalse([warning for warning in caught
+                              if issubclass(warning.category, ResourceWarning)])
+        finally:
+            fixture.stop_worker(marker)
 
 
 class ServeTests(Case):

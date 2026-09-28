@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 DEFAULTS = {
@@ -928,12 +929,16 @@ def local_second_opinion(policy, state, questions, outcome, payload):
                    "questions": questions, "jev_model": policy.model, "jev_outcome": outcome,
                    "jev_noul": jev}
         env = {name: value for name, value in os.environ.items() if name != "TYPESAFE_API_KEY"}
-        with tempfile.TemporaryFile() as stream:
+        with tempfile.TemporaryFile() as stream, warnings.catch_warnings():
+            # Never waited on: finalize the Popen here, where its "still running"
+            # ResourceWarning cannot reach this command's stderr (gate r1 finding 1).
+            warnings.simplefilter("ignore", ResourceWarning)
             stream.write(json.dumps(handoff, ensure_ascii=False).encode())
             stream.seek(0)
-            subprocess.Popen([sys.executable, "-B", str(REPO_DIR / "bin/orch-jev-local"), "worker"],
-                             stdin=stream, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             close_fds=True, start_new_session=True, cwd="/", env=env)
+            worker = subprocess.Popen([sys.executable, "-B", str(REPO_DIR / "bin/orch-jev-local"), "worker"],
+                                      stdin=stream, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      close_fds=True, start_new_session=True, env=env)
+            del worker
     except Exception:
         pass
 
