@@ -158,5 +158,7 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
   checkout.
 - **Lesson:** before designing on "we already have access to model X", verify separately (1) that
   the API exposes the field you need, (2) that the credential class you hold is documented for
-  standalone use, and (3) what extra context/egress the scriptable path adds; a local
-  llama.cpp server is the only path here that satisfies all three for token log-probabilities.
+  standalone use, and (3) what extra context/egress the scriptable path adds — for `claude -p`
+  that means `--safe-mode --setting-sources "" --tools "" --system-prompt …` from an empty
+  directory, or the caller's hooks and `CLAUDE.md` ride along; a local llama.cpp server is the
+  only path here that satisfies all three for token log-probabilities.
