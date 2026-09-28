@@ -71,6 +71,18 @@ git status --short
   - Claude lead: Sonnet / Opus / Fable profile 선택
   - Codex: healthy 기본 Astra(폴백 Sol / Terra)와 effort를 호출마다 선택
   - 실행 중 agent는 강제로 바꾸지 않고 **다음 dispatch부터** 새 정책 적용
+- **시스템 프롬프트에 반영한 모델별 지침**: Opus 5.5 / Fable 5.1 / GPT-6 Astra-Sol의
+  프롬프팅 지침(예: 이미 승인된 다음 단계는 재승인 질문 없이 실행)은
+  [templates/lead.md.tpl](templates/lead.md.tpl)의 "Finishing the task",
+  [agents/codex-lead.md](agents/codex-lead.md), [agents/codex-worker.md](agents/codex-worker.md)의
+  lead/Codex 시스템 프롬프트에 직접 담고, Codex lane별 실행 지시는 [bin/codex-run](bin/codex-run)에 둔다.
+  별도 팁 문서 대신 실제 실행 지시에 반영해 호출마다 자동으로 적용한다.
+- **실험·평가 단계의 Jev 자문**: [orch-jev](OPERATIONS.ko.md#jev-자문-사이드카-선택-사항-hybrid-모드-전용)의
+  `lint-brief`/`risk`/`scan`은 사용자·agent가 명시적으로 호출하는 선택적 자문으로, 작업 파일을 수정하거나
+  gate·라우팅을 결정하지 않으며 판단은 사람과 agent가 내린다.
+  별도 Codex 라우팅 shadow는 `jev-policy.conf`의 "Off by default" 주석과 달리 현재
+  `JEV_SHADOW_ENABLED=1`로 켜져 있지만, 제안 모델·effort를 `codex-shadow.jsonl`에 기록할 뿐
+  Jev 사용 가능 여부와 관계없이 실제 dispatch·인자·exit code·`codex.log`에는 영향을 주지 않는다.
 - **provider 간 자동 부하 분산**
   - 기본은 `codex-first`
   - Codex가 실제 reserve boundary에 들어갈 때만 `codex-sparing`
