@@ -333,8 +333,8 @@ Codex model and effort are resolved automatically on each new `codex-run` invoca
 | `intake` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
 | `investigate` | Astra high (fallback Sol high) | `gpt-6-sol` high | `gpt-6-sol` medium | **withheld** |
 | `implement` | Astra xhigh (fallback Sol xhigh) | `gpt-6-sol` high | `gpt-6-sol` high | **withheld** |
-| `review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` high | `gpt-6-sol` medium |
-| `plan-review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` high | `gpt-6-sol` medium |
+| `review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
+| `plan-review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
 | `verify` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
 
 The complete table is in `budget-policy.conf`. Auto-routed healthy calls emit

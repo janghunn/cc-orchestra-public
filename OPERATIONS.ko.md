@@ -346,8 +346,8 @@ Legacy guard가 `active=opus[1m]`여도 runtime-managed normal Tier 1은
 | `intake` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
 | `investigate` | Astra high (폴백 Sol high) | `gpt-6-sol` high | `gpt-6-sol` medium | **withheld** |
 | `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6-sol` high | `gpt-6-sol` high | **withheld** |
-| `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` high | `gpt-6-sol` medium |
-| `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` high | `gpt-6-sol` medium |
+| `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
+| `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
 | `verify` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
 
 전체 라우팅 표는 `budget-policy.conf`에 있습니다.

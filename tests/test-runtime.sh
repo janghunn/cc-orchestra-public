@@ -24,6 +24,32 @@ do
 done
 ok "runtime shell syntax"
 
+# Resolve inherited PLAN_REVIEW values and check both policy rows in pressure order.
+(
+  source "$ROOT/budget-policy.conf"
+  for review_mode in REVIEW PLAN_REVIEW; do
+    previous_rank=6
+    for pressure in HEALTHY WATCH TIGHT CRITICAL; do
+      effort_var="CODEX_AUTO_${review_mode}_${pressure}_EFFORT"
+      effort="${!effort_var}"
+      case "$effort" in
+        low) rank=0 ;;
+        medium) rank=1 ;;
+        high) rank=2 ;;
+        xhigh) rank=3 ;;
+        max) rank=4 ;;
+        ultra) rank=5 ;;
+        *) fail "unknown effort '$effort' ($effort_var)" ;;
+      esac
+      [ "$rank" -le "$previous_rank" ] || fail "$review_mode effort rises at $pressure ($effort)"
+      previous_rank="$rank"
+    done
+  done
+  assert_eq "$CODEX_AUTO_REVIEW_TIGHT_EFFORT" medium "tight review policy effort"
+  assert_eq "$CODEX_AUTO_PLAN_REVIEW_TIGHT_EFFORT" medium "tight plan-review policy effort"
+)
+ok "review and plan-review effort never rises with Codex pressure"
+
 HARNESS="$TMP/harness"
 mkdir -p "$HARNESS/bin" "$HARNESS/hooks" "$HARNESS/lib" "$TMP/state" "$TMP/home/.claude"
 cp "$ROOT/bin/cc-orch-runtime" "$ROOT/bin/cc-orch-session" "$ROOT/bin/orch-cli-update" "$ROOT/bin/codex-run-runtime" \
@@ -185,6 +211,7 @@ assert_not_has "$route" "gpt-6-astra" "tight implementation route unchanged"
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex review)"
 assert_has "$route" "model=gpt-6-sol" "tight gate model"
+assert_eq "$(route_field "$route" effort)" medium "tight gate effort"
 ok "Codex weekly reset-aware provider and model routing"
 
 cat > "$HARNESS/bin/codex-run" <<'CORE'
@@ -203,7 +230,7 @@ TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" CODEX_HOME="$CODEX_HOME_DIR" \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --dry-run
 args_out="$(cat "$TMP/codex-args")"
-assert_has "$args_out" "--model gpt-6-sol --effort high" "auto-routed Codex review args"
+assert_has "$args_out" "--model gpt-6-sol --effort medium" "auto-routed Codex review args"
 assert_has "$args_out" "--fast-mode" "Fast mode default on auto review"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_CODEX_ROUTE= \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --model sol --dry-run
