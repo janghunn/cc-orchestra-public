@@ -31,7 +31,7 @@ DEFAULTS = {
     "JEV_RISK_MIN_CONFIDENCE": 0.6, "JEV_SCAN_CHUNK_BYTES": 4000,
     "JEV_SCAN_MAX_CHUNKS": 24, "JEV_SCAN_THRESHOLD": 0.7, "JEV_JOURNAL": "1",
     "JEV_SHADOW_ENABLED": "0",
-    "JEV_SHADOW_MAP_MECHANICAL": "gpt-5.6-luna@medium",
+    "JEV_SHADOW_MAP_MECHANICAL": "gpt-6-luna@medium",
     "JEV_SHADOW_MAP_ROUTINE": "gpt-6-astra@high",
     "JEV_SHADOW_MAP_INVOLVED": "gpt-6-astra@xhigh",
     "JEV_SHADOW_MAP_NOVEL": "gpt-6-astra@xhigh",

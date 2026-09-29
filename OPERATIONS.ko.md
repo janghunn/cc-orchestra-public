@@ -343,12 +343,12 @@ Legacy guard가 `active=opus[1m]`여도 runtime-managed normal Tier 1은
 
 | Mode | healthy | watch | tight | critical |
 |---|---|---|---|---|
-| `intake` | Astra high (폴백 Sol high) | Terra medium | Terra medium | Terra low |
-| `investigate` | Astra high (폴백 Sol high) | Terra high | Terra medium | **withheld** |
-| `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6-sol` high | Terra high | **withheld** |
-| `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
-| `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
-| `verify` | Astra high (폴백 Sol high) | Terra medium | Terra medium | Terra low |
+| `intake` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
+| `investigate` | Astra high (폴백 Sol high) | `gpt-6-sol` high | `gpt-6-sol` medium | **withheld** |
+| `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6-sol` high | `gpt-6-sol` high | **withheld** |
+| `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
+| `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
+| `verify` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
 
 전체 라우팅 표는 `budget-policy.conf`에 있습니다.
 자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반 기본값(`gpt-6-sol`)으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `CODEX-RUN: MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
@@ -362,10 +362,10 @@ codex-run ... --fast-mode
 codex-run ... --mech
 ```
 
-WATCH에서 `gpt-6-sol`을 쓰는 것은 implement, review, plan-review입니다.
+WATCH/TIGHT/CRITICAL 라우팅은 `gpt-6-sol`을 사용합니다.
 일반 기본값, healthy에서 Astra를 쓸 수 없을 때의 폴백, `--model sol`도 `gpt-6-sol`을 뜻합니다.
 `--model luna`, `--mech`, `--fast`는 `gpt-6-luna`를 뜻합니다. `--model terra`는 여전히
-`gpt-5.6-terra`이며, GPT-6 Terra가 없으므로 위 WATCH/TIGHT/CRITICAL 표의 Terra도 이를 사용합니다.
+`gpt-5.6-terra`를 명시적으로 선택하며, GPT-6 Terra는 없습니다.
 전체 slug(예: `--model gpt-5.6-sol`)는 그대로 전달하며, resume은 thread에 기록된 모델을 유지합니다.
 Healthy의 Astra(`gpt-6-astra`) 가용성은 계정/CLI별 live catalog와
 `~/.codex/models_cache.json`으로 확인합니다. Critical에서는 cross-family review와 실행
@@ -506,7 +506,7 @@ Jev를 사용할 수 없어도 dispatch, 인자, stdout/stderr, exit code, `code
 
 ```bash
 JEV_SHADOW_ENABLED=1
-JEV_SHADOW_MAP_MECHANICAL="gpt-5.6-luna@medium"
+JEV_SHADOW_MAP_MECHANICAL="gpt-6-luna@medium"
 JEV_SHADOW_MAP_ROUTINE="gpt-6-astra@high"
 JEV_SHADOW_MAP_INVOLVED="gpt-6-astra@xhigh"
 JEV_SHADOW_MAP_NOVEL="gpt-6-astra@xhigh"

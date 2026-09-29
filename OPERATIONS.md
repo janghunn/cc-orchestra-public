@@ -330,12 +330,12 @@ Codex model and effort are resolved automatically on each new `codex-run` invoca
 
 | Mode | healthy | watch | tight | critical |
 |---|---|---|---|---|
-| `intake` | Astra high (fallback Sol high) | Terra medium | Terra medium | Terra low |
-| `investigate` | Astra high (fallback Sol high) | Terra high | Terra medium | **withheld** |
-| `implement` | Astra xhigh (fallback Sol xhigh) | `gpt-6-sol` high | Terra high | **withheld** |
-| `review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
-| `plan-review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
-| `verify` | Astra high (fallback Sol high) | Terra medium | Terra medium | Terra low |
+| `intake` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
+| `investigate` | Astra high (fallback Sol high) | `gpt-6-sol` high | `gpt-6-sol` medium | **withheld** |
+| `implement` | Astra xhigh (fallback Sol xhigh) | `gpt-6-sol` high | `gpt-6-sol` high | **withheld** |
+| `review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
+| `plan-review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
+| `verify` | Astra high (fallback Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
 
 The complete table is in `budget-policy.conf`. Auto-routed healthy calls emit
 `CODEX-RUN: MODEL_FALLBACK` and use the lane's plain default (`gpt-6-sol`) when Astra is unavailable;
@@ -350,10 +350,10 @@ codex-run ... --fast-mode
 codex-run ... --mech
 ```
 
-WATCH uses `gpt-6-sol` for implement, review, and plan-review; the plain defaults, the healthy
+WATCH/TIGHT/CRITICAL routes use `gpt-6-sol`; the plain defaults, the healthy
 Astra-unavailable fallback, and `--model sol` also mean `gpt-6-sol`. `--model luna`, `--mech`, and
-`--fast` mean `gpt-6-luna`. `--model terra` still means `gpt-5.6-terra`, which the WATCH/TIGHT/CRITICAL
-Terra cells above still use because there is no GPT-6 Terra. Full slugs (e.g. `--model gpt-5.6-sol`)
+`--fast` mean `gpt-6-luna`. `--model terra` still means `gpt-5.6-terra` for explicit requests;
+there is no GPT-6 Terra. Full slugs (e.g. `--model gpt-5.6-sol`)
 pass through, and resume keeps a thread's recorded model. Healthy Astra (`gpt-6-astra`) availability
 is checked using the account/CLI live catalog and `~/.codex/models_cache.json`.
 At critical pressure, automatic investigate/implement are withheld to reserve quota for
@@ -476,7 +476,7 @@ These are policy-file settings, not environment switches. The default mapping an
 
 ```bash
 JEV_SHADOW_ENABLED=1
-JEV_SHADOW_MAP_MECHANICAL="gpt-5.6-luna@medium"
+JEV_SHADOW_MAP_MECHANICAL="gpt-6-luna@medium"
 JEV_SHADOW_MAP_ROUTINE="gpt-6-astra@high"
 JEV_SHADOW_MAP_INVOLVED="gpt-6-astra@xhigh"
 JEV_SHADOW_MAP_NOVEL="gpt-6-astra@xhigh"
