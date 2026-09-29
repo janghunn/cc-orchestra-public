@@ -356,6 +356,8 @@ Astra-unavailable fallback, and `--model sol` also mean `gpt-6-sol`. `--model lu
 there is no GPT-6 Terra. Full slugs (e.g. `--model gpt-5.6-sol`)
 pass through, and resume keeps a thread's recorded model. Healthy Astra (`gpt-6-astra`) availability
 is checked using the account/CLI live catalog and `~/.codex/models_cache.json`.
+A cache whose `client_version` is older than the `codex` on PATH never reports Astra absent;
+it is treated as unknown (proceed; a real rejection is still classified at run time).
 At critical pressure, automatic investigate/implement are withheld to reserve quota for
 cross-family review and executable verification; Claude/Explore investigation and Claude dev
 implementation remain fallback options. Intake, review, plan-review, and verify stay available.

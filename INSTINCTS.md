@@ -171,3 +171,5 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
 - **Lesson:** establish model availability with `codex debug models` from the harness CLI plus
   a live run, record `client_version`, and do not gate a slug on the cache unless every client
   on the host can see it.
+- **Mitigation (task 34):** the wrapper probe now reads "absent" from a cache written by an older
+  client than the harness CLI as unknown; Codex-only (`lib/orch_codex.py`) does not yet.
