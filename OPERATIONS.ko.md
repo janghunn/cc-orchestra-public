@@ -368,7 +368,10 @@ WATCH/TIGHT/CRITICAL 라우팅은 `gpt-6-sol`을 사용합니다.
 `gpt-5.6-terra`를 명시적으로 선택하며, GPT-6 Terra는 없습니다.
 전체 slug(예: `--model gpt-5.6-sol`)는 그대로 전달하며, resume은 thread에 기록된 모델을 유지합니다.
 Healthy의 Astra(`gpt-6-astra`) 가용성은 계정/CLI별 live catalog와
-`~/.codex/models_cache.json`으로 확인합니다. Critical에서는 cross-family review와 실행
+`~/.codex/models_cache.json`으로 확인합니다.
+캐시의 `client_version`이 PATH의 `codex`보다 오래되면 Astra를 absent로 보고하지 않고
+unknown으로 취급해 진행합니다(실제 거부는 실행 시 분류합니다).
+Critical에서는 cross-family review와 실행
 검증 quota를 보존하려고 자동 investigate/implement를 보류합니다. 조사는 Claude/Explore,
 구현은 Claude dev fallback을 사용할 수 있고 intake/review/plan-review/verify는 유지합니다.
 별도 Luna lane은 `templates/lead.md.tpl`의 lane 표를 참고하십시오.

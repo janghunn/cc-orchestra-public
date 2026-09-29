@@ -13,7 +13,9 @@ implement threads per task.
 ## The six dev exceptions (and only these)
 A Claude `dev-N` is justified only by one of:
 1. **Fallback** — Codex exit 3 (quota) or 4 (auth) on this unit. (Exit 6 is model-unavailable —
-   retry `--model sol|terra` first, that's not a dev exception.)
+   first retry once with a different model the Codex catalog lists (`--model sol` if Astra was
+   rejected, otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); that's not a dev
+   exception. If none is listed or the retry also exits 6, the lane is unavailable.)
 2. **Context** — the unit needs more than Sol's 272k window; devs have 1M.
 3. **Steering** — needs turn-by-turn correction mid-build; Codex `resume` is coarser (one message
    per exchange, no partial-progress visibility).
@@ -44,4 +46,4 @@ Record an Astra→Sol fallback as
 | 3 | quota | fall back to a dev | fall back to `verifier-normal` (low/normal) or the existing Opus `verifier` (critical) | retry `--fast` once |
 | 4 | auth | note auth in summary; fall through to Claude dev fallback | note auth in summary; fall back to `verifier-normal` (low/normal) or the existing Opus `verifier` (critical) | `unavailable`, never silently waived |
 | 5 | timeout | note timeout in summary; fall through to Claude dev fallback | note timeout in summary; fall back to `verifier-normal` (low/normal) or the existing Opus `verifier` (critical) | `unavailable`, never silently waived |
-| 6 | model unavailable | retry with `--model sol\|terra` first | retry with `--model sol\|terra` first | retry with `--model sol\|terra` first |
+| 6 | model unavailable | retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected, otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); if none is listed or the retry also exits 6, use the exit 4/5 rule | retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected, otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); if none is listed or the retry also exits 6, use the exit 4/5 rule | retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected, otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); if none is listed or the retry also exits 6, use the exit 4/5 rule |

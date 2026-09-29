@@ -337,6 +337,75 @@ out="$(run_astra_dry "$TMP/no-codex-home" "healthy:gpt-6-astra@xhigh" implement 
 assert_has "$out" "gpt-6-astra" "missing catalog fails open automatically"
 assert_not_has "$out" "MODEL_FALLBACK" "missing catalog auto path has no preflight fallback"
 
+FAKEBIN_VER="$TMP/fakebin-ver"
+mkdir -p "$FAKEBIN_VER"
+cat > "$FAKEBIN_VER/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'codex-cli 0.159.0'
+fi
+exit 0
+EOF
+chmod +x "$FAKEBIN_VER/codex"
+
+CAT_NOASTRA_OLD="$TMP/cat-noastra-old"
+CAT_NOASTRA_CUR="$TMP/cat-noastra-cur"
+CAT_NOASTRA_NEW="$TMP/cat-noastra-new"
+mkdir -p "$CAT_NOASTRA_OLD" "$CAT_NOASTRA_CUR" "$CAT_NOASTRA_NEW"
+sed 's/^{"fetched_at"/{"client_version":"0.154.0","fetched_at"/' \
+  "$CAT_NOASTRA/models_cache.json" > "$CAT_NOASTRA_OLD/models_cache.json"
+sed 's/^{"fetched_at"/{"client_version":"0.159.0","fetched_at"/' \
+  "$CAT_NOASTRA/models_cache.json" > "$CAT_NOASTRA_CUR/models_cache.json"
+sed 's/^{"fetched_at"/{"client_version":"0.160.0","fetched_at"/' \
+  "$CAT_NOASTRA/models_cache.json" > "$CAT_NOASTRA_NEW/models_cache.json"
+
+run_astra_dry_ver() {
+  local catalog="$1" route="$2"
+  shift 2
+  PATH="$FAKEBIN_VER:$PATH" CC_ORCH_STATE_DIR="$STATE" CODEX_HOME="$catalog" \
+    CC_ORCH_CODEX_ROUTE="$route" "$ROOT/bin/codex-run" "$@" --model astra --dry-run 2>&1
+}
+
+out="$(run_astra_dry_ver "$CAT_NOASTRA_OLD" "" implement "$WORK" "$TASK")"
+assert_has "$out" "-m gpt-6-astra" "older cache does not preflight reject explicit Astra"
+assert_not_has "$out" "MODEL_UNAVAILABLE" "older cache explicit Astra stays unknown"
+out="$(run_astra_dry_ver "$CAT_NOASTRA_OLD" "healthy:gpt-6-astra@xhigh" implement "$WORK" "$TASK")"
+assert_has "$out" "gpt-6-astra" "older cache keeps auto-routed Astra"
+assert_not_has "$out" "MODEL_FALLBACK" "older cache does not preflight fallback"
+
+set +e
+out="$(run_astra_dry_ver "$CAT_NOASTRA_CUR" "" implement "$WORK" "$TASK")"
+rc=$?
+set -e
+assert_eq "$rc" "6" "current cache explicit unavailable Astra exit"
+assert_has "$out" "MODEL_UNAVAILABLE" "current cache explicit unavailable Astra classification"
+assert_has "$out" "--model sol" "preflight exit 6 suggests Sol after Astra"
+assert_has "$out" "gpt-5.6-sol" "preflight exit 6 suggests a full slug"
+assert_has "$out" "treat the lane as unavailable" "preflight exit 6 bounds the retry"
+
+out="$(run_astra_dry_ver "$CAT_NOASTRA_CUR" "healthy:gpt-6-astra@xhigh" implement "$WORK" "$TASK")"
+assert_has "$out" "MODEL_FALLBACK" "current cache auto-routed Astra fallback"
+assert_has "$out" "gpt-6-sol" "current cache auto-routed fallback model"
+set +e
+out="$(run_astra_dry_ver "$CAT_NOASTRA_NEW" "" implement "$WORK" "$TASK")"
+rc=$?
+set -e
+assert_eq "$rc" "6" "newer cache explicit unavailable Astra exit"
+assert_has "$out" "MODEL_UNAVAILABLE" "newer cache explicit unavailable Astra classification"
+set +e
+out="$(run_astra_dry "$CAT_NOASTRA_OLD" "" implement "$WORK" "$TASK")"
+rc=$?
+set -e
+assert_eq "$rc" "6" "silent CLI leaves older cache staleness unproven"
+
+out="$(PATH="$FAKEBIN_VER:$PATH" CODEX_HOME="$CAT_NOASTRA_OLD" ROOT="$ROOT" \
+  bash -c '. "$ROOT/lib/codex-catalog.sh"; codex_catalog_probe gpt-6-astra')"
+assert_has "$out" "state=unknown" "older cache direct probe"
+out="$(PATH="$FAKEBIN_VER:$PATH" CODEX_HOME="$CAT_NOASTRA_CUR" ROOT="$ROOT" \
+  bash -c '. "$ROOT/lib/codex-catalog.sh"; codex_catalog_probe gpt-6-astra')"
+assert_has "$out" "state=absent" "current cache direct probe"
+ok "catalog cache from an older Codex client is not read as absent"
+
 out="$(CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK")"
 assert_has "$out" "gpt-6-sol" "plain core default remains Sol"
 if CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK" --model luna --fast-mode >/dev/null 2>&1; then
@@ -464,6 +533,10 @@ set -e
 assert_eq "$rc" "6" "live explicit unavailable Astra exit"
 assert_has "$out" "MODEL_UNAVAILABLE" "live explicit unavailable Astra classification"
 assert_not_has "$out" "CODEX-RUN: FAILED" "live explicit unavailable Astra is specific"
+assert_has "$out" "different model the catalog lists" "runtime exit 6 suggests a different model"
+assert_has "$out" "--model sol if Astra was rejected" "runtime exit 6 scopes Sol retry"
+assert_has "$out" "gpt-5.6-sol" "runtime exit 6 suggests a full slug"
+assert_has "$out" "treat the lane as unavailable" "runtime exit 6 bounds the retry"
 
 for style in this-model not-exist; do
   style_state="$TMP/state-live-$style-auto"

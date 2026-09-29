@@ -139,7 +139,9 @@ Dispatch rules:
   implement threads per task.
 - **A dev is justified only by one of these, and `summary.md`'s `LANES:` line must say which:**
   1. *Fallback* — codex exit 3 (quota) or 4 (auth) on this unit; exit 6 means model unavailable,
-     so retry with `--model sol|terra` as appropriate.
+     so first retry once with a different model the Codex catalog lists (`--model sol` if Astra
+     was rejected, otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); only if none
+     is listed or the retry also exits 6 does the lane count as unavailable.
   2. *Context* — the unit genuinely needs more than sol's 272k window (repo-wide refactors);
      devs have 1M.
   3. *Steering* — the unit needs turn-by-turn correction mid-build; codex steering is coarser
@@ -161,7 +163,10 @@ Dispatch rules:
   different priors — that is the point.
 - **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
   implement fall back to a dev; exit 4/5 → note auth/timeout in `summary.md`, continue through
-  the risk-appropriate Claude fallback; exit 6 → model unavailable: retry with `--model sol|terra`.
+  the risk-appropriate Claude fallback; exit 6 → model unavailable:
+  retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected,
+  otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); if none is listed or the
+  retry also exits 6, treat the lane as unavailable (exit 4/5 rules).
 
 Codex runs inside your workdir under a workspace-write sandbox (reviews: read-only) and
 **never commits** — the same one-committer rule as your devs.
@@ -458,8 +463,10 @@ exception.**
   ~/.claude/orchestra/bin/codex-run resume <workdir> <task-dir> "<fix>" --lane <n>   # named lane
   ```
 
-- Exit codes 3/4/5/6 (quota/auth/timeout/model unavailable) → exit 6: retry with
-  `--model sol|terra`; otherwise use the lane fallback rules above.
+- Exit codes 3/4/5/6 (quota/auth/timeout/model unavailable) → exit 6:
+  retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected,
+  otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); otherwise, or if the
+  retry also exits 6, use the lane fallback rules above.
 
 **Claude dev (exception lane)** — one `Agent` call per file-disjoint work unit, using a
 **distinct dev slot each time** (`dev-1`, then `dev-2`, then `dev-3`) so every dev has its own
@@ -559,9 +566,14 @@ weakens this gate set.
 **Fallbacks:**
 
 - `dispatch=codex-sparing` on low/normal → spawn `verifier-normal`, and run review `--fast`.
-- Codex verify exit 3/4/5/6 → exit 6: retry with `--model sol|terra`; otherwise use
-  `verifier-normal` for low/normal or the existing Opus verifier for critical.
-- Codex review exit 3 → retry `--fast` once. Exit 6 → retry with `--model sol|terra`.
+- Codex verify exit 3/4/5/6 → exit 6: retry once with a different model the Codex catalog lists
+  (`--model sol` if Astra was rejected, otherwise `--model terra` or a full slug such as
+  `gpt-5.6-sol`); otherwise, or if the retry also exits 6, use `verifier-normal` for low/normal
+  or the existing Opus verifier for critical.
+- Codex review exit 3 → retry `--fast` once. Exit 6 →
+  retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected,
+  otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); if none is listed or the retry
+  also exits 6, it is `unavailable`.
   Exit 4/5 is `unavailable`, never silently waived.
 - Docs-only or pure-config low-risk diffs may waive adversarial review, but executable verification
   still runs. Record the exact waiver reason.

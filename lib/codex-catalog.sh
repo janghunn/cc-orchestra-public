@@ -3,6 +3,8 @@
 # ${CODEX_HOME:-$HOME/.codex}/models_cache.json and refreshes it on every run. The catalog bundled into
 # the binary (`codex debug models --bundled`) is NOT an availability signal: it lists models the account
 # cannot use (observed: gpt-6-astra, codex-cli 0.153.2).
+# A shared cache written by an older client (such as an editor extension) cannot prove a model absent
+# from the CLI on PATH; downgrade that absent result to unknown.
 
 codex_catalog_file() { printf '%s/models_cache.json\n' "${CODEX_HOME:-$HOME/.codex}"; }
 
@@ -11,7 +13,8 @@ codex_catalog_file() { printf '%s/models_cache.json\n' "${CODEX_HOME:-$HOME/.cod
 #   efforts=<comma-joined supported_reasoning_levels[].effort, or empty>
 #   fast=1|0        (1 when additional_speed_tiers contains "fast")
 # unknown when CC_ORCH_CODEX_CATALOG_CHECK=0, the file is missing/unreadable, python3 is missing, the JSON
-# does not parse, or models[] is missing/empty. absent only when models[] parsed non-empty without <slug>.
+# does not parse, or models[] is missing/empty. absent only when models[] parsed non-empty without <slug>
+# and the cache client_version is not older than `codex --version`.
 codex_catalog_probe() {
   local catalog slug
   catalog="$(codex_catalog_file)"
@@ -24,9 +27,28 @@ codex_catalog_probe() {
 
   if ! python3 - "$catalog" "$slug" <<'PY'
 import json
+import re
+import shutil
+import subprocess
 import sys
 
 catalog, slug = sys.argv[1:]
+
+def cli_version():
+    try:
+        codex = shutil.which("codex")
+        if codex is None:
+            return None
+        result = subprocess.run(
+            [codex, "--version"], capture_output=True, text=True,
+            timeout=5, stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            return None
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
+        return tuple(map(int, match.groups())) if match else None
+    except Exception:
+        return None
 
 try:
     with open(catalog, encoding="utf-8") as handle:
@@ -40,7 +62,15 @@ try:
         None,
     )
     if model is None:
-        print("state=absent")
+        client_version = payload.get("client_version")
+        cache_match = (
+            re.search(r"(\d+)\.(\d+)\.(\d+)", client_version)
+            if isinstance(client_version, str) else None
+        )
+        cache_version = tuple(map(int, cache_match.groups())) if cache_match else None
+        current_version = cli_version() if cache_version is not None else None
+        print("state=unknown" if current_version is not None and cache_version < current_version
+              else "state=absent")
         print("efforts=")
         print("fast=0")
     else:
