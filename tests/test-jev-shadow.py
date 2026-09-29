@@ -201,7 +201,7 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
         with patch.dict(os.environ, self.env, clear=True):
             p = jev.Policy()
             self.assertEqual(p["SHADOW_ENABLED"], "0")
-            self.assertEqual(p["SHADOW_MAP_MECHANICAL"], "gpt-5.6-luna@medium")
+            self.assertEqual(p["SHADOW_MAP_MECHANICAL"], "gpt-6-luna@medium")
             self.assertEqual(p["SHADOW_MAP_ROUTINE"], "gpt-6-astra@high")
             self.assertEqual(p["SHADOW_LOG"], "codex-shadow.jsonl")
             self.write_policy(JEV_SHADOW_MIN_CONFIDENCE=2, JEV_SHADOW_MAX_BYTES=0,

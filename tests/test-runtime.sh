@@ -180,11 +180,11 @@ assert_has "$lanes" "dispatch=codex-first" "Codex stays first through tight pres
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex implement)"
 assert_has "$route" "allow=1" "tight Codex implementation remains available"
-assert_has "$route" "model=gpt-5.6-terra" "tight implementation model"
+assert_has "$route" "model=gpt-6-sol" "tight implementation model"
 assert_not_has "$route" "gpt-6-astra" "tight implementation route unchanged"
 route="$(HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_NOW_EPOCH="$NOW" \
   CODEX_HOME="$CODEX_HOME_DIR" "$HARNESS/bin/orch-model-guard-runtime" route codex review)"
-assert_has "$route" "model=gpt-5.6-terra" "tight gate model"
+assert_has "$route" "model=gpt-6-sol" "tight gate model"
 ok "Codex weekly reset-aware provider and model routing"
 
 cat > "$HARNESS/bin/codex-run" <<'CORE'
@@ -196,14 +196,14 @@ TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" CODEX_HOME="$CODEX_HOME_DIR" \
   "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --dry-run
 args_out="$(cat "$TMP/codex-args")"
-assert_has "$args_out" "--model gpt-5.6-terra --effort high" "auto-routed tight implementation"
+assert_has "$args_out" "--model gpt-6-sol --effort high" "auto-routed tight implementation"
 assert_has "$args_out" "--fast-mode" "Fast mode default on auto implementation"
 assert_not_has "$args_out" "gpt-6-astra" "tight facade route unchanged"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   CC_ORCH_NOW_EPOCH="$NOW" CODEX_HOME="$CODEX_HOME_DIR" \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --dry-run
 args_out="$(cat "$TMP/codex-args")"
-assert_has "$args_out" "--model gpt-5.6-terra --effort high" "auto-routed Codex review args"
+assert_has "$args_out" "--model gpt-6-sol --effort high" "auto-routed Codex review args"
 assert_has "$args_out" "--fast-mode" "Fast mode default on auto review"
 TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" CC_ORCH_CODEX_ROUTE= \
   "$HARNESS/bin/codex-run-runtime" review "$TMP" "$TMP" --model sol --dry-run
