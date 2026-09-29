@@ -330,15 +330,15 @@ Codex model and effort are resolved automatically on each new `codex-run` invoca
 
 | Mode | healthy | watch | tight | critical |
 |---|---|---|---|---|
-| `intake` | Astra high (fallback Terra high) | Terra medium | Terra medium | Terra low |
+| `intake` | Astra high (fallback Sol high) | Terra medium | Terra medium | Terra low |
 | `investigate` | Astra high (fallback Sol high) | Terra high | Terra medium | **withheld** |
 | `implement` | Astra xhigh (fallback Sol xhigh) | `gpt-6-sol` high | Terra high | **withheld** |
 | `review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
 | `plan-review` | Astra high (fallback Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
-| `verify` | Astra high (fallback Terra high) | Terra medium | Terra medium | Terra low |
+| `verify` | Astra high (fallback Sol high) | Terra medium | Terra medium | Terra low |
 
 The complete table is in `budget-policy.conf`. Auto-routed healthy calls emit
-`CODEX-RUN: MODEL_FALLBACK` and use the lane's plain Sol/Terra default when Astra is unavailable;
+`CODEX-RUN: MODEL_FALLBACK` and use the lane's plain default (`gpt-6-sol`) when Astra is unavailable;
 explicit Astra requests instead exit 6 with `CODEX-RUN: MODEL_UNAVAILABLE`. Set
 `CC_ORCH_CODEX_CATALOG_CHECK=0` to disable the live/cached catalog pre-flight. Explicit flags always win:
 
@@ -350,8 +350,11 @@ codex-run ... --fast-mode
 codex-run ... --mech
 ```
 
-WATCH uses `gpt-6-sol` only for implement, review, and plan-review; `--model sol` and the healthy
-Astra-unavailable Sol defaults still mean `gpt-5.6-sol`. Healthy Astra (`gpt-6-astra`) availability
+WATCH uses `gpt-6-sol` for implement, review, and plan-review; the plain defaults, the healthy
+Astra-unavailable fallback, and `--model sol` also mean `gpt-6-sol`. `--model luna`, `--mech`, and
+`--fast` mean `gpt-6-luna`. `--model terra` still means `gpt-5.6-terra`, which the WATCH/TIGHT/CRITICAL
+Terra cells above still use because there is no GPT-6 Terra. Full slugs (e.g. `--model gpt-5.6-sol`)
+pass through, and resume keeps a thread's recorded model. Healthy Astra (`gpt-6-astra`) availability
 is checked using the account/CLI live catalog and `~/.codex/models_cache.json`.
 At critical pressure, automatic investigate/implement are withheld to reserve quota for
 cross-family review and executable verification; Claude/Explore investigation and Claude dev
@@ -362,8 +365,9 @@ The separate Luna lanes are documented in `templates/lead.md.tpl`.
 
 `CODEX_ALWAYS_FAST_MODE=1` enables Fast mode for supported automatically selected Astra/Sol/Terra
 calls. `--fast-mode` keeps the selected model and effort and requests the official Fast service
-tier for that invocation. Both `gpt-5.6-sol` and WATCH's `gpt-6-sol`, plus `gpt-6-astra` and
-`gpt-5.6-terra`, pass the wrappers' Fast-mode and explicit `--effort ultra` allowlists.
+tier for that invocation. `gpt-6-sol` (plain default / `sol`), `gpt-5.6-sol`, `gpt-6-astra`, and
+`gpt-5.6-terra` pass the wrappers' Fast-mode and explicit `--effort ultra` allowlists.
+Luna (`gpt-6-luna`, `gpt-5.6-luna`) is rejected by both: it tops out at `max`, and Fast mode is not a Luna knob.
 `ultra` is never selected implicitly; it requires an explicit user request and `--effort ultra`.
 `--mech` and legacy `--fast` are explicit Luna lanes, distinct from Fast mode.
 `resume` preserves the existing thread's context/model rather than forcing a new automatic route.

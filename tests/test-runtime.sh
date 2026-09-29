@@ -55,11 +55,11 @@ LEAD_LIGHT_MODEL="sonnet[1m]"; LEAD_LIGHT_EFFORT="medium"
 LEAD_NORMAL_MODEL="opus[1m]"; LEAD_NORMAL_EFFORT="high"
 LEAD_CRITICAL_MODEL="fable[1m]"; LEAD_CRITICAL_EFFORT="high"
 LEAD_DEEP_MODEL="fable[1m]"; LEAD_DEEP_EFFORT="xhigh"
-CODEX_IMPL_MODEL="gpt-5.6-sol"; CODEX_IMPL_EFFORT="xhigh"
-CODEX_INVESTIGATE_MODEL="gpt-5.6-sol"; CODEX_INVESTIGATE_EFFORT="high"
-CODEX_INTAKE_MODEL="gpt-5.6-terra"; CODEX_INTAKE_EFFORT="high"
-CODEX_REVIEW_MODEL="gpt-5.6-sol"; CODEX_REVIEW_EFFORT="high"
-CODEX_VERIFY_MODEL="gpt-5.6-terra"; CODEX_VERIFY_EFFORT="high"
+CODEX_IMPL_MODEL="gpt-6-sol"; CODEX_IMPL_EFFORT="xhigh"
+CODEX_INVESTIGATE_MODEL="gpt-6-sol"; CODEX_INVESTIGATE_EFFORT="high"
+CODEX_INTAKE_MODEL="gpt-6-sol"; CODEX_INTAKE_EFFORT="high"
+CODEX_REVIEW_MODEL="gpt-6-sol"; CODEX_REVIEW_EFFORT="high"
+CODEX_VERIFY_MODEL="gpt-6-sol"; CODEX_VERIFY_EFFORT="high"
 POLICY
 
 ROUTE_AGENTS="$TMP/route-agents"
@@ -215,6 +215,34 @@ TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
 args_out="$(cat "$TMP/codex-args")"
 assert_has "$args_out" "--mech" "explicit Luna-compatible mechanical path preserved"
 if printf '%s' "$args_out" | grep -q -- '--fast-mode'; then fail "--mech must not receive incompatible Fast mode"; fi
+for model in gpt-6-luna luna gpt-6-sol; do
+  TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+    CC_ORCH_ALWAYS_FAST_MODE=1 CC_ORCH_CODEX_ROUTE= \
+    "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --model "$model" --dry-run
+  args_out="$(cat "$TMP/codex-args")"
+  assert_has "$args_out" "--model $model" "facade preserves explicit $model"
+  if [ "$model" = gpt-6-sol ]; then
+    assert_has "$args_out" "--fast-mode" "Fast mode for explicit gpt-6-sol"
+  else
+    assert_not_has "$args_out" "--fast-mode" "no Fast mode for explicit $model"
+  fi
+done
+RESUME_TASK="$TMP/resume-task"
+mkdir -p "$RESUME_TASK"
+for model in gpt-6-sol gpt-5.6-sol gpt-6-luna; do
+  effort=xhigh
+  if [ "$model" = gpt-6-luna ]; then effort=medium; fi
+  printf 'implement=00000000-0000-4000-8000-0000000000aa|%s|%s\n' "$model" "$effort" > "$RESUME_TASK/.codex-session"
+  TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
+    CC_ORCH_ALWAYS_FAST_MODE=1 CC_ORCH_CODEX_ROUTE= \
+    "$HARNESS/bin/codex-run-runtime" resume "$TMP" "$RESUME_TASK" "follow up" --dry-run
+  args_out="$(cat "$TMP/codex-args")"
+  if [ "$model" = gpt-6-luna ]; then
+    assert_not_has "$args_out" "--fast-mode" "no Fast mode when resuming $model"
+  else
+    assert_has "$args_out" "--fast-mode" "Fast mode when resuming $model"
+  fi
+done
 ok "codex-run facade keeps Fast mode on compatible calls"
 
 # At the actual critical boundary provider-level sparing and non-gate withholding still protect

@@ -34,9 +34,9 @@ without one of these six tags is worth the orchestrator questioning.
 
 Record the model and effort in the relevant summary field (`LANES`, `INVESTIGATION`, or `GATES`).
 Add the `+fast-mode` suffix only when `--fast-mode` was used, as `model@effort+fast-mode`.
-Record a plain `--fast` call as `gpt-5.6-luna@high`, with no `+fast-mode` suffix.
+Record a plain `--fast` call as `gpt-6-luna@high`, with no `+fast-mode` suffix.
 Record an Astra→Sol fallback as
-`gpt-5.6-sol@xhigh (fallback-from:gpt-6-astra)`.
+`gpt-6-sol@xhigh (fallback-from:gpt-6-astra)`.
 
 ## Exit code cheat sheet
 | exit | meaning | implement | verify | review |

@@ -2,8 +2,8 @@
 # codex-run — cc-orchestra's single entry point to the Codex CLI.
 #
 # Codex owns the token-heavy paths; intake is dispatched by Tier 1 and the rest by Tier 2:
-#   Tier 3 lane   implement / resume  — healthy gpt-6-astra (Sol/Terra fallback when the account
-#                 lacks it; or luna for mechanical bulk) writes code;
+#   Tier 3 lane   implement / resume  — healthy gpt-6-astra (gpt-6-sol fallback when the account
+#                 lacks it; or gpt-6-luna for mechanical bulk) writes code;
 #                 implement is the DEFAULT lane for every unit (dev-* is the exception), and
 #                 --lane <name> allows a second concurrent unit per task
 #   Phase A aid   investigate — read-only root-cause / codebase analysis, so long evidence
@@ -12,9 +12,9 @@
 #   Tier 4 gate   verify / review / plan-review — executable verification and adversarial review
 #
 # Why a wrapper instead of raw `codex exec` in agent prompts:
-#   - gpt-5.6-sol's DEFAULT reasoning effort is "low" (measured from models_cache.json), so a
-#     forgotten -c model_reasoning_effort silently produces a shallow run. This wrapper always
-#     passes an explicit effort from model-policy.conf.
+#   - A model's catalog DEFAULT reasoning effort is often lower than the lane intends
+#     (gpt-5.6-sol: "low"; GPT-6 models: "medium", measured from models_cache.json), so a forgotten
+#     -c model_reasoning_effort produces a shallow run. This wrapper passes an explicit policy effort.
 #   - Sandbox mode, timeouts, artifact paths and thread-id capture stay uniform across leads,
 #     which is what keeps the .orchestra artifacts comparable between tasks.
 #   - CC_ORCH_CODEX_ROUTE (set by codex-run-runtime only on auto-routed calls) enables the Astra
@@ -94,7 +94,7 @@ usage:
   --critical  raise a review or verify run to the critical effort policy
   --fast      switch to the lower-cost Luna model/effort policy (legacy compatibility)
   --fast-mode keep the resolved Astra/Sol/Terra model and opt this invocation into official Fast mode
-  models: sol=gpt-5.6-sol  luna=gpt-5.6-luna  terra=gpt-5.6-terra  astra=gpt-6-astra (or any full slug)
+  models: sol=gpt-6-sol  luna=gpt-6-luna  terra=gpt-5.6-terra  astra=gpt-6-astra (or any full slug)
   exit: 0 ok · 1 codex failed · 2 usage/setup · 3 quota · 4 auth · 5 timeout · 6 model unavailable
 EOF
   exit 2
@@ -104,8 +104,8 @@ die() { echo "codex-run: $*" >&2; exit 2; }
 # --- model shortcuts ---------------------------------------------------------------------
 slug() { # sol|luna|terra|astra|<full slug> -> full slug
   case "$1" in
-    sol)   echo "gpt-5.6-sol" ;;
-    luna)  echo "gpt-5.6-luna" ;;
+    sol)   echo "gpt-6-sol" ;;
+    luna)  echo "gpt-6-luna" ;;
     terra) echo "gpt-5.6-terra" ;;
     astra) echo "gpt-6-astra" ;;
     *)     echo "$1" ;;
@@ -226,7 +226,9 @@ esac
 
 [ "$CRITICAL" = "1" ] && EFFORT="$CODEX_CRITICAL_EFFORT"
 
-# gpt-6-sol is Sol-tier, like gpt-5.6-sol, for Fast mode and ultra effort.
+# gpt-6-sol (sol alias, plain default) and gpt-5.6-sol are Sol-tier for Fast mode and ultra.
+# Luna of both generations is excluded: the 2026-09-29 catalog caps it at max, and Fast mode
+# is an Astra/Sol/Terra knob.
 if [ "$FAST_MODE" = "1" ]; then
   case "$MODEL" in
     gpt-5.6-sol|gpt-6-sol|gpt-5.6-terra|gpt-6-astra) ;;

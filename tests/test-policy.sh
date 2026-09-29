@@ -131,38 +131,46 @@ run_dry() {
 }
 
 out="$(run_dry intake "$WORK" "$TASK" "map the task")"
-assert_has "$out" "gpt-5.6-terra" "intake model"
+assert_has "$out" "gpt-6-sol" "intake model"
+assert_not_has "$out" "gpt-5.6" "intake model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=high" "intake effort"
 assert_has "$out" "--sandbox read-only" "intake sandbox"
 
 out="$(run_dry investigate "$WORK" "$TASK" "find the owner")"
-assert_has "$out" "gpt-5.6-sol" "investigate model"
+assert_has "$out" "gpt-6-sol" "investigate model"
+assert_not_has "$out" "gpt-5.6" "investigate model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=high" "investigate effort"
 
 out="$(run_dry investigate "$WORK" "$TASK" "find the owner" --fast-mode)"
-assert_has "$out" "gpt-5.6-sol" "Fast mode preserves investigate model"
+assert_has "$out" "gpt-6-sol" "Fast mode preserves investigate model"
+assert_not_has "$out" "gpt-5.6" "Fast mode preserves investigate model is not GPT-5.6"
 assert_has "$out" "service_tier=" "Fast mode service tier"
 assert_has "$out" "features.fast_mode=true" "Fast mode feature"
 
 out="$(run_dry investigate "$WORK" "$TASK" "find the owner" --fast)"
-assert_has "$out" "gpt-5.6-luna" "legacy fast switches model"
+assert_has "$out" "gpt-6-luna" "legacy fast switches model"
+assert_not_has "$out" "gpt-5.6" "legacy fast switches model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=high" "legacy fast effort"
 
 out="$(run_dry implement "$WORK" "$TASK")"
-assert_has "$out" "gpt-5.6-sol" "implement model"
+assert_has "$out" "gpt-6-sol" "implement model"
+assert_not_has "$out" "gpt-5.6" "implement model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=xhigh" "implement effort"
 assert_has "$out" "--sandbox workspace-write" "implement sandbox"
 
 out="$(run_dry verify "$WORK" "$TASK")"
-assert_has "$out" "gpt-5.6-terra" "verify model"
+assert_has "$out" "gpt-6-sol" "verify model"
+assert_not_has "$out" "gpt-5.6" "verify model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=high" "verify effort"
 
 out="$(run_dry review "$WORK" "$TASK" --base main --critical)"
-assert_has "$out" "gpt-5.6-sol" "critical review model"
+assert_has "$out" "gpt-6-sol" "critical review model"
+assert_not_has "$out" "gpt-5.6" "critical review model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=xhigh" "critical review effort"
 
 out="$(run_dry verify "$WORK" "$TASK" --critical --fast-mode)"
-assert_has "$out" "gpt-5.6-terra" "critical Fast mode preserves verify model"
+assert_has "$out" "gpt-6-sol" "critical Fast mode preserves verify model"
+assert_not_has "$out" "gpt-5.6" "critical Fast mode preserves verify model is not GPT-5.6"
 assert_has "$out" "model_reasoning_effort=xhigh" "critical Fast mode effort"
 assert_has "$out" "service_tier=" "critical Fast mode service tier"
 
@@ -183,6 +191,64 @@ assert_has "$out" "features.fast_mode=true" "Fast mode feature for gpt-6-sol"
 out="$(run_dry implement "$WORK" "$TASK" --model gpt-6-sol --effort ultra)"
 assert_has "$out" "gpt-6-sol" "ultra effort accepts gpt-6-sol"
 assert_has "$out" "model_reasoning_effort=ultra" "ultra effort for gpt-6-sol"
+
+out="$(run_dry implement "$WORK" "$TASK" --mech)"
+assert_has "$out" "-m gpt-6-luna" "mechanical model"
+assert_not_has "$out" "gpt-5.6" "mechanical model is not GPT-5.6"
+assert_has "$out" "model_reasoning_effort=medium" "mechanical effort"
+assert_not_has "$out" "service_tier=" "mechanical lane has no Fast service tier"
+
+out="$(run_dry implement "$WORK" "$TASK" --model sol)"
+assert_has "$out" "-m gpt-6-sol" "Sol alias"
+assert_not_has "$out" "gpt-5.6" "Sol alias is not GPT-5.6"
+out="$(run_dry implement "$WORK" "$TASK" --model luna)"
+assert_has "$out" "-m gpt-6-luna" "Luna alias"
+assert_not_has "$out" "gpt-5.6" "Luna alias is not GPT-5.6"
+out="$(run_dry implement "$WORK" "$TASK" --model terra)"
+assert_has "$out" "-m gpt-5.6-terra" "Terra alias preserves GPT-5.6"
+assert_not_has "$out" "-m gpt-6-" "Terra alias is not GPT-6"
+out="$(run_dry implement "$WORK" "$TASK" --model gpt-5.6-sol)"
+assert_has "$out" "-m gpt-5.6-sol" "old Sol full slug passes through"
+assert_not_has "$out" "-m gpt-6-sol" "old Sol full slug is not upgraded"
+
+if run_dry implement "$WORK" "$TASK" --model gpt-6-luna --fast-mode >/dev/null 2>&1; then
+  fail "--fast-mode with gpt-6-luna should be rejected"
+fi
+if run_dry implement "$WORK" "$TASK" --model gpt-6-luna --effort ultra >/dev/null 2>&1; then
+  fail "ultra with gpt-6-luna should be rejected"
+fi
+out="$(run_dry implement "$WORK" "$TASK" --model gpt-6-luna --effort max)"
+assert_has "$out" "-m gpt-6-luna" "max effort accepts gpt-6-luna"
+assert_has "$out" "model_reasoning_effort=max" "max effort for gpt-6-luna"
+out="$(run_dry implement "$WORK" "$TASK" --model gpt-5.6-sol --fast-mode)"
+assert_has "$out" "-m gpt-5.6-sol" "Fast mode still accepts old Sol"
+assert_has "$out" "service_tier=" "Fast service tier for old Sol"
+assert_has "$out" "features.fast_mode=true" "Fast feature for old Sol"
+for model in gpt-5.6-sol gpt-5.6-terra sol; do
+  out="$(run_dry implement "$WORK" "$TASK" --model "$model" --effort ultra)"
+  expected_model="$model"
+  if [ "$model" = sol ]; then expected_model="gpt-6-sol"; fi
+  assert_has "$out" "-m $expected_model" "ultra model for $model"
+  assert_has "$out" "model_reasoning_effort=ultra" "ultra effort for $model"
+done
+
+RESUME_TASK="$WORK/.orchestra/02-resume"
+mkdir -p "$RESUME_TASK"
+cp "$TASK/brief.md" "$TASK/plan.md" "$RESUME_TASK/"
+printf '%s\n' 'implement=00000000-0000-4000-8000-0000000000aa|gpt-5.6-sol|xhigh' > "$RESUME_TASK/.codex-session"
+out="$(run_dry resume "$WORK" "$RESUME_TASK" "follow up")"
+assert_has "$out" "-m gpt-5.6-sol" "resume preserves old Sol model"
+assert_not_has "$out" "gpt-6-sol" "resume does not upgrade recorded Sol"
+out="$(run_dry resume "$WORK" "$RESUME_TASK" "follow up" --model sol)"
+assert_has "$out" "-m gpt-6-sol" "resume permits explicit Sol alias upgrade"
+assert_not_has "$out" "-m gpt-5.6-sol" "resume override replaces recorded model"
+printf '%s\n' 'implement=00000000-0000-4000-8000-0000000000aa' > "$RESUME_TASK/.codex-session"
+out="$(run_dry resume "$WORK" "$RESUME_TASK" "follow up")"
+assert_has "$out" "-m gpt-6-sol" "resume without recorded model uses plain default"
+printf '%s\n' 'implement=00000000-0000-4000-8000-0000000000aa|gpt-5.6-luna|medium' > "$RESUME_TASK/.codex-session"
+out="$(run_dry resume "$WORK" "$RESUME_TASK" "follow up")"
+assert_has "$out" "-m gpt-5.6-luna" "resume preserves old Luna model"
+assert_not_has "$out" "-m gpt-6-luna" "resume does not upgrade recorded Luna"
 ok "Codex mode model, effort, sandbox, and flag policy"
 
 CAT_ASTRA="$TMP/cat-astra"
@@ -190,10 +256,10 @@ CAT_NOASTRA="$TMP/cat-noastra"
 CAT_LIMITED="$TMP/cat-limited"
 mkdir -p "$CAT_ASTRA" "$CAT_NOASTRA" "$CAT_LIMITED"
 cat > "$CAT_ASTRA/models_cache.json" <<'JSON'
-{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}],"additional_speed_tiers":["fast"]}]}
+{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}],"additional_speed_tiers":["fast"]}]}
 JSON
 cat > "$CAT_NOASTRA/models_cache.json" <<'JSON'
-{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}],"additional_speed_tiers":["fast"]}]}
+{"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"additional_speed_tiers":["fast"]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}],"additional_speed_tiers":["fast"]}]}
 JSON
 cat > "$CAT_LIMITED/models_cache.json" <<'JSON'
 {"fetched_at":"2026-09-04T08:00:00Z","models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}],"additional_speed_tiers":[]}]}
@@ -233,12 +299,12 @@ assert_not_has "$out" "MODEL_FALLBACK" "mismatched marker cannot enable Astra fa
 
 for mode in implement investigate intake review plan-review verify; do
   case "$mode" in
-    implement) args=(implement "$WORK" "$TASK"); fallback="gpt-5.6-sol"; effort="xhigh" ;;
-    investigate) args=(investigate "$WORK" "$TASK" "q"); fallback="gpt-5.6-sol"; effort="high" ;;
-    intake) args=(intake "$WORK" "$TASK" "g"); fallback="gpt-5.6-terra"; effort="high" ;;
-    review) args=(review "$WORK" "$TASK" --base main); fallback="gpt-5.6-sol"; effort="high" ;;
-    plan-review) args=(plan-review "$WORK" "$TASK"); fallback="gpt-5.6-sol"; effort="high" ;;
-    verify) args=(verify "$WORK" "$TASK"); fallback="gpt-5.6-terra"; effort="high" ;;
+    implement) args=(implement "$WORK" "$TASK"); fallback="gpt-6-sol"; effort="xhigh" ;;
+    investigate) args=(investigate "$WORK" "$TASK" "q"); fallback="gpt-6-sol"; effort="high" ;;
+    intake) args=(intake "$WORK" "$TASK" "g"); fallback="gpt-6-sol"; effort="high" ;;
+    review) args=(review "$WORK" "$TASK" --base main); fallback="gpt-6-sol"; effort="high" ;;
+    plan-review) args=(plan-review "$WORK" "$TASK"); fallback="gpt-6-sol"; effort="high" ;;
+    verify) args=(verify "$WORK" "$TASK"); fallback="gpt-6-sol"; effort="high" ;;
   esac
   out="$(run_astra_dry "$CAT_NOASTRA" "healthy:gpt-6-astra@$effort" "${args[@]}")"
   assert_has "$out" "MODEL_FALLBACK" "$mode unavailable Astra fallback warning"
@@ -260,7 +326,7 @@ set -e
 [ "$rc" -ne 0 ] || fail "limited Astra Fast should be rejected"
 assert_has "$out" "Fast" "limited Astra Fast error"
 out="$(run_astra_dry "$CAT_LIMITED" "healthy:gpt-6-astra@xhigh+fast-mode" implement "$WORK" "$TASK" --fast-mode)"
-assert_has "$out" "gpt-5.6-sol" "limited Astra auto fallback model"
+assert_has "$out" "gpt-6-sol" "limited Astra auto fallback model"
 assert_has "$out" "MODEL_FALLBACK" "limited Astra auto fallback warning"
 assert_has "$out" "service_tier=" "limited Astra fallback preserves Fast"
 
@@ -272,7 +338,7 @@ assert_has "$out" "gpt-6-astra" "missing catalog fails open automatically"
 assert_not_has "$out" "MODEL_FALLBACK" "missing catalog auto path has no preflight fallback"
 
 out="$(CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK")"
-assert_has "$out" "gpt-5.6-sol" "plain core default remains Sol"
+assert_has "$out" "gpt-6-sol" "plain core default remains Sol"
 if CODEX_HOME="$CAT_NOASTRA" CC_ORCH_CODEX_ROUTE= run_dry implement "$WORK" "$TASK" --model luna --fast-mode >/dev/null 2>&1; then
   fail "--fast-mode with Luna should remain rejected"
 fi
@@ -299,12 +365,12 @@ run_facade_dry() {
 for catalog in "$CAT_NOASTRA" "$CAT_ASTRA"; do
   for mode in implement investigate intake review plan-review verify; do
     case "$mode" in
-      implement) args=(implement "$WORK" "$TASK"); fallback="gpt-5.6-sol" ;;
-      investigate) args=(investigate "$WORK" "$TASK" "q"); fallback="gpt-5.6-sol" ;;
-      intake) args=(intake "$WORK" "$TASK" "g"); fallback="gpt-5.6-terra" ;;
-      review) args=(review "$WORK" "$TASK" --base main); fallback="gpt-5.6-sol" ;;
-      plan-review) args=(plan-review "$WORK" "$TASK"); fallback="gpt-5.6-sol" ;;
-      verify) args=(verify "$WORK" "$TASK"); fallback="gpt-5.6-terra" ;;
+      implement) args=(implement "$WORK" "$TASK"); fallback="gpt-6-sol" ;;
+      investigate) args=(investigate "$WORK" "$TASK" "q"); fallback="gpt-6-sol" ;;
+      intake) args=(intake "$WORK" "$TASK" "g"); fallback="gpt-6-sol" ;;
+      review) args=(review "$WORK" "$TASK" --base main); fallback="gpt-6-sol" ;;
+      plan-review) args=(plan-review "$WORK" "$TASK"); fallback="gpt-6-sol" ;;
+      verify) args=(verify "$WORK" "$TASK"); fallback="gpt-6-sol" ;;
     esac
     out="$(run_facade_dry "$catalog" "${args[@]}")"
     assert_has "$out" "service_tier=" "$mode facade preserves Fast"
@@ -380,7 +446,7 @@ assert_has "$out" "MODEL_FALLBACK" "live Codex rejection triggers auto fallback"
 [ -s "$TASK/impl-report-codex.md" ] || fail "live fallback did not create implementation report"
 assert_has "$(cat "$TASK/impl-report-codex.md")" "route=unset" "live fallback child does not inherit route marker"
 session="$(sed -n 's/^implement=//p' "$TASK/.codex-session")"
-case "$session" in *'|gpt-5.6-sol|xhigh') ;; *) fail "live fallback session has '$session'" ;; esac
+case "$session" in *'|gpt-6-sol|xhigh') ;; *) fail "live fallback session has '$session'" ;; esac
 assert_eq "$(wc -l < "$STATE_LIVE/codex.log" | tr -d ' ')" "2" "live fallback attempt log count"
 first_log="$(sed -n '1p' "$STATE_LIVE/codex.log")"
 second_log="$(sed -n '2p' "$STATE_LIVE/codex.log")"

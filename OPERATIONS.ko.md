@@ -343,15 +343,15 @@ Legacy guard가 `active=opus[1m]`여도 runtime-managed normal Tier 1은
 
 | Mode | healthy | watch | tight | critical |
 |---|---|---|---|---|
-| `intake` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
+| `intake` | Astra high (폴백 Sol high) | Terra medium | Terra medium | Terra low |
 | `investigate` | Astra high (폴백 Sol high) | Terra high | Terra medium | **withheld** |
 | `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6-sol` high | Terra high | **withheld** |
 | `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
 | `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | Terra high | Terra medium |
-| `verify` | Astra high (폴백 Terra high) | Terra medium | Terra medium | Terra low |
+| `verify` | Astra high (폴백 Sol high) | Terra medium | Terra medium | Terra low |
 
 전체 라우팅 표는 `budget-policy.conf`에 있습니다.
-자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반적인 Sol/Terra 기본값으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `CODEX-RUN: MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
+자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반 기본값(`gpt-6-sol`)으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `CODEX-RUN: MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
 
 명시적으로 전달한 옵션은 자동 라우팅보다 항상 우선합니다.
 
@@ -363,8 +363,11 @@ codex-run ... --mech
 ```
 
 WATCH에서 `gpt-6-sol`을 쓰는 것은 implement, review, plan-review입니다.
-`--model sol` alias와 healthy에서 Astra를 쓸 수 없을 때의 Sol 기본 폴백은 여전히
-`gpt-5.6-sol`입니다. Healthy의 Astra(`gpt-6-astra`) 가용성은 계정/CLI별 live catalog와
+일반 기본값, healthy에서 Astra를 쓸 수 없을 때의 폴백, `--model sol`도 `gpt-6-sol`을 뜻합니다.
+`--model luna`, `--mech`, `--fast`는 `gpt-6-luna`를 뜻합니다. `--model terra`는 여전히
+`gpt-5.6-terra`이며, GPT-6 Terra가 없으므로 위 WATCH/TIGHT/CRITICAL 표의 Terra도 이를 사용합니다.
+전체 slug(예: `--model gpt-5.6-sol`)는 그대로 전달하며, resume은 thread에 기록된 모델을 유지합니다.
+Healthy의 Astra(`gpt-6-astra`) 가용성은 계정/CLI별 live catalog와
 `~/.codex/models_cache.json`으로 확인합니다. Critical에서는 cross-family review와 실행
 검증 quota를 보존하려고 자동 investigate/implement를 보류합니다. 조사는 Claude/Explore,
 구현은 Claude dev fallback을 사용할 수 있고 intake/review/plan-review/verify는 유지합니다.
@@ -374,8 +377,9 @@ WATCH에서 `gpt-6-sol`을 쓰는 것은 implement, review, plan-review입니다
 
 `CODEX_ALWAYS_FAST_MODE=1`이므로 자동으로 선택된 지원 Astra/Sol/Terra 호출은 Fast mode를
 사용합니다. `--fast-mode`는 선택된 model/effort를 유지하고 해당 호출만 공식 Fast tier로
-실행합니다. `gpt-5.6-sol`, WATCH의 `gpt-6-sol`, `gpt-6-astra`, `gpt-5.6-terra`는 wrapper의
+실행합니다. `gpt-6-sol`(일반 기본값 / `sol`), `gpt-5.6-sol`, `gpt-6-astra`, `gpt-5.6-terra`는 wrapper의
 Fast-mode와 명시적 `--effort ultra` allowlist에 모두 포함됩니다.
+Luna(`gpt-6-luna`, `gpt-5.6-luna`)는 두 allowlist 모두에서 제외됩니다. 최대 effort는 `max`이며 Fast mode는 Luna용 옵션이 아닙니다.
 `ultra`는 자동 선택하지 않으며 사용자의 명시적 요청에 따라 `--effort ultra`로 지정합니다.
 `--mech`와 legacy `--fast`는 별도의 명시적 Luna 경량 경로입니다.
 `resume`은 기존 thread의 context/model 연속성을 우선하여 새 자동 route를 강제하지 않습니다.

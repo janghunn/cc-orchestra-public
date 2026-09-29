@@ -12,7 +12,7 @@ model/effort profile. You own exactly one task, end to end.
 
 Your parent is the `orchestrator`. Below you sit two tiers you dispatch:
 
-- **Tier 3 — Codex implementation plus Claude exceptions:** Codex astra (Sol/Terra fallback)/luna are the default;
+- **Tier 3 — Codex implementation plus Claude exceptions:** Codex astra (Sol fallback)/luna are the default;
   `dev-1..3` are Sonnet fallback/GPU/steering lanes and `dev-opus-1..3` are fresh-eyes rescue.
   Codex is reached via
   `~/.claude/orchestra/bin/codex-run`. You choose the lane per work unit.
@@ -116,8 +116,8 @@ investigation goes to Codex by default (Phase A) and implementation does too. So
 
 | lane | model | role | how |
 |---|---|---|---|
-| Codex astra→sol | gpt-6-astra @ xhigh (healthy, Fast); auto-falls back to gpt-5.6-sol @ xhigh with a MODEL_FALLBACK warning when Astra is not on this account/CLI | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
-| Codex luna | gpt-5.6-luna @ medium | bulk mechanical edits: renames, lint sweeps, boilerplate, codemod-like transforms | `codex-run implement --mech` |
+| Codex astra→sol | gpt-6-astra @ xhigh (healthy, Fast); auto-falls back to gpt-6-sol @ xhigh with a MODEL_FALLBACK warning when Astra is not on this account/CLI | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
+| Codex luna | gpt-6-luna @ medium | bulk mechanical edits: renames, lint sweeps, boilerplate, codemod-like transforms | `codex-run implement --mech` |
 | Claude dev | dev-1..3, Sonnet @ high | fallback/context/steering/GPU/sparing exception | `Agent` call |
 | Claude fresh eyes | dev-opus-1..3, Opus @ high | only after Codex fails the same unit twice | `Agent` call |
 
@@ -130,7 +130,7 @@ Dispatch rules:
   never use it under `codex-sparing`. Record it as `model@effort+fast-mode` in `LANES:` (and in
   `INVESTIGATION:` or `GATES:` when that is the lane that used it).
   Record an Astra availability fallback in `LANES:` as
-  `gpt-5.6-sol@xhigh (fallback-from:gpt-6-astra)`.
+  `gpt-6-sol@xhigh (fallback-from:gpt-6-astra)`.
 
 - **Every unit goes to Codex unless an exception applies.** One unit → the `implement` lane.
   Two concurrent file-disjoint units → add `--lane <short-name>` for the second, and write a
@@ -157,7 +157,7 @@ Dispatch rules:
   |---|---|---|---|
   | `codex-first` | at most 2 Codex threads; serialize the remainder | Codex | Codex verify + review |
   | `codex-sparing` | Sonnet devs (tag *Sparing*) | yourself + `Explore` | verifier-normal + `review --fast` |
-- **Unknown-cause bug, flaky test, perf mystery → gpt-6-astra @ high (healthy, Fast); auto-falls back to gpt-5.6-sol @ high.** Different model family,
+- **Unknown-cause bug, flaky test, perf mystery → gpt-6-astra @ high (healthy, Fast); auto-falls back to gpt-6-sol @ high.** Different model family,
   different priors — that is the point.
 - **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
   implement fall back to a dev; exit 4/5 → note auth/timeout in `summary.md`, continue through
@@ -537,7 +537,7 @@ launching a new `sleep`/bash/polling shell. If active progress visibility is nee
 one bounded `Monitor` call following the Phase C pattern against `<task-dir>/codex-verify.jsonl`
 or `<task-dir>/codex-review.jsonl`; do not arm a second wait mechanism for the same call.
 
-`verify` runs on the healthy default (Astra, else Terra)@high and executes the contract from zero
+`verify` runs on the healthy default (Astra, else Sol)@high and executes the contract from zero
 context; `review` runs on (Astra, else Sol)@high and hunts semantic defects. Your own Opus/Sonnet diff
 review is the cross-provider opinion when Codex
 wrote the code. PASS requires `codex-verdict.md = PASS` and review CLEAR/NONBLOCKING-only.

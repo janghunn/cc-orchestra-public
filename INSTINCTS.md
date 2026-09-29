@@ -162,3 +162,12 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
   that means `--safe-mode --setting-sources "" --tools "" --system-prompt …` from an empty
   directory, or the caller's hooks and `CLAUDE.md` ride along; a local llama.cpp server is the
   only path here that satisfies all three for token log-probabilities.
+
+### The Codex catalog cache is shared by every Codex client and is client-version-gated
+- **Observed:** `~/.codex/models_cache.json` flipped within minutes between a Codex CLI 0.159.0
+  fetch listing `gpt-6-sol`/`gpt-6-luna` and a 0.154.0 fetch from the VS Code extension app-server
+  omitting them.
+- **Where:** `.orchestra/32-codex-defaults-gpt6` (Phase A).
+- **Lesson:** establish model availability with `codex debug models` from the harness CLI plus
+  a live run, record `client_version`, and do not gate a slug on the cache unless every client
+  on the host can see it.
