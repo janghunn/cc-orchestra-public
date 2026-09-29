@@ -69,7 +69,7 @@ git status --short
   - `healthy / watch / tight / critical` 상태에 따라 모델과 effort 자동 조정
 - **호출 경계별 동적 모델 선택**
   - Claude lead: Sonnet / Opus / Fable profile 선택
-  - Codex: healthy 기본 Astra(폴백 Sol / Terra)와 effort를 호출마다 선택
+  - Codex: healthy 기본 Astra(폴백 Sol)와 effort를 호출마다 선택
   - 실행 중 agent는 강제로 바꾸지 않고 **다음 dispatch부터** 새 정책 적용
 - **시스템 프롬프트에 반영한 모델별 지침**: Opus 5.5 / Fable 5.1 / GPT-6 Astra-Sol의
   프롬프팅 지침(예: 이미 승인된 다음 단계는 재승인 질문 없이 실행)은
@@ -116,7 +116,7 @@ User
 Tier 1  orchestrator                              Claude Sonnet @ high
         intent / scope / decomposition / routing / status
  │
- ├─ Codex intake                                 healthy 기본 Astra (폴백 Terra), pressure에 따라 조정
+ ├─ Codex intake                                 healthy 기본 Astra (폴백 Sol), pressure에 따라 조정
  │
  ▼
 Tier 2  route-lead-<slot>-<profile>               Claude
@@ -131,7 +131,7 @@ Tier 2  route-lead-<slot>-<profile>               Claude
  ├─ lead diff review                              Claude lead
  │
  ▼
-Tier 4  executable verify ──────────────────────► Codex Astra (Terra 폴백)
+Tier 4  executable verify ──────────────────────► Codex Astra (Sol 폴백)
         semantic/regression review ─────────────► Codex Astra (Sol 폴백)
         critical extra verifier ────────────────► Claude Opus @ max
         trivial: Tier 4 생략 ─────────────────────► lead self-check only
