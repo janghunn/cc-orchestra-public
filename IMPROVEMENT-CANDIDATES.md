@@ -113,3 +113,32 @@ same convention `INSTINCTS.md` uses.
   guidance change; before any implementation, more critical-task `plan.md` samples should be
   checked for the same near-cap pattern.
 - **Status:** NEW
+
+### 2026-09-29 — Re-sweep the Sonnet-tier effort defaults on Sonnet 5.5
+- **Source:** https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5
+  ("Calibrate effort", "Steer initiative and scope"); noticed during orch/30.
+- **Summary:** `sonnet[1m]` now resolves to Claude Sonnet 5.5. The vendor guide says its effort
+  levels are recalibrated versus Sonnet 5 (the same level no longer gives the same amount of
+  thinking), recommends a fresh sweep against one's own evals instead of carrying settings over,
+  and says that at `low` and `medium` it is more likely to stop and check in before finishing a
+  long agentic task. The proposal: re-measure the four Sonnet-tier defaults in
+  `model-policy.conf` — `ORCH_EFFORT="high"`, `LEAD_LIGHT_EFFORT="medium"`, `DEV_EFFORT="high"`,
+  `VERIFIER_FALLBACK_EFFORT="high"` — on Sonnet 5.5, with orch/23's pre-registered-threshold A/B
+  method.
+- **Critical assessment (cc-orchestra-specific):** Nothing is currently observed to be wrong
+  with any of the four; this is a staleness concern, not a defect. None of them has a recorded
+  measurement: orch/19 compared the critical `verifier` at xhigh vs max and orch/23 the normal
+  lead at medium vs high, both on Opus 5.5 (`INSTINCTS.md` entries and those tasks' plans), so
+  there is no measured Sonnet 5 setting being "carried over", and the recalibration argument
+  alone does not say which way any value should move. Cost is real: orch/23's 24 headless lead
+  runs cost $24.30 plus a lead's time and still landed 0.001 from its threshold; four roles at a
+  similar sample size is several times that, drawn from the shared Claude 5h bucket the harness
+  is most constrained by, and three runs per arm per case gave only weak signals on rare catches.
+  The medium check-in point bears mostly on `LEAD_LIGHT_EFFORT` (light/trivial leads run long
+  agentic turns), but `templates/lead.md.tpl`'s "Finishing the task" section (orch/22) already
+  targets that failure, so a sweep should score premature check-ins explicitly before calling
+  medium too low. `DEV_EFFORT` matters less while `dev-*` is a narrow exception lane behind
+  Codex. `ORCH_EFFORT` is the weakest target: Tier 1 mixes interactive chat with multistep tool
+  use, for which the guide gives different starting points, so a sweep there is a latency/cost
+  question more than a quality one. If approved, start with the light lead.
+- **Status:** NEW
