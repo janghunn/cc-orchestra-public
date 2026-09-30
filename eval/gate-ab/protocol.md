@@ -89,9 +89,19 @@ test "$(git rev-list --all | tail -1)" != ''
 task=$(awk -F '\t' -v c="$case_id" '$1==c {print $2}' "$AB/cases.tsv")
 test -n "$task"
 mkdir -p ".orchestra/$task"
-cp "$AB/frozen/$case_id/brief.md" ".orchestra/$task/brief.md"
-if [ "$mode" = implement ]; then
-  cp "$AB/frozen/$case_id/plan.md" ".orchestra/$task/plan.md"
+files=(brief.md)
+if [ "$mode" = implement ]; then files+=(plan.md); fi
+for name in "${files[@]}"; do
+  python3 - "$AB/frozen/$case_id/$name" "$dst/.orchestra/$task/$name" "$dst" <<'PY'
+import sys
+from pathlib import Path
+source, target, clone = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+assert clone.startswith('/')
+target.write_text(source.read_text().replace('__CLONE__', clone))
+PY
+done
+if grep -n '__CLONE__' ".orchestra/$task/"*.md; then
+  echo "unresolved clone placeholder in $dst" >&2; exit 1
 fi
 printf '\n.orchestra/\n' >> .git/info/exclude
 git status --porcelain > "$AB/$rid.initial-status"
@@ -158,7 +168,7 @@ Two independent read-only judges score **every** anonymous diff and plan: one Co
 
 ## Metrics and collection
 
-* **M1 acceptance:** the task's frozen `Verification` block plus hidden tests extracted from historical fix rounds at the final merged commit. Run each hidden test on the historical defective HEAD (must fail for the intended reason) and historical fixed HEAD (must pass) in separate judge clones before use. Record unsupported/dependency-limited tests instead of silently dropping them. A run passes acceptance only if its own verification and all applicable hidden tests pass.
+* **M1 acceptance:** run the `Verification` block from the **clone's copied** `.orchestra/<task>/plan.md`, after `__CLONE__` has been replaced with that clone's absolute path, with the clone as the starting cwd. Never execute the unresolved frozen source plan or a historical worktree path. Add hidden tests extracted from historical fix rounds at the final merged commit. Run each hidden test on the historical defective HEAD (must fail for the intended reason) and historical fixed HEAD (must pass) in separate judge clones before use. Record unsupported/dependency-limited tests instead of silently dropping them. A run passes acceptance only if its own verification and all applicable hidden tests pass.
 * **M2 ground-truth defects shipped:** per frozen rubric item and run, binary 1 if the reproduced defect remains (partial/uncertain items tracked separately). Summed across all runs and also shown by task. The historical table is the source of mechanisms, not a verdict on new diffs.
 * **M3 new defects:** only independently reproduced, with a script and before/after output. Count separately from M2, then sum M2+M3 for the decision threshold. Track false blockers on S24.
 * **M4 cost:** Primary Claude cost is each run's `--output-format json` (`total_cost_usd`, `usage`, `num_turns`, `duration_ms`) plus the per-run transcript token sum in step 7. Do not use `orch-usage-report` for headless Claude arm or judge cost: it counts a main transcript only when a qualifying lead/dev/verifier subagent child exists (`bin/orch-usage-report:36-53`), which these `claude -p --agent` runs lack. Use that report only for its Codex wrapper-run section. Codex tokens come from each run's `codex-implement.jsonl` or `codex-investigate.jsonl` `turn.completed.usage`, plus wrapper run counts from the run log. Capture `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` immediately before/after each serialized wave, with timestamp and reset time. Report Claude session and Codex week percentage-point deltas, subtracting unrelated usage only when separately observed and auditable. If other users spend from the same pool, mark the delta contaminated.
@@ -246,6 +256,32 @@ These numbered steps are commands for a **future** task, not commands executed f
    sed -n '1,224p' "$C/13-secret-scan/plan.md" > "$AB/frozen/C13/plan.md"
    cp "$S/24-fast-mode-gpt6-sol-allowlist/brief.md" "$AB/frozen/S24/brief.md"
    cp "$S/24-fast-mode-gpt6-sol-allowlist/plan.md" "$AB/frozen/S24/plan.md"
+   python3 - "$AB" <<'PY'
+   import re, sys
+   from pathlib import Path
+   ab = Path(sys.argv[1])
+   historical = re.compile(
+       r'/home/janghun/\.claude/orchestra-state/worktrees/[A-Za-z0-9._-]+'
+       r'(?:/[A-Za-z0-9._-]+)?(?:/\.orchestra/wt/[A-Za-z0-9._-]+)?'
+       r'|/home/janghun/cc-orchestra(?=/|$|[^A-Za-z0-9._-])')
+   cases = [line.split('\t', 1)[0] for line in (ab / 'cases.tsv').read_text().splitlines()]
+   with (ab / 'freeze.tsv').open('w') as log:
+       log.write('case\tfile\tline\thistorical_path\treplacement\n')
+       for case in cases:
+           for name in ('brief.md', 'plan.md'):
+               path = ab / 'frozen' / case / name
+               output = []
+               for number, line in enumerate(path.read_text().splitlines(keepends=True), 1):
+                   for match in historical.finditer(line):
+                       log.write(f'{case}\t{name}\t{number}\t{match.group()}\t__CLONE__\n')
+                   output.append(historical.sub('__CLONE__', line))
+               path.write_text(''.join(output))
+   PY
+   while IFS=$'\t' read -r case_id slug; do
+     if grep -nE '/orchestra-state/worktrees|/home/janghun/cc-orchestra' "$AB/frozen/$case_id/"*.md; then
+       echo "historical checkout path remains in frozen $case_id" >&2; exit 1
+     fi
+   done < "$AB/cases.tsv"
    find "$AB/frozen" -type f -print0 | sort -z | xargs -0 sha256sum > "$AB/evidence/frozen-sha256.txt"
    ```
 
@@ -310,15 +346,25 @@ These numbered steps are commands for a **future** task, not commands executed f
 
    Apply the same transcript-sum method to each judge's `$AB/judges/$BLIND.claude.json` for separate judge-cost accounting. For Codex wrapper-run counts only, run `CC_ORCH_CLAUDE_PROJECTS="$AB/no-claude-sessions" CC_ORCH_CODEX_LOG="$AB/codex.log" /home/janghun/cc-orchestra/bin/orch-usage-report --days 1` after copying the wrapper log; retain raw `turn.completed.usage` records. The report's Claude section is deliberately unused because of its qualifying-child filter (`bin/orch-usage-report:36-53`).
 
-8. After all valid runs: export anonymous diffs (`git diff <base>..HEAD` from each committed/quarantined snapshot) and anonymous plans; strip reports, commit metadata, and run labels. For each case, copy `$AB/frozen/<case>/brief.md` and `plan.md` to `$AB/blind/<case>/`, and make `$AB/blind/<case>/base` a read-only checkout at that case's base SHA using the same `setup.sh` history pruning. Reserve a distinct neutral setup ID (for example `r901` for J01) outside the arm ID range; `CASE` and `BASE_SHA` come from the selection table. The setup clone's `.orchestra` fixture is removed from the blind copy. Verify the base SHA and sole `main` ref before giving judges access:
+8. After all valid runs: export anonymous diffs (`git diff <base>..HEAD` from each committed/quarantined snapshot) and anonymous plans; strip reports, commit metadata, and run labels. For each case, render `$AB/frozen/<case>/brief.md` and `plan.md` into `$AB/blind/<case>/` with `__CLONE__` resolved to that case's blind `base/` path, and make `$AB/blind/<case>/base` a read-only checkout at that case's base SHA using the same `setup.sh` history pruning. Reserve a distinct neutral setup ID (for example `r901` for J01) outside the arm ID range; `CASE` and `BASE_SHA` come from the selection table. The setup clone's `.orchestra` fixture is removed from the blind copy. Verify the base SHA and sole `main` ref before giving judges access:
 
    ```bash
    # Set CASE=J01, BASE_SHA=401b303, BASE_RID=r901; use a unique BASE_RID per case.
    AB="$AB" CORPUS="$CORPUS" bash "$AB/setup.sh" "$BASE_RID" "$CASE" implement "$BASE_SHA"
    mkdir -p "$AB/blind/$CASE/base"
-   cp "$AB/frozen/$CASE/brief.md" "$AB/frozen/$CASE/plan.md" "$AB/blind/$CASE/"
    cp -a "$AB/clones/$BASE_RID/." "$AB/blind/$CASE/base/"
    rm -rf "$AB/blind/$CASE/base/.orchestra"
+   python3 - "$AB/frozen/$CASE" "$AB/blind/$CASE" "$AB/blind/$CASE/base" <<'PY'
+   import sys
+   from pathlib import Path
+   source, target, base = map(Path, sys.argv[1:])
+   assert base.is_absolute()
+   for name in ('brief.md', 'plan.md'):
+       (target / name).write_text((source / name).read_text().replace('__CLONE__', str(base)))
+   PY
+   if grep -n '__CLONE__' "$AB/blind/$CASE/"*.md; then
+     echo "unresolved clone placeholder in blind $CASE" >&2; exit 1
+   fi
    test ! -e "$AB/blind/$CASE/base/.orchestra"
    test "$(git -C "$AB/blind/$CASE/base" rev-parse HEAD)" = \
      "$(git -C /home/janghun/cc-orchestra rev-parse "${BASE_SHA}^{commit}")"
