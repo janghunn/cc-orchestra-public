@@ -85,7 +85,19 @@ Tier 1은 필요한 경우 질문하거나 범위를 정한다. 작업의 목표
 Tier 1은 진행 중인 lead 자리를 표로 보여준다. 화면 문구와 작업 번호는 실제 요청에
 따라 달라진다. lead가 계획, 구현, 검증을 진행한다.
 
-## 6. 진행 확인
+## 6. 끝났는지 아는 법
+
+lead의 최종 보고에서 `STATUS`, `BRANCH`, `WORKTREE`, `COMMITS`를 확인한다.
+`STATUS: PASS`는 완료, `FAIL`과 `BLOCKED`는 실패 또는 진행 중단을 뜻한다.
+해당 작업의 `.orchestra/<NN>-<slug>/summary.md`에서 최종 상태와 검증 내용을 읽는다.
+`<NN>`은 작업 번호, `<slug>`는 짧은 작업 이름이다. 브랜치와 커밋은 보고에 적힌 것을
+확인한다. `cc-orch session path main`은 세션의 기준 폴더만 보여준다. lead 작업은
+`<repo>/.orchestra/wt/lead-<slot>` 같은 별도 worktree와 `orch/<NN>-<slug>` 브랜치에
+있을 수 있다. 최종 보고의 `BRANCH`·`WORKTREE`, `.orchestra/REGISTRY.md`의 해당 행,
+작업의 `summary.md`를 함께 확인한다. 작업 브랜치는 남으며,
+사용자가 요청하기 전에는 기본 브랜치에 자동으로 병합되지 않는다.
+
+## 7. 진행 확인
 
 새 터미널에서도 다음 명령을 쓸 수 있다.
 
@@ -95,10 +107,13 @@ cc-orch session status main
 cc-orch session path main
 ```
 
-`status`는 세션의 실행 상태, 작업 폴더와 브랜치를 보여준다.
-프로젝트의 `.orchestra/REGISTRY.md`는 lead별 작업, 상태, 마지막 갱신을 적은 표다.
-개별 작업 기록은 작업 폴더 아래 `.orchestra/<NN>-<slug>/`에 있다.
-`<NN>`은 작업 번호, `<slug>`는 짧은 작업 이름이다. 그 안의 `brief.md`는 목표,
+`status`는 세션의 실행 상태, 기준 폴더와 브랜치를 보여준다.
+`path`도 세션의 기준 폴더만 보여준다. lead 작업은
+`<repo>/.orchestra/wt/lead-<slot>` 같은 별도 worktree와 `orch/<NN>-<slug>` 브랜치에서
+진행될 수 있다. lead 최종 보고의 `BRANCH`·`WORKTREE`, 프로젝트의
+`.orchestra/REGISTRY.md` 행과 작업의 `summary.md`를 확인한다.
+`REGISTRY.md`는 lead별 작업, 상태, 마지막 갱신을 적은 표다.
+개별 작업 기록은 `.orchestra/<NN>-<slug>/`에 있다. 그 안의 `brief.md`는 목표,
 `plan.md`는 설계, `summary.md`는 최종 결과를 담는다.
 
 남은 모델 사용 한도에 따라 다음 호출을 배정하는 것을 **quota routing**이라고 한다.
@@ -110,21 +125,15 @@ orch-model-guard lanes
 orch-usage-report --days 1
 ```
 
-## 7. 끝났는지 아는 법
-
-lead의 최종 보고에서 `STATUS`, `BRANCH`, `COMMITS`를 확인한다.
-`STATUS: PASS`는 완료, `FAIL`과 `BLOCKED`는 실패 또는 진행 중단을 뜻한다.
-해당 작업의 `.orchestra/<NN>-<slug>/summary.md`에서 최종 상태와 검증 내용을 읽는다.
-브랜치와 커밋은 보고에 적힌 것을 확인한다. 작업 브랜치는 남으며,
-사용자가 요청하기 전에는 기본 브랜치에 자동으로 병합되지 않는다.
-
 ## 8. 중지·재개·전환
 
 - tmux에서 `Ctrl-b` 다음 `d`를 누르면 대화는 계속 실행되고 화면에서만 빠져나온다.
 - 다시 접속하려면 `cc-orch session attach main`을 실행한다.
 - Claude Code 안에서 `/exit`를 입력하면 대화가 정상 종료된다.
-- 세션을 멈추려면 `cc-orch session stop main`을 실행한다. 브랜치와 worktree는 남는다.
-- 멈춘 세션의 대화를 이어가려면 `cc-orch session restart main`을 실행한다.
+- 세션을 멈추려면 `cc-orch session stop main`을 실행한다. 이 명령은 Claude에 `Ctrl-C`를
+  보내고 약 1초 뒤 tmux 세션을 종료한다. 진행 중인 작업에는 사용하지 않는다.
+  브랜치와 worktree는 남는다.
+- 멈춘 세션은 `cc-orch session restart main`으로 다시 시작한다. 저장된 CLI 대화만 이어진다.
 - Codex 쪽으로 넘겨야 하면 진행 중인 작업 상태를 먼저 확인하고
   `cc-orch session switch main --backend codex`를 사용한다. 되돌릴 때는
   `cc-orch session switch main --backend hybrid`를 사용한다. 전환은 파일 기록을
@@ -142,7 +151,7 @@ lead의 최종 보고에서 `STATUS`, `BRANCH`, `COMMITS`를 확인한다.
 | 로그인 오류 | `claude auth status`, `codex login status` |
 | tmux 화면이 사라짐 | `cc-orch session list` 후 실행 중이면 `cc-orch session attach main` |
 | 세션이 정지됨 | `cc-orch session status main` 후 `cc-orch session restart main` |
-| 변경 파일이 예상 폴더에 없음 | `cc-orch session path main`, `.orchestra/REGISTRY.md`의 작업 폴더와 `summary.md` 확인 |
+| 변경 파일이 예상 폴더에 없음 | `cc-orch session path main`은 세션의 기준 폴더만 보여준다. lead 작업은 `<repo>/.orchestra/wt/lead-<slot>` 같은 별도 worktree와 `orch/<NN>-<slug>` 브랜치에 있을 수 있다. lead 최종 보고의 `BRANCH`·`WORKTREE`, `.orchestra/REGISTRY.md` 행과 작업의 `summary.md` 확인 |
 
 더 자세한 점검은 [운영 가이드의 운영 명령](OPERATIONS.ko.md#자주-쓰는-운영-명령-요약)을 본다.
 

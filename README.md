@@ -58,7 +58,7 @@ Codex CLI의 로그인도 확인한다. 자세한 준비와 확인 명령은
 | CLI 로그인이 필요함 | `claude auth status`와 `codex login status` 확인 |
 | 세션 화면에서 나왔음 | `cc-orch session list` 후 `cc-orch session attach main` |
 | 세션이 멈춰 있음 | `cc-orch session status main` 확인 후 `cc-orch session restart main` |
-| 작업 파일이 안 보임 | `cc-orch session path main`으로 실제 작업 폴더 확인 |
+| 작업 파일이 안 보임 | `cc-orch session path main`은 세션의 기준 폴더만 보여준다. lead 작업은 `<repo>/.orchestra/wt/lead-<slot>` 같은 별도 worktree와 `orch/<NN>-<slug>` 브랜치에 있을 수 있다. lead 최종 보고의 `BRANCH`·`WORKTREE`, `.orchestra/REGISTRY.md` 행, 작업의 `summary.md`를 확인 |
 
 더 자세한 해결 순서는 [첫 사용 안내의 막혔을 때](GETTING-STARTED.ko.md#9-막혔을-때)에 있다.
 
