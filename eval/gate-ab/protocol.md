@@ -161,7 +161,7 @@ Two independent read-only judges score **every** anonymous diff and plan: one Co
 * **M1 acceptance:** the task's frozen `Verification` block plus hidden tests extracted from historical fix rounds at the final merged commit. Run each hidden test on the historical defective HEAD (must fail for the intended reason) and historical fixed HEAD (must pass) in separate judge clones before use. Record unsupported/dependency-limited tests instead of silently dropping them. A run passes acceptance only if its own verification and all applicable hidden tests pass.
 * **M2 ground-truth defects shipped:** per frozen rubric item and run, binary 1 if the reproduced defect remains (partial/uncertain items tracked separately). Summed across all runs and also shown by task. The historical table is the source of mechanisms, not a verdict on new diffs.
 * **M3 new defects:** only independently reproduced, with a script and before/after output. Count separately from M2, then sum M2+M3 for the decision threshold. Track false blockers on S24.
-* **M4 cost:** Claude `total_cost_usd`, `usage`, `num_turns` and `duration_ms` from `--output-format json`; `CC_ORCH_CLAUDE_PROJECTS=<transcript-root> CC_ORCH_CODEX_LOG=<run-log> /home/janghun/cc-orchestra/bin/orch-usage-report --days 1` for a cross-check; Codex `turn.completed.usage` from each run's `codex-implement.jsonl` or `codex-investigate.jsonl`, plus wrapper run counts from the run log. Capture `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` immediately before/after each serialized wave, with timestamp and reset time. Report Claude session and Codex week percentage-point deltas, subtracting unrelated usage only when separately observed and auditable. If other users spend from the same pool, mark the delta contaminated.
+* **M4 cost:** Primary Claude cost is each run's `--output-format json` (`total_cost_usd`, `usage`, `num_turns`, `duration_ms`) plus the per-run transcript token sum in step 7. Do not use `orch-usage-report` for headless Claude arm or judge cost: it counts a main transcript only when a qualifying lead/dev/verifier subagent child exists (`bin/orch-usage-report:36-53`), which these `claude -p --agent` runs lack. Use that report only for its Codex wrapper-run section. Codex tokens come from each run's `codex-implement.jsonl` or `codex-investigate.jsonl` `turn.completed.usage`, plus wrapper run counts from the run log. Capture `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` immediately before/after each serialized wave, with timestamp and reset time. Report Claude session and Codex week percentage-point deltas, subtracting unrelated usage only when separately observed and auditable. If other users spend from the same pool, mark the delta contaminated.
 * **M5 wall-clock:** monotonic start/end per run, excluding fixture preparation and judging; report wait time separately. Investigator primary metric is plan rubric coverage; also sample five asserted file:line claims per plan (or all if fewer) against the frozen clone, reporting accuracy, Claude/Codex tokens and cost, and wall-clock.
 
 No outcome is pooled across tasks without displaying per-task scores and the clean control.
@@ -279,7 +279,36 @@ These numbered steps are commands for a **future** task, not commands executed f
        > "$AB/$RID.result.json" 2> "$AB/$RID.stderr.log"
    ```
 
-7. After each serialized wave: run `AB="$AB" python3 "$AB/leak-check.py" "$RID"` for every Claude run; scan Codex jsonl for the same forbidden paths; check actual models, effort, and investigator Codex calls; save `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` snapshots. Rerun invalid cells only after a symmetric amendment. Run `CC_ORCH_CLAUDE_PROJECTS="$AB/transcripts" CC_ORCH_CODEX_LOG="$AB/codex.log" /home/janghun/cc-orchestra/bin/orch-usage-report --days 1`, after copying the run transcripts and wrapper log to those paths; retain raw `turn.completed.usage` records.
+7. After each serialized wave: run `AB="$AB" python3 "$AB/leak-check.py" "$RID"` for every Claude run; scan Codex jsonl for the same forbidden paths; check actual models, effort, and investigator Codex calls; save `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` snapshots. Rerun invalid cells only after a symmetric amendment. For each Claude arm RID, append one line to `$AB/evidence/claude-usage.tsv` with columns `rid,total_cost_usd,num_turns,duration_ms,cli_usage_json,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens`:
+
+   ```bash
+   python3 - "$AB" "$RID" >> "$AB/evidence/claude-usage.tsv" <<'PY'
+   import json, sys
+   from pathlib import Path
+   ab, rid = Path(sys.argv[1]), sys.argv[2]
+   result = json.loads((ab / f'{rid}.result.json').read_text())
+   matches = list(Path.home().glob(f".claude/projects/*/{result['session_id']}.jsonl"))
+   assert len(matches) == 1, (rid, 'missing or ambiguous transcript')
+   main = matches[0]
+   files = [main, *sorted((main.parent / main.stem / 'subagents').glob('agent-*.jsonl'))]
+   keys = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+   totals = {key: 0 for key in keys}
+   for path in files:
+       for line in path.open(errors='replace'):
+           obj = json.loads(line)
+           if obj.get('type') != 'assistant':
+               continue
+           usage = (obj.get('message') or {}).get('usage') or {}
+           for key in keys:
+               totals[key] += int(usage.get(key) or 0)
+   values = [rid, result['total_cost_usd'], result['num_turns'], result['duration_ms'],
+             json.dumps(result.get('usage') or {}, sort_keys=True, separators=(',', ':')),
+             *(totals[key] for key in keys)]
+   print('\t'.join(map(str, values)))
+   PY
+   ```
+
+   Apply the same transcript-sum method to each judge's `$AB/judges/$BLIND.claude.json` for separate judge-cost accounting. For Codex wrapper-run counts only, run `CC_ORCH_CLAUDE_PROJECTS="$AB/no-claude-sessions" CC_ORCH_CODEX_LOG="$AB/codex.log" /home/janghun/cc-orchestra/bin/orch-usage-report --days 1` after copying the wrapper log; retain raw `turn.completed.usage` records. The report's Claude section is deliberately unused because of its qualifying-child filter (`bin/orch-usage-report:36-53`).
 
 8. After all valid runs: export anonymous diffs (`git diff <base>..HEAD` from each committed/quarantined snapshot), anonymous plans, and hidden test outputs to `$AB/blind/`; strip reports and commit metadata. Hash the blinded bundle. Run both read-only judges against each blind file and `$AB/rubric/<case>.md`; store outputs in `$AB/judges/`. For each anonymous label and case, the judge invocation is:
 
