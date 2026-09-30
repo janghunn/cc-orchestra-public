@@ -86,11 +86,23 @@ Codex CLI의 로그인도 확인한다. 자세한 준비와 확인 명령은
 
 ```bash
 git clone https://github.com/janghunn/cc-orchestra.git ~/cc-orchestra
+```
+
+저장소가 비공개일 수 있다. HTTPS 복제가 인증 오류로 실패하면
+[부트스트랩 가이드 1절](BOOTSTRAP.ko.md#1-부트스트랩-전에-사람이-해야-하는-것)에 따라
+SSH 키를 GitHub에 등록하고 `git clone git@github.com:janghunn/cc-orchestra.git ~/cc-orchestra`로 받는다.
+
+```bash
 cd ~/cc-orchestra
 
 ./install.sh
 ./install.sh --check
 ```
+
+설치 명령은 기본적으로 `~/.local/bin`에 연결된다. `cc-orch: command not found`가 나오면
+`export PATH="$HOME/.local/bin:$PATH"`로 현재 셸의 PATH에 추가하고, 같은 설정을
+`~/.profile`과 `~/.bashrc`에도 저장한다. `./install.sh --bootstrap`은 이 작업을
+자동으로 한다([부트스트랩 가이드 2절](BOOTSTRAP.ko.md#2-한-번에-부트스트랩)).
 
 Codex lane을 사용하려면 Codex CLI가 로그인되어 있어야 한다.
 
