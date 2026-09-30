@@ -51,8 +51,10 @@ cd ~/cc-orchestra
 
 설치 명령은 기본적으로 `~/.local/bin`에 연결된다. `cc-orch: command not found`가 나오면
 `export PATH="$HOME/.local/bin:$PATH"`로 현재 셸의 PATH에 추가하고, 같은 설정을
-`~/.profile`과 `~/.bashrc`에도 저장한다. `./install.sh --bootstrap`은 이 작업을
-자동으로 한다([부트스트랩 가이드 2절](BOOTSTRAP.ko.md#2-한-번에-부트스트랩)).
+`~/.profile`과 `~/.bashrc`에도 저장한다. `./install.sh --bootstrap`은 `~/.local/bin`을
+두 파일에 자동으로 기록한다([부트스트랩 가이드 2절](BOOTSTRAP.ko.md#2-한-번에-부트스트랩)).
+부트스트랩을 실행한 현재 셸의 PATH는 자동으로 바뀌지 않으므로 `cc-orch`를 쓰기 전에 새 셸을 열거나
+`source ~/.profile`을 실행한다.
 
 새 서버에서 도구와 로그인을 함께 준비하려면 저장소를 받은 뒤
 `./install.sh --bootstrap`을 사용한다. 세부 순서는
