@@ -171,14 +171,14 @@ Two independent read-only judges score **every** anonymous diff and plan: one Co
 * **M1 acceptance:** run the `Verification` block from the **clone's copied** `.orchestra/<task>/plan.md`, after `__CLONE__` has been replaced with that clone's absolute path, with the clone as the starting cwd. Never execute the unresolved frozen source plan or a historical worktree path. Add hidden tests extracted from historical fix rounds at the final merged commit. Run each hidden test on the historical defective HEAD (must fail for the intended reason) and historical fixed HEAD (must pass) in separate judge clones before use. Record unsupported/dependency-limited tests instead of silently dropping them. A run passes acceptance only if its own verification and all applicable hidden tests pass.
 * **M2 ground-truth defects shipped:** per frozen rubric item and run, binary 1 if the reproduced defect remains (partial/uncertain items tracked separately). Summed across all runs and also shown by task. The historical table is the source of mechanisms, not a verdict on new diffs.
 * **M3 new defects:** only independently reproduced, with a script and before/after output. Count separately from M2, then sum M2+M3 for the decision threshold. Track false blockers on S24.
-* **M4 cost:** Primary Claude cost is each run's `--output-format json` (`total_cost_usd`, `usage`, `num_turns`, `duration_ms`) plus the per-run transcript token sum in step 7. Do not use `orch-usage-report` for headless Claude arm or judge cost: it counts a main transcript only when a qualifying lead/dev/verifier subagent child exists (`bin/orch-usage-report:36-53`), which these `claude -p --agent` runs lack. Use that report only for its Codex wrapper-run section. Codex tokens come from each run's `codex-implement.jsonl` or `codex-investigate.jsonl` `turn.completed.usage`, plus wrapper run counts from the run log. Capture `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` immediately before/after each serialized wave, with timestamp and reset time. Report Claude session and Codex week percentage-point deltas, subtracting unrelated usage only when separately observed and auditable. If other users spend from the same pool, mark the delta contaminated.
+* **M4 cost:** Primary Claude cost is each run's `--output-format json` (`total_cost_usd`, `usage`, `num_turns`, `duration_ms`) plus the per-run transcript token sum in step 7. Do not use `orch-usage-report` for headless Claude arm or judge cost: it counts a main transcript only when a qualifying lead/dev/verifier subagent child exists (`bin/orch-usage-report:36-53`), which these `claude -p --agent` runs lack. Use that report only for its Codex wrapper-run section. Codex tokens come from each run's `codex-implement.jsonl` or `codex-investigate.jsonl` `turn.completed.usage`, plus wrapper run counts from the run log. Run Claude arms one at a time. Capture `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` immediately before and after **each** Claude arm run and each Claude judge run (judge cost separate), retaining the corresponding session reset time. The per-run Claude session-point delta is `session_after - session_before`. A run crossing a 5-hour reset, overlapping any other Claude activity, or lacking live snapshots has a contaminated delta: exclude that delta from cost means while retaining the run for quality scoring. Keep wave snapshots for Codex week usage and stop checks; report both quota types without attributing a mixed-arm wave delta to one Claude run.
 * **M5 wall-clock:** monotonic start/end per run, excluding fixture preparation and judging; report wait time separately. Investigator primary metric is plan rubric coverage; also sample five asserted file:line claims per plan (or all if fewer) against the frozen clone, reporting accuracy, Claude/Codex tokens and cost, and wall-clock.
 
 No outcome is pooled across tasks without displaying per-task scores and the clean control.
 
 ## Schedule, size, and stopping
 
-Pilot one task (C10) through X/S/O and L-codex/L-self once, in serialized order, without scoring quality until fixture and cost checks are complete. Then six implementation tasks × three arms × two runs = **36 runs** and three investigator tasks × two arms × three runs = **18 runs** total, including pilot cells. Implementation wave 1 is one run per task-arm cell (18 runs); wave 2 is the second run per cell. Interleave arm order within each task by a stored random seed; serialize quota snapshots/waves so deltas can be attributed. If implementation wave-1 Claude CLI cost is **under $70** and the measured quota projection fits both stop lines, a **third implementation run per cell** may be added, but the decision and cost-only evidence must be written before opening wave-1 quality files. The extra 18 runs do not change thresholds. Keep all invalid runs and replacements in the accounting.
+Pilot one task (C10) through X/S/O and L-codex/L-self once, in serialized order, without scoring quality until fixture and cost checks are complete. Then six implementation tasks × three arms × two runs = **36 runs** and three investigator tasks × two arms × three runs = **18 runs** total, including pilot cells. Implementation wave 1 is one run per task-arm cell (18 runs); wave 2 is the second run per cell. Interleave arm order within each task by a stored random seed; execute every Claude arm and judge run one at a time, with immediate before/after quota snapshots for that run. Keep wave snapshots for stop checks. If implementation wave-1 Claude CLI cost is **under $70** and the measured quota projection fits both stop lines, a **third implementation run per cell** may be added, but the decision and cost-only evidence must be written before opening wave-1 quality files. The extra 18 runs do not change thresholds. Keep all invalid runs and replacements in the accounting.
 
 Abort a wave before dispatch if projected Codex week usage would exceed **90%** or Claude 5-hour session would exceed **80%** according to `orch-model-guard lanes`. Pause and await quota reset; do not route an arm to another model. Abort and investigate if any pilot run costs more than **3×** its preregistered estimate. Stop for an isolation leak or lost ground-truth fixture, correct it symmetrically, and rerun the affected cells. Do not use quality results to stop early.
 
@@ -188,7 +188,7 @@ Move the default implementer from X to a Claude arm K (S or O) only if **all** h
 
 1. K's M1 hidden-test-plus-acceptance pass count is at least X's.
 2. K's total shipped defects (M2+M3, all runs) is at most `0.67 ×` X's, at least **two defects fewer** in absolute count, and lower on at least **two tasks**; **and** at least one ground-truth defect is shipped by X in a majority of its runs on one task while K ships it in none of its runs on that task.
-3. K's measured mean Claude 5-hour-session cost per implementation run is at most **3 percentage points**.
+3. K's measured mean Claude 5-hour-session cost per implementation run is at most **3 percentage points**. Evaluate S and O separately: compute each arm's mean from its uncontaminated per-run deltas only, and require at least **three** uncontaminated runs for that arm. With fewer than three, rule 3 is **not evaluable** for that arm and the default does not move to it.
 
 Otherwise X remains default and K's result is evidence only for the escalation lane. Ties, a one-defect total advantage, an advantage confined to one task without the repeated-defect criterion, or a quality win failing the cost cap do not move the default. If both Claude arms qualify, choose the one with fewer defects; then higher acceptance; then lower measured session cost. If all tie, keep X. A clear X advantage remains evidence against the fresh-eyes escalation assumption.
 
@@ -289,18 +289,22 @@ These numbered steps are commands for a **future** task, not commands executed f
 
 3. Randomize and freeze `$AB/map.tsv` (neutral ID, case, arm, repetition, seed); keep it outside clones. Copy the two inline helpers above to `$AB/setup.sh` and `$AB/leak-check.py` and make them executable. Confirm `$AB/cases.tsv` has `case<TAB>task-directory-name` and that each frozen fixture contains exactly the allowed files. Keep the map sealed until scoring is final.
 
-4. Pilot C10 once through X, S, O, L-codex, L-self. For each ID run `AB="$AB" CORPUS="$CORPUS" bash "$AB/setup.sh" r001 C10 implement bd0637b` (change ID/mode per map), inspect isolation evidence, and snapshot `/home/janghun/cc-orchestra/bin/orch-model-guard lanes`. Dispatch each arm with step 5 or 6. Record CLI result, exit code, model, effort, cost and quota after each run. Apply the pilot stop rules before opening quality files.
+4. Pilot C10 once through X, S, O, L-codex, L-self. For each ID run `AB="$AB" CORPUS="$CORPUS" bash "$AB/setup.sh" r001 C10 implement bd0637b` (change ID/mode per map), inspect isolation evidence, and snapshot `/home/janghun/cc-orchestra/bin/orch-model-guard lanes`. Dispatch each arm with step 5 or 6, one Claude run at a time, using the immediately adjacent before/after snapshots there; no other Claude activity may overlap its window. Record CLI result, exit code, model, effort, cost and quota after each run. Apply the pilot stop rules before opening quality files.
 
 5. Implementer dispatch, replacing `RID`, `TASK`, and `ARM` from the sealed map; use a fresh clone per command. `TASK` is `$AB/clones/$RID/.orchestra/<task-directory-name>`. Run one of:
 
    ```bash
    ~/.claude/orchestra/bin/codex-run-runtime implement "$AB/clones/$RID" "$TASK" --model astra --effort xhigh
    # S or O: DEV_AGENT is dev-1 or dev-opus-1. DEV_PROMPT is the filled verbatim Phase C quote.
+   /home/janghun/cc-orchestra/bin/orch-model-guard lanes > "$AB/evidence/$RID.lanes.before"
+   cp "${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/last-usage.txt" "$AB/evidence/$RID.usage.before"
    ( cd "$AB/clones/$RID" && claude -p --agent "$DEV_AGENT" --effort high \
        --output-format json --permission-mode dontAsk \
        --allowedTools 'Bash Read Grep Glob Write Edit' --disallowedTools 'Agent NotebookEdit' \
        --max-budget-usd 30 "$DEV_PROMPT" < /dev/null ) \
        > "$AB/$RID.result.json" 2> "$AB/$RID.stderr.log"
+   /home/janghun/cc-orchestra/bin/orch-model-guard lanes > "$AB/evidence/$RID.lanes.after"
+   cp "${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/last-usage.txt" "$AB/evidence/$RID.usage.after"
    ```
 
 6. Investigator dispatch. `INV_PROMPT` is the fixed question plus the Phase A0–B stop and arm rule above. Use the same lead profile and effort for both; the L-self prompt forbids Codex calls and its transcript must show none. Store each result by neutral ID:
@@ -308,21 +312,28 @@ These numbered steps are commands for a **future** task, not commands executed f
    ```bash
    TOOLS='Bash Read Grep Glob Write'
    if [ "$ARM" = L-self ]; then TOOLS='Bash Read Grep Glob'; fi
+   /home/janghun/cc-orchestra/bin/orch-model-guard lanes > "$AB/evidence/$RID.lanes.before"
+   cp "${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/last-usage.txt" "$AB/evidence/$RID.usage.before"
    ( cd "$AB/clones/$RID" && claude -p --agent route-lead-delta-normal --effort high \
        --output-format json --permission-mode dontAsk \
        --allowedTools "$TOOLS" --disallowedTools 'Agent Edit NotebookEdit' \
        --max-budget-usd 30 "$INV_PROMPT" < /dev/null ) \
        > "$AB/$RID.result.json" 2> "$AB/$RID.stderr.log"
+   /home/janghun/cc-orchestra/bin/orch-model-guard lanes > "$AB/evidence/$RID.lanes.after"
+   cp "${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/last-usage.txt" "$AB/evidence/$RID.usage.after"
    ```
 
-7. After each serialized wave: run `AB="$AB" python3 "$AB/leak-check.py" "$RID"` for every Claude run; scan Codex jsonl for the same forbidden paths; check actual models, effort, and investigator Codex calls; save `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` snapshots. Rerun invalid cells only after a symmetric amendment. For each Claude arm RID, append one line to `$AB/evidence/claude-usage.tsv` with columns `rid,total_cost_usd,num_turns,duration_ms,cli_usage_json,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens`:
+7. After each serialized wave: run `AB="$AB" python3 "$AB/leak-check.py" "$RID"` for every Claude run; scan Codex jsonl for the same forbidden paths; check actual models, effort, and investigator Codex calls; save wave-level `/home/janghun/cc-orchestra/bin/orch-model-guard lanes` snapshots for stop checks. Rerun invalid cells only after a symmetric amendment. For each Claude arm RID, inspect other Claude activity during its snapshot window and set `OVERLAP=1` if any overlaps or exclusivity cannot be established, otherwise `OVERLAP=0`; record the evidence for that choice. Append one line to `$AB/evidence/claude-usage.tsv` with columns `rid,total_cost_usd,num_turns,duration_ms,cli_usage_json,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,session_before,session_after,reset_before,reset_after,contaminated,session_delta`:
 
    ```bash
-   python3 - "$AB" "$RID" >> "$AB/evidence/claude-usage.tsv" <<'PY'
-   import json, sys
+   python3 - "$AB" "$RID" "$OVERLAP" >> "$AB/evidence/claude-usage.tsv" <<'PY'
+   import json, re, sys
    from pathlib import Path
-   ab, rid = Path(sys.argv[1]), sys.argv[2]
-   result = json.loads((ab / f'{rid}.result.json').read_text())
+   ab, rid, overlap = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+   assert overlap in ('0', '1')
+   result_path = (ab / 'judges' / f'{rid[6:]}.claude.json' if rid.startswith('judge-')
+                  else ab / f'{rid}.result.json')
+   result = json.loads(result_path.read_text())
    matches = list(Path.home().glob(f".claude/projects/*/{result['session_id']}.jsonl"))
    assert len(matches) == 1, (rid, 'missing or ambiguous transcript')
    main = matches[0]
@@ -337,14 +348,31 @@ These numbered steps are commands for a **future** task, not commands executed f
            usage = (obj.get('message') or {}).get('usage') or {}
            for key in keys:
                totals[key] += int(usage.get(key) or 0)
+   def quota(side):
+       evidence = ab / 'evidence'
+       lanes_path = evidence / f'{rid}.lanes.{side}'
+       usage_path = evidence / f'{rid}.usage.{side}'
+       lanes = lanes_path.read_text() if lanes_path.exists() else ''
+       usage = usage_path.read_text() if usage_path.exists() else ''
+       session = re.search(r'^claude: session=(\d+)%.*\(([^)]*)\)$', lanes, re.M)
+       reset = re.search(r'^Current session: .*? resets (.+)$', usage, re.M)
+       return (int(session.group(1)) if session else None,
+               reset.group(1).strip() if reset else '',
+               bool(session and session.group(2) == 'live' and reset))
+   before, reset_before, before_live = quota('before')
+   after, reset_after, after_live = quota('after')
+   contaminated = (overlap == '1' or not before_live or not after_live or
+                   reset_before != reset_after or after < before)
+   delta = after - before if before is not None and after is not None else ''
    values = [rid, result['total_cost_usd'], result['num_turns'], result['duration_ms'],
              json.dumps(result.get('usage') or {}, sort_keys=True, separators=(',', ':')),
-             *(totals[key] for key in keys)]
+             *(totals[key] for key in keys), before, after, reset_before, reset_after,
+             int(contaminated), delta]
    print('\t'.join(map(str, values)))
    PY
    ```
 
-   Apply the same transcript-sum method to each judge's `$AB/judges/$BLIND.claude.json` for separate judge-cost accounting. For Codex wrapper-run counts only, run `CC_ORCH_CLAUDE_PROJECTS="$AB/no-claude-sessions" CC_ORCH_CODEX_LOG="$AB/codex.log" /home/janghun/cc-orchestra/bin/orch-usage-report --days 1` after copying the wrapper log; retain raw `turn.completed.usage` records. The report's Claude section is deliberately unused because of its qualifying-child filter (`bin/orch-usage-report:36-53`).
+   Use `session_delta` only where `contaminated=0`; a contaminated run still receives its quality score. For each judge, run the same Python block with `RID=judge-$BLIND` and its audited `OVERLAP`, redirecting to `$AB/evidence/claude-judge-usage.tsv`; the block reads `$AB/judges/$BLIND.claude.json` and the judge-prefixed snapshots. Never include judge deltas in arm means. For Codex wrapper-run counts only, run `CC_ORCH_CLAUDE_PROJECTS="$AB/no-claude-sessions" CC_ORCH_CODEX_LOG="$AB/codex.log" /home/janghun/cc-orchestra/bin/orch-usage-report --days 1` after copying the wrapper log; retain raw `turn.completed.usage` records. The report's Claude section is deliberately unused because of its qualifying-child filter (`bin/orch-usage-report:36-53`).
 
 8. After all valid runs: export anonymous diffs (`git diff <base>..HEAD` from each committed/quarantined snapshot) and anonymous plans; strip reports, commit metadata, and run labels. For each case, render `$AB/frozen/<case>/brief.md` and `plan.md` into `$AB/blind/<case>/` with `__CLONE__` resolved to that case's blind `base/` path, and make `$AB/blind/<case>/base` a read-only checkout at that case's base SHA using the same `setup.sh` history pruning. Reserve a distinct neutral setup ID (for example `r901` for J01) outside the arm ID range; `CASE` and `BASE_SHA` come from the selection table. The setup clone's `.orchestra` fixture is removed from the blind copy. Verify the base SHA and sole `main` ref before giving judges access:
 
@@ -381,10 +409,14 @@ These numbered steps are commands for a **future** task, not commands executed f
    codex exec --ephemeral --skip-git-repo-check -s read-only -C "$AB/blind/$CASE" \
      -m gpt-6-astra -c model_reasoning_effort=high \
      -o "$AB/judges/$BLIND.codex.md" "$JUDGE_PROMPT"
+   /home/janghun/cc-orchestra/bin/orch-model-guard lanes > "$AB/evidence/judge-$BLIND.lanes.before"
+   cp "${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/last-usage.txt" "$AB/evidence/judge-$BLIND.usage.before"
    ( cd "$AB/blind/$CASE" && claude -p --agent route-lead-delta-normal --effort high \
        --output-format json --permission-mode dontAsk \
        --allowedTools 'Read Grep Glob Bash' --disallowedTools 'Write Edit NotebookEdit Agent' \
        "$JUDGE_PROMPT" < /dev/null ) > "$AB/judges/$BLIND.claude.json"
+   /home/janghun/cc-orchestra/bin/orch-model-guard lanes > "$AB/evidence/judge-$BLIND.lanes.after"
+   cp "${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/last-usage.txt" "$AB/evidence/judge-$BLIND.usage.after"
    ```
 
    Execute frozen hidden repros and each task's Verification block in separate judge clones. Score M1–M5 and investigator coverage in `$AB/scores.csv`, with columns `blind,case,m1_pass,m2_count,m3_count,plan_points,claims_correct,claims_checked,claude_cost_usd,claude_session_points,codex_input_tokens,codex_output_tokens,codex_week_points,wall_seconds,uncertain_items,evidence`. Every defect count links a repro or both judge records. Recount defect totals, pass counts, and cost means independently from that CSV before opening `blind-map.tsv`.

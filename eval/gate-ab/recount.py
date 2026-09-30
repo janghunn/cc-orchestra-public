@@ -22,7 +22,12 @@ def read_csv(name, header, errors):
         reader = csv.DictReader(handle)
         if reader.fieldnames != header:
             errors.append(f"{name}: wrong header {reader.fieldnames!r}")
-        return list(reader)
+        rows = []
+        for row in reader:
+            if None in row or any(value is None for value in row.values()):
+                errors.append(f"{name}: line {reader.line_num}: wrong field count")
+            rows.append(row)
+        return rows
 
 
 def split(value):
