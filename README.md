@@ -1,11 +1,76 @@
 # cc-orchestra
 
-**사용자 요청을 설계·구현·독립 검증으로 나누고, 남은 quota와 리셋 시각에 맞춰 모델을 배정하는 4-tier multi-agent harness.**
+cc-orchestra는 코드 작업 요청을 작은 작업으로 나누고, 계획·구현·검증을 맡을
+Claude Code와 Codex CLI를 연결하는 도구다. 서버에서 여러 작업을 진행하며 결과를
+확인하려는 개발자를 위한 것이다. 처음이라면 [첫 사용 안내](GETTING-STARTED.ko.md)를
+따라 설치부터 첫 요청, 결과 확인, 재접속까지 진행하면 된다.
 
-Claude + Codex 혼합 모드와 Astra 기반 Codex 전용 모드를 지원하며, tmux·Git worktree·
-Claude Code Remote Control로 서버의 작업 세션을 유지한다. Claude 한도에 도달하면
-`cc-orch-codex`를 사용하고, 회복 후 관리 세션의 `session switch <name> --backend hybrid`로
-같은 작업을 인계할 수 있다. 아래 아키텍처와 routing·gate 설명은 혼합 모드 기준이다.
+기본 혼합 모드는 Claude Code가 작업을 조율하고 Codex CLI가 조사·구현·검증에 참여한다.
+Codex만 쓰는 모드도 있다. 모델 선택과 검증 규칙은 아래 운영 설명에 정리했다.
+
+## 처음 사용하는 순서
+
+### 필요한 것
+
+- [ ] Linux 서버 또는 PC, bash, Python 3, Git, tmux
+- [ ] 로그인한 Claude Code와 Codex CLI
+- [ ] Claude 구독 계정
+
+새 서버에서 준비한다면 [부트스트랩 가이드](BOOTSTRAP.ko.md)부터 읽는다.
+Codex CLI의 로그인도 확인한다. 자세한 준비와 확인 명령은
+[첫 사용 안내의 준비물](GETTING-STARTED.ko.md#2-준비물)에 있다.
+
+### 첫 실행
+
+1. 이 저장소를 설치하고 `./install.sh --check`로 확인한다.
+   아래 [설치 명령](#quick-start)을 따르거나 새 서버라면 부트스트랩을 사용한다.
+2. 작업할 프로젝트의 Git 폴더에서 관리 세션을 시작한다. 세션은 tmux가 유지하는
+   터미널 작업 공간이다. 아래 예시는 기존 폴더에서 작업한다.
+
+   ```bash
+   cc-orch session new main /path/to/project --project-name my-project --inplace
+   ```
+
+3. 열린 Claude Code에 요청을 평소 말로 입력한다. 예: “README에 설치 확인 문장 한 줄을
+   추가하고, 변경 내용을 확인해 줘.” 범위와 완료 조건을 함께 쓰면 좋다.
+4. 진행은 `cc-orch session status main`과 프로젝트의 `.orchestra/REGISTRY.md`에서 본다.
+   완료되면 최종 보고의 `STATUS`, 작업 디렉터리의 `summary.md`, 브랜치와 커밋을 확인한다.
+5. 터미널에서 `Ctrl-b` 다음 `d`를 눌러 세션을 남기고 빠져나온다.
+   `cc-orch session attach main`으로 다시 접속한다.
+
+각 단계와 실제 입력 위치는 [첫 사용 안내](GETTING-STARTED.ko.md)에 설명했다.
+
+### 자주 쓰는 명령
+
+| 목적 | 명령 |
+|---|---|
+| 설치 확인 | `./install.sh --check` |
+| 세션 목록·상태 | `cc-orch session list` · `cc-orch session status main` |
+| 다시 접속·정지·재시작 | `cc-orch session attach main` · `cc-orch session stop main` · `cc-orch session restart main` |
+| 작업 폴더 찾기 | `cc-orch session path main` |
+| 사용량·모델 배정 상태 | `orch-usage-report --days 1` · `orch-model-guard budget` · `orch-model-guard lanes` |
+
+### 막혔을 때
+
+| 증상 | 먼저 할 일 |
+|---|---|
+| 설치 확인이 실패함 | [부트스트랩 가이드의 설치 검증](BOOTSTRAP.ko.md#6-cc-orchestra-설치-검증)을 따라 누락 항목 확인 |
+| CLI 로그인이 필요함 | `claude auth status`와 `codex login status` 확인 |
+| 세션 화면에서 나왔음 | `cc-orch session list` 후 `cc-orch session attach main` |
+| 세션이 멈춰 있음 | `cc-orch session status main` 확인 후 `cc-orch session restart main` |
+| 작업 파일이 안 보임 | `cc-orch session path main`은 세션의 기준 폴더만 보여준다. lead 작업은 `<repo>/.orchestra/wt/lead-<slot>` 같은 별도 worktree와 `orch/<NN>-<slug>` 브랜치에 있을 수 있다. lead 최종 보고의 `BRANCH`·`WORKTREE`, `.orchestra/REGISTRY.md` 행, 작업의 `summary.md`를 확인 |
+
+더 자세한 해결 순서는 [첫 사용 안내의 막혔을 때](GETTING-STARTED.ko.md#9-막혔을-때)에 있다.
+
+### 먼저 알아둘 말
+
+**Tier**는 작업 단계, **lead**는 한 작업의 계획과 결과를 책임지는 담당자다.
+**brief**는 목표와 완료 조건을 적은 파일이고, **gate**는 완료 전 검증이다.
+**worktree**는 같은 Git 저장소를 별도 폴더에서 작업하는 방식이다.
+**quota routing**은 남은 모델 사용 한도에 맞춰 다음 호출을 배정하는 것이다.
+**tmux**는 접속이 끊겨도 서버에서 터미널을 유지한다.
+**Remote Control**은 다른 기기에서 같은 Claude Code 대화를 여는 기능이다.
+용어와 작업 위치는 [첫 사용 안내](GETTING-STARTED.ko.md#11-용어집과-다음-문서)에서 다시 설명한다.
 
 [운영 가이드](OPERATIONS.ko.md) · [Operations (English)](OPERATIONS.md) ·
 [저장소 수정 가이드](AGENTS.md) · [Codex 전용 모드](CODEX-ONLY.ko.md)
@@ -21,11 +86,25 @@ Claude Code Remote Control로 서버의 작업 세션을 유지한다. Claude �
 
 ```bash
 git clone https://github.com/janghunn/cc-orchestra.git ~/cc-orchestra
+```
+
+저장소가 비공개일 수 있다. HTTPS 복제가 인증 오류로 실패하면
+[부트스트랩 가이드 1절](BOOTSTRAP.ko.md#1-부트스트랩-전에-사람이-해야-하는-것)에 따라
+SSH 키를 GitHub에 등록하고 `git clone git@github.com:janghunn/cc-orchestra.git ~/cc-orchestra`로 받는다.
+
+```bash
 cd ~/cc-orchestra
 
 ./install.sh
 ./install.sh --check
 ```
+
+설치 명령은 기본적으로 `~/.local/bin`에 연결된다. `cc-orch: command not found`가 나오면
+`export PATH="$HOME/.local/bin:$PATH"`로 현재 셸의 PATH에 추가하고, 같은 설정을
+`~/.profile`과 `~/.bashrc`에도 저장한다. `./install.sh --bootstrap`은 `~/.local/bin`을
+두 파일에 자동으로 기록한다([부트스트랩 가이드 2절](BOOTSTRAP.ko.md#2-한-번에-부트스트랩)).
+부트스트랩을 실행한 현재 셸의 PATH는 자동으로 바뀌지 않으므로 `cc-orch`를 쓰기 전에 새 셸을 열거나
+`source ~/.profile`을 실행한다.
 
 Codex lane을 사용하려면 Codex CLI가 로그인되어 있어야 한다.
 
@@ -71,12 +150,17 @@ git status --short
   - Claude lead: Sonnet / Opus / Fable profile 선택
   - Codex: healthy 기본 Astra(폴백 Sol)와 effort를 호출마다 선택
   - 실행 중 agent는 강제로 바꾸지 않고 **다음 dispatch부터** 새 정책 적용
-- **시스템 프롬프트에 반영한 모델별 지침**: Opus 5.5 / Fable 5.1 / GPT-6 Astra-Sol의
+- **시스템 프롬프트에 반영한 모델별 지침**: Sonnet 5.5 / Opus 5.5 / Fable 5.1 / GPT-6 Astra-Sol의
   프롬프팅 지침(예: 이미 승인된 다음 단계는 재승인 질문 없이 실행)은
   [templates/lead.md.tpl](templates/lead.md.tpl)의 "Finishing the task",
   [agents/codex-lead.md](agents/codex-lead.md), [agents/codex-worker.md](agents/codex-worker.md)의
   lead/Codex 시스템 프롬프트에 직접 담고, Codex lane별 실행 지시는 [bin/codex-run](bin/codex-run)에 둔다.
   별도 팁 문서 대신 실제 실행 지시에 반영해 호출마다 자동으로 적용한다.
+- **Codex 모델 확인**: 혼합 모드의 자동 배정은 healthy에서 GPT-6 Astra를 우선하고,
+  계정/CLI 모델 목록에 없거나 필요한 effort·Fast mode를 지원하지 않으면 해당 lane의
+  기본 GPT-6 Sol로 폴백한다. 일반 Codex lane 기본값은 GPT-6 Sol, 빠른/기계적 작업은
+  GPT-6 Luna다. `terra`는 이전 GPT-5.6 모델을 가리키는 별칭이다. 명시적으로 고른
+  모델이 없어 exit 6이 나면 목록에 있는 다른 모델로 한 번 재시도한다.
 - **실험·평가 단계의 Jev 자문**: [orch-jev](OPERATIONS.ko.md#jev-자문-사이드카-선택-사항-hybrid-모드-전용)의
   `lint-brief`/`risk`/`scan`은 사용자·agent가 명시적으로 호출하는 선택적 자문으로, 작업 파일을 수정하거나
   gate·라우팅을 결정하지 않으며 판단은 사람과 agent가 내린다.
@@ -155,6 +239,7 @@ Tier 4  executable verify ──────────────────
 - 전체 운영 절차: [한국어](OPERATIONS.ko.md) · [English](OPERATIONS.md)
 - 저장소 자체 수정: [AGENTS.md](AGENTS.md) — self-hosting checkout, 정책 원본과 산출물 규칙
 - Codex 전용 실행과 혼합 모드 전환: [CODEX-ONLY.ko.md](CODEX-ONLY.ko.md)
+- 처음부터 따라 하기: [GETTING-STARTED.ko.md](GETTING-STARTED.ko.md)
 - 새 서버 설치: [BOOTSTRAP.ko.md](BOOTSTRAP.ko.md)
 - Quota 계산·데이터 출처·pressure 경계: [런타임 예산 모델](OPERATIONS.ko.md#런타임-예산-모델)
 - Claude/Codex 모델·effort 표와 gate parsing: [동적 라우팅](OPERATIONS.ko.md#동적-라우팅)
