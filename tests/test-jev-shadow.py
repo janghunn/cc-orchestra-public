@@ -627,6 +627,7 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
     def test_report_ranks_gpt6_luna_and_sol(self):
         self.assertEqual(jev.MODEL_RANK["gpt-6-luna"], 0)
         self.assertEqual(jev.MODEL_RANK["gpt-6-sol"], 1)
+        self.assertEqual(jev.MODEL_RANK["gpt-6.1-sol"], 1)
         base = self.invoke()
         self.write_policy(JEV_SHADOW_MAP_MECHANICAL="gpt-6-luna@medium",
                           JEV_SHADOW_MAP_ROUTINE="gpt-6-sol@high",
@@ -635,15 +636,16 @@ class InProcessShadowTests(ShadowFixture, unittest.TestCase):
                      final_model=model, final_effort=effort, attempts=1, codex_exit=0)
                 for tier, model, effort in (("mechanical", "gpt-6-sol", "medium"),
                                            ("routine", "gpt-5.6-sol", "high"),
+                                           ("routine", "gpt-6.1-sol", "high"),
                                            ("involved", "gpt-6-astra", "medium"))]
         self.log.write_text("".join(json.dumps(row) + "\n" for row in rows))
         out = self.report()
-        for line in ("records: 3  malformed: 0",
-                     "comparable (exact observation, suggestion and final pair known): 3",
+        for line in ("records: 4  malformed: 0",
+                     "comparable (exact observation, suggestion and final pair known): 4",
                      "  agreement (suggested == final): 0 (0.0%)",
-                     "  suggested lower than final:     2 (66.7%)",
+                     "  suggested lower than final:     2 (50.0%)",
                      "  suggested higher than final:    0 (0.0%)",
-                     "  unranked pair:                  1"):
+                     "  unranked pair:                  2"):
             self.assertIn(line, out.splitlines())
 
     def test_report_rejects_wrong_types_for_every_field(self):

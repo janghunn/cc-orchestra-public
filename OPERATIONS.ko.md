@@ -343,15 +343,15 @@ Legacy guard가 `active=opus[1m]`여도 runtime-managed normal Tier 1은
 
 | Mode | healthy | watch | tight | critical |
 |---|---|---|---|---|
-| `intake` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
-| `investigate` | Astra high (폴백 Sol high) | `gpt-6-sol` high | `gpt-6-sol` medium | **withheld** |
-| `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6-sol` high | `gpt-6-sol` high | **withheld** |
-| `review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
-| `plan-review` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` medium |
-| `verify` | Astra high (폴백 Sol high) | `gpt-6-sol` medium | `gpt-6-sol` medium | `gpt-6-sol` low |
+| `intake` | Astra high (폴백 Sol high) | `gpt-6.1-sol` medium | `gpt-6.1-sol` medium | `gpt-6.1-sol` low |
+| `investigate` | Astra high (폴백 Sol high) | `gpt-6.1-sol` high | `gpt-6.1-sol` medium | **withheld** |
+| `implement` | Astra xhigh (폴백 Sol xhigh) | `gpt-6.1-sol` high | `gpt-6.1-sol` high | **withheld** |
+| `review` | Astra high (폴백 Sol high) | `gpt-6.1-sol` medium | `gpt-6.1-sol` medium | `gpt-6.1-sol` medium |
+| `plan-review` | Astra high (폴백 Sol high) | `gpt-6.1-sol` medium | `gpt-6.1-sol` medium | `gpt-6.1-sol` medium |
+| `verify` | Astra high (폴백 Sol high) | `gpt-6.1-sol` medium | `gpt-6.1-sol` medium | `gpt-6.1-sol` low |
 
 전체 라우팅 표는 `budget-policy.conf`에 있습니다.
-자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반 기본값(`gpt-6-sol`)으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `CODEX-RUN: MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
+자동 라우팅된 healthy 호출은 `CODEX-RUN: MODEL_FALLBACK`을 출력하며, Astra를 사용할 수 없으면 해당 lane의 일반 기본값(`gpt-6.1-sol`)으로 폴백합니다. Astra를 명시적으로 요청하면 대신 `CODEX-RUN: MODEL_UNAVAILABLE`과 함께 종료 코드 6으로 종료합니다. `CC_ORCH_CODEX_CATALOG_CHECK=0`으로 설정하면 live/cached catalog 사전 확인을 비활성화할 수 있습니다.
 
 명시적으로 전달한 옵션은 자동 라우팅보다 항상 우선합니다.
 
@@ -362,10 +362,11 @@ codex-run ... --fast-mode
 codex-run ... --mech
 ```
 
-WATCH/TIGHT/CRITICAL 라우팅은 `gpt-6-sol`을 사용합니다.
-일반 기본값, healthy에서 Astra를 쓸 수 없을 때의 폴백, `--model sol`도 `gpt-6-sol`을 뜻합니다.
+WATCH/TIGHT/CRITICAL 라우팅은 `gpt-6.1-sol`을 사용합니다.
+일반 기본값, healthy에서 Astra를 쓸 수 없을 때의 폴백, `--model sol`도 `gpt-6.1-sol`을 뜻합니다.
 `--model luna`, `--mech`, `--fast`는 `gpt-6-luna`를 뜻합니다. `--model terra`는 여전히
-`gpt-5.6-terra`를 명시적으로 선택하며, GPT-6 Terra는 없습니다.
+`gpt-5.6-terra`를 명시적으로 선택하며, GPT-6 Terra는 없습니다. 기존 `gpt-6-sol`(GPT-6 Sol)은
+전체 slug로 계속 사용할 수 있고, 재개한 thread는 해당 모델을 유지합니다.
 전체 slug(예: `--model gpt-5.6-sol`)는 그대로 전달하며, resume은 thread에 기록된 모델을 유지합니다.
 Healthy의 Astra(`gpt-6-astra`) 가용성은 계정/CLI별 live catalog와
 `~/.codex/models_cache.json`으로 확인합니다.
@@ -380,7 +381,7 @@ Critical에서는 cross-family review와 실행
 
 `CODEX_ALWAYS_FAST_MODE=1`이므로 자동으로 선택된 지원 Astra/Sol/Terra 호출은 Fast mode를
 사용합니다. `--fast-mode`는 선택된 model/effort를 유지하고 해당 호출만 공식 Fast tier로
-실행합니다. `gpt-6-sol`(일반 기본값 / `sol`), `gpt-5.6-sol`, `gpt-6-astra`, `gpt-5.6-terra`는 wrapper의
+실행합니다. `gpt-6.1-sol`(일반 기본값 / `sol`), `gpt-6-sol`, `gpt-5.6-sol`, `gpt-6-astra`, `gpt-5.6-terra`는 wrapper의
 Fast-mode와 명시적 `--effort ultra` allowlist에 모두 포함됩니다.
 Luna(`gpt-6-luna`, `gpt-5.6-luna`)는 두 allowlist 모두에서 제외됩니다. 최대 effort는 `max`이며 Fast mode는 Luna용 옵션이 아닙니다.
 `ultra`는 자동 선택하지 않으며 사용자의 명시적 요청에 따라 `--effort ultra`로 지정합니다.

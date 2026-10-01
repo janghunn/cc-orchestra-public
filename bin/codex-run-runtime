@@ -23,9 +23,10 @@ MODE="${1:-}"
 ALWAYS_FAST="${CC_ORCH_ALWAYS_FAST_MODE:-${CODEX_ALWAYS_FAST_MODE:-0}}"
 
 fast_compatible_model() {
-  # sol now resolves to gpt-6-sol; luna and Luna slugs stay Fast-incompatible.
+  # sol now resolves to gpt-6.1-sol; gpt-6-sol stays accepted for explicit use and old threads;
+  # luna and Luna slugs stay Fast-incompatible.
   case "$1" in
-    sol|terra|astra|gpt-5.6-sol|gpt-6-sol|gpt-5.6-terra|gpt-6-astra) return 0 ;;
+    sol|terra|astra|gpt-5.6-sol|gpt-6-sol|gpt-6.1-sol|gpt-5.6-terra|gpt-6-astra) return 0 ;;
     *) return 1 ;;
   esac
 }

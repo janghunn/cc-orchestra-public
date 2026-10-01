@@ -537,7 +537,7 @@ SHADOW_PAIR = re.compile(r"^([a-z0-9.-]{1,64})@(low|medium|high|xhigh|max|ultra)
 CODEX_LOG_LINE = re.compile(
     r"^(\S+)  (\S+)\s+(\S+?)(?:\+fast-mode)?(?: \(fallback-from:(\S+)\))?  exit=(-?\d+)  (.*)$")
 EFFORT_RANK = {name: n for n, name in enumerate(("low", "medium", "high", "xhigh", "max", "ultra"))}
-MODEL_RANK = {"gpt-5.6-luna": 0, "gpt-6-luna": 0, "gpt-5.6-terra": 1, "gpt-5.6-sol": 1, "gpt-6-sol": 1, "gpt-6-astra": 2}
+MODEL_RANK = {"gpt-5.6-luna": 0, "gpt-6-luna": 0, "gpt-5.6-terra": 1, "gpt-5.6-sol": 1, "gpt-6-sol": 1, "gpt-6.1-sol": 1, "gpt-6-astra": 2}
 
 
 def map_difficulty(policy, difficulty, confidence):

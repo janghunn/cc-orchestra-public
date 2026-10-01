@@ -354,7 +354,7 @@ trusting this paragraph when they disagree.
   Fable@xhigh. The lead verifies Codex evidence and is the final design/plan/diff owner. When
   Fable reaches the guard threshold, every lead profile and new orchestrator falls back to Opus.
 - **Tier 3**: codex lanes gpt-6-astra @ xhigh (healthy default, Fast; auto-fallback
-  gpt-6-sol when the account lacks Astra) / luna @ medium via `bin/codex-run-runtime` are the
+  gpt-6.1-sol when the account lacks Astra) / luna @ medium via `bin/codex-run-runtime` are the
   **default** implementation lane; `dev-*` on Sonnet @ high handles fallback, large context,
   tight steering, GPU and codex-sparing exceptions, while `dev-opus-*` is fresh-eyes rescue — every
   Claude call drains the shared 5h session bucket, codex spends its own pool. The **lead**
