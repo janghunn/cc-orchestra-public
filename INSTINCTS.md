@@ -173,3 +173,13 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
   on the host can see it.
 - **Mitigation (task 34):** the wrapper probe now reads "absent" from a cache written by an older
   client than the harness CLI as unknown; Codex-only (`lib/orch_codex.py`) does not yet.
+
+### A model page can understate what the Codex catalog and API accept
+- **Observed:** OpenAI's gpt-6.1-sol page lists reasoning efforts low through max, no ultra;
+  `codex debug models` (codex-cli 0.159.3) lists ultra, and a live gpt-6.1-sol
+  `--effort ultra` call succeeded on 2026-10-01. Catalog default: low (gpt-6-sol: medium).
+- **Where:** `.orchestra/37-gpt61-sol-replace/plan.md`, Live availability evidence and
+  Post-implementation probes.
+- **Lesson:** decide ultra and Fast allowlists from the harness CLI catalog plus one minimal
+  live call per policy effort, not the public page; never rely on the catalog default effort,
+  which can change between Sol releases.

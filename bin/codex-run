@@ -13,8 +13,9 @@
 #
 # Why a wrapper instead of raw `codex exec` in agent prompts:
 #   - A model's catalog DEFAULT reasoning effort is often lower than the lane intends
-#     (gpt-5.6-sol and gpt-6.1-sol: "low"; other GPT-6 models: "medium", measured from the Codex catalog), so a forgotten
-#     -c model_reasoning_effort produces a shallow run. This wrapper passes an explicit policy effort.
+#     (gpt-5.6-sol and gpt-6.1-sol: "low"; other GPT-6 models: "medium", measured from
+#     the Codex catalog), so a forgotten -c model_reasoning_effort produces a shallow run.
+#     This wrapper passes an explicit policy effort.
 #   - Sandbox mode, timeouts, artifact paths and thread-id capture stay uniform across leads,
 #     which is what keeps the .orchestra artifacts comparable between tasks.
 #   - CC_ORCH_CODEX_ROUTE (set by codex-run-runtime only on auto-routed calls) enables the Astra
@@ -227,7 +228,7 @@ esac
 [ "$CRITICAL" = "1" ] && EFFORT="$CODEX_CRITICAL_EFFORT"
 
 # gpt-6.1-sol (sol alias, plain default), legacy gpt-6-sol, and gpt-5.6-sol are Sol-tier
-# for Fast mode and ultra (catalog-listed 2026-10-01; live probe pending).
+# for Fast mode and ultra (catalog-listed and live-probed 2026-10-01).
 # Luna of both generations is excluded: the 2026-09-29 catalog caps it at max, and Fast mode
 # is an Astra/Sol/Terra knob.
 if [ "$FAST_MODE" = "1" ]; then
