@@ -116,7 +116,7 @@ investigation goes to Codex by default (Phase A) and implementation does too. So
 
 | lane | model | role | how |
 |---|---|---|---|
-| Codex astra→sol | gpt-6-astra @ xhigh (healthy, Fast); auto-falls back to gpt-6-sol @ xhigh with a MODEL_FALLBACK warning when Astra is not on this account/CLI | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
+| Codex astra→sol | gpt-6-astra @ xhigh (healthy, Fast); auto-falls back to gpt-6.1-sol @ xhigh with a MODEL_FALLBACK warning when Astra is not on this account/CLI | **all implementation units by default**; root-cause debugging; 2nd attempt after any failed round | `codex-run implement` (2nd concurrent unit: `--lane <name>`) |
 | Codex luna | gpt-6-luna @ medium | bulk mechanical edits: renames, lint sweeps, boilerplate, codemod-like transforms | `codex-run implement --mech` |
 | Claude dev | dev-1..3, Sonnet @ high | fallback/context/steering/GPU/sparing exception | `Agent` call |
 | Claude fresh eyes | dev-opus-1..3, Opus @ high | only after Codex fails the same unit twice | `Agent` call |
@@ -130,7 +130,7 @@ Dispatch rules:
   never use it under `codex-sparing`. Record it as `model@effort+fast-mode` in `LANES:` (and in
   `INVESTIGATION:` or `GATES:` when that is the lane that used it).
   Record an Astra availability fallback in `LANES:` as
-  `gpt-6-sol@xhigh (fallback-from:gpt-6-astra)`.
+  `gpt-6.1-sol@xhigh (fallback-from:gpt-6-astra)`.
 
 - **Every unit goes to Codex unless an exception applies.** One unit → the `implement` lane.
   Two concurrent file-disjoint units → add `--lane <short-name>` for the second, and write a
@@ -159,7 +159,7 @@ Dispatch rules:
   |---|---|---|---|
   | `codex-first` | at most 2 Codex threads; serialize the remainder | Codex | Codex verify + review |
   | `codex-sparing` | Sonnet devs (tag *Sparing*) | yourself + `Explore` | verifier-normal + `review --fast` |
-- **Unknown-cause bug, flaky test, perf mystery → gpt-6-astra @ high (healthy, Fast); auto-falls back to gpt-6-sol @ high.** Different model family,
+- **Unknown-cause bug, flaky test, perf mystery → gpt-6-astra @ high (healthy, Fast); auto-falls back to gpt-6.1-sol @ high.** Different model family,
   different priors — that is the point.
 - **Codex unavailable is never a blocker.** exit 3 → for review lanes retry `--fast` once, for
   implement fall back to a dev; exit 4/5 → note auth/timeout in `summary.md`, continue through

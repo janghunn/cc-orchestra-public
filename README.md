@@ -243,7 +243,7 @@ Tier 4  executable verify ──────────────────
 - 새 서버 설치: [BOOTSTRAP.ko.md](BOOTSTRAP.ko.md)
 - Quota 계산·데이터 출처·pressure 경계: [런타임 예산 모델](OPERATIONS.ko.md#런타임-예산-모델)
 - Claude/Codex 모델·effort 표와 gate parsing: [동적 라우팅](OPERATIONS.ko.md#동적-라우팅)
-- WATCH `gpt-6-sol`, Fast mode와 명시적 `--effort ultra`: [Codex 모델과 effort](OPERATIONS.ko.md#codex-모델과-effort-선택) · [Fast mode](OPERATIONS.ko.md#fast-mode)
+- WATCH `gpt-6.1-sol`, Fast mode와 명시적 `--effort ultra`: [Codex 모델과 effort](OPERATIONS.ko.md#codex-모델과-effort-선택) · [Fast mode](OPERATIONS.ko.md#fast-mode)
 - Provider 선택: [provider 간 dispatch 결정](OPERATIONS.ko.md#provider-간-dispatch-결정)
 - tmux·worktree 명령과 Remote Control: [지속형 세션](OPERATIONS.ko.md#지속형-세션과-worktree)
 - 정책 변경 적용과 roster 재생성: [reload 규칙](OPERATIONS.ko.md#reload-없이-즉시-반영되는-항목)
