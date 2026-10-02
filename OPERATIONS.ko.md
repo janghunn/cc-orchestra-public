@@ -941,6 +941,7 @@ saves the returned block and runs orch-summary-check --strict <dir>`라는 안�
 
 Checker는 `CC_ORCH_SUMMARY_CHECK`의 실행 파일 경로, hook 자신의 저장소에 있는
 `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`, `PATH` 순서로 찾습니다.
+Checker와 마찬가지로 hook도 fenced block 밖의 `summary.md` STATUS 행을 읽습니다.
 Override는 운영 점검과 테스트에 사용할 수 있습니다. `--strict <task-dir>`로 실행하고
 해당 task의 `summary.md` STATUS 행도 읽으며 `[lead-x]` 접두사를 허용합니다. Exit 0이면
 transcript와 summary의 상태가 같을 때 조용히 허용하고, 다르거나 기록된 상태를 읽을 수

@@ -174,6 +174,22 @@ def recorded_status(task):
         summary = (task / "summary.md").read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return None
+    # Mirror orch-summary-check's strip_fences, including inline backtick spans.
+    unfenced = []
+    fence, fence_length = None, 0
+    for line in summary.split("\n"):
+        delimiter = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if delimiter:
+            run, rest = delimiter[1], line[delimiter.end():]
+            if fence is None and not (run[0] == "`" and "`" in rest):
+                fence, fence_length = run[0], len(run)
+                continue
+            if run[0] == fence and len(run) >= fence_length and not rest.strip():
+                fence = None
+                continue
+        if fence is None:
+            unfenced.append(line)
+    summary = "\n".join(unfenced)
     matches = re.findall(r"^(?:\[lead-[A-Za-z0-9_-]+\]\s*)?STATUS:\s*(PASS\b|FAIL\b|BLOCKED\b|ACCEPTED(?![A-Za-z0-9_-]))", summary, re.M)
     return matches[-1] if matches else None
 

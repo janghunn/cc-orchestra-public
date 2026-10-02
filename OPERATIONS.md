@@ -901,6 +901,7 @@ then the hook's own repository `bin/orch-summary-check`, `$HOME/.local/bin/orch-
 then `PATH`. It runs with `--strict <task-dir>` and reads the task's own `summary.md` STATUS
 line, accepting a `[lead-x]` prefix. Exit 0 allows silently when the transcript and recorded
 statuses agree; disagreement, including an unavailable recorded status, produces a warning.
+Like the checker, the hook reads the `summary.md` STATUS line outside fenced blocks.
 Exit 1 blocks a transcript claiming `PASS` or `ACCEPTED`, including when summary.md records `BLOCKED`
 or `FAIL`. The block includes the first 1,500 bytes of checker output, the exact rerun command,
 and the off-switch. A transcript claiming `BLOCKED` or `FAIL` is never blocked: a failing check

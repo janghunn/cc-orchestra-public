@@ -343,6 +343,13 @@ check allow 'authorised ACCEPTED and prefixed summary allow after strict check' 
 transcript "$CLAIM"
 check warn-mismatch 'PASS claim disagrees with accepted summary' yes route-lead-charlie-critical false cccccccc1234 "$ACCEPTED_TASK"
 [[ "$RUN_OUTPUT" == *'summary.md STATUS: ACCEPTED'* ]] || fail 'recorded ACCEPTED status was not read'
+cat >> "$ACCEPTED_TASK/summary.md" <<'SUMMARY'
+```
+STATUS: PASS
+```
+SUMMARY
+check warn-mismatch 'fenced PASS example cannot conceal accepted summary mismatch' yes route-lead-charlie-critical false cccccccc1234 "$ACCEPTED_TASK"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: ACCEPTED'* ]] || fail 'fenced PASS replaced recorded ACCEPTED status'
 transcript $'STATUS: ACCEPTED\nGATES: codex-verify PASS'
 registry '.orchestra/passing task'
 check warn-mismatch 'ACCEPTED claim disagrees with PASS summary' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
@@ -357,6 +364,15 @@ registry '.orchestra/passed-escalation'
 transcript $'STATUS: ACCEPTED\nGATES: codex-verify PASS'
 check warn-mismatch 'ACCEPTED-ish summary disagrees with ACCEPTED claim' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
 [[ "$RUN_OUTPUT" == *'summary.md STATUS: unknown'* ]] || fail 'ACCEPTED-ish was parsed as a terminal status'
+
+cat >> "$GOOD/summary.md" <<'SUMMARY'
+~~~
+STATUS: BLOCKED
+~~~
+SUMMARY
+registry '.orchestra/passing task'
+transcript "$CLAIM"
+check allow 'fenced BLOCKED example cannot override passing PASS summary' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
 
 registry
 transcript "$CLAIM"
