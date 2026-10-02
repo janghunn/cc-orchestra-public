@@ -1124,3 +1124,14 @@ bash tests/test-notice-runtime.sh
 These cover model-policy profiles, reset-aware pressure, Claude/Codex routing, Fast compatibility,
 provider reserves, normal Tier 1 Sonnet, stale-policy notice false positives, managed tmux/worktree
 lifecycle, status-line preservation, and runtime-hook JSON contracts.
+
+### Estimated Codex cost (orch-usage-report --cost)
+
+Run `orch-usage-report --days 7 --cost` for an estimate at published API rates, not an account debit.
+Calls consume ChatGPT-plan quota; dollar amounts are a relative-load proxy only.
+`pricing-policy.conf` records rates, effective date and source URL; override with `CC_ORCH_PRICING_POLICY`. It never affects routing.
+The Astra counterfactual re-prices the same observed tokens; Astra would use different token counts.
+Unpriced calls lack surviving token data; coverage counts calls with tokens and a valid rate over all calls in the window.
+Fast multipliers are unknown by default (Standard-rate estimates); per-request long-context surcharges are not applied.
+Attribution uses event-file mtimes and wrapper log order. Same-mode runs in one root with crossing intervals can be swapped when no other wrapper call starts between their completions.
+Copied or touched task directories can give event files newer mtimes and attribute their tokens to newer calls.

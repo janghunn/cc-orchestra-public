@@ -3,15 +3,24 @@
 set -euo pipefail
 
 DAYS=7
-if [[ "${1:-}" == "--days" ]]; then
-  [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo "usage: orch-usage-report [--days N]" >&2; exit 2; }
-  DAYS="$2"
-fi
+COST=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days)
+      [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo "usage: orch-usage-report [--days N] [--cost]" >&2; exit 2; }
+      DAYS="$2"
+      shift
+      ;;
+    --cost) COST=1 ;;
+  esac
+  shift
+done
 
 CLAUDE_ROOT="${CC_ORCH_CLAUDE_PROJECTS:-$HOME/.claude/projects}"
 CODEX_LOG="${CC_ORCH_CODEX_LOG:-$HOME/.claude/orchestra-state/codex.log}"
+PRICING_POLICY="${CC_ORCH_PRICING_POLICY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../pricing-policy.conf}"
 
-python3 - "$CLAUDE_ROOT" "$CODEX_LOG" "$DAYS" <<'PY'
+python3 - "$CLAUDE_ROOT" "$CODEX_LOG" "$DAYS" "$COST" "$PRICING_POLICY" <<'PY'
 import json, sys, time
 from collections import defaultdict
 from pathlib import Path
@@ -103,4 +112,238 @@ print("\nCodex wrapper runs")
 print("mode\tmodel@effort\truns")
 for (mode, spec), count in sorted(codex.items(), key=lambda x: x[1], reverse=True):
     print(f"{mode}\t{spec}\t{count}")
+
+if sys.argv[4] == "1":
+    import re
+    from datetime import datetime
+    from decimal import Decimal, ROUND_HALF_UP, localcontext
+
+    label = "estimate at published API rates, not an account debit"
+    policy_path = Path(sys.argv[5])
+
+    def warn(message):
+        print(f"orch-usage-report: warning: {message}", file=sys.stderr)
+
+    policy = {}
+    try:
+        policy_lines = policy_path.read_text(errors="replace").splitlines()
+    except OSError:
+        warn(f"pricing policy not readable: {policy_path}; all rates unknown")
+        policy_lines = []
+    for line in policy_lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        policy[key] = value
+
+    rates, multipliers, warned_models = {}, {}, set()
+    decimal_pattern = re.compile(r"\d+(\.\d+)?")
+    for key, value in policy.items():
+        if key.startswith("RATE_"):
+            model = key[len("RATE_"):]
+            fields = value.split("/")
+            if len(fields) == 3 and all(decimal_pattern.fullmatch(v) for v in fields):
+                rates[model] = tuple(Decimal(v) for v in fields)
+            else:
+                warn(f"pricing policy: malformed {key}; rate unknown for {model}")
+                warned_models.add(model)
+        elif key.startswith("FAST_MULTIPLIER_"):
+            model = key[len("FAST_MULTIPLIER_"):]
+            if not value:
+                continue
+            if decimal_pattern.fullmatch(value) and Decimal(value) > 0:
+                multipliers[model] = Decimal(value)
+            else:
+                warn(f"pricing policy: malformed {key}; Fast multiplier unknown for {model}")
+
+    def rate_for(model):
+        if model not in rates and model not in warned_models:
+            warn(f"pricing policy: rate unknown for {model}")
+            warned_models.add(model)
+        return rates.get(model)
+
+    cf_model = policy.get("PRICING_COUNTERFACTUAL_MODEL") or "gpt-6-astra"
+    cf_rate = rate_for(cf_model)
+
+    def root_of(workdir):
+        return workdir.split("/.orchestra/wt/", 1)[0]
+
+    detail_pattern = re.compile(r"^(\S+)\s+(\S+)\s+(\S+?)(?: \([^)]*\))?\s+exit=(-?\d+)\s+(.+?)\s*$")
+    calls, roots = [], set()
+    earlier_latest_start = float("-inf")
+    cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
+    log_lines = codex_log.read_text(errors="replace").splitlines() if codex_log.exists() else []
+    for line in log_lines:
+        parts = line.split()
+        in_window = len(parts) >= 3 and parts[0][:10] >= cutoff_day
+        call = {"in_window": in_window, "model": parts[2].split("@", 1)[0] if len(parts) >= 3 else "unknown",
+                "earlier_latest_start": earlier_latest_start, "usage": None}
+        # Even a line with malformed details can bound later calls' completion.
+        try:
+            start = datetime.fromisoformat(parts[0]).timestamp()
+        except (IndexError, ValueError, OverflowError, OSError):
+            start = None
+        match = detail_pattern.fullmatch(line)
+        if match and start is not None:
+            _stamp, mode, spec, _exit, workdir = match.groups()
+            fallback = re.search(r"\(fallback-from:([^)]*)\)", line[match.end(3):match.start(4)])
+            call.update(start=start, mode=mode, model=spec.split("@", 1)[0],
+                        fast="+fast-mode" in spec, workdir=workdir, root=root_of(workdir),
+                        fallback=fallback.group(1) if fallback else None)
+            if in_window:
+                roots.update((workdir, root_of(workdir)))
+        calls.append(call)
+        if start is not None:
+            earlier_latest_start = max(earlier_latest_start, start)
+
+    modes = {"intake", "investigate", "plan-review", "review", "verify", "implement", "resume"}
+    events = []
+    for root in sorted(roots):
+        for path in (Path(root) / ".orchestra").glob("*/codex-*.jsonl"):
+            tag = path.name[len("codex-"):-len(".jsonl")]
+            mode = tag if tag in modes else next((m for m in ("implement", "resume") if tag.startswith(m + "-")), None)
+            if mode is None:
+                continue
+            try:
+                if path.is_file():
+                    events.append((path.stat().st_mtime, str(path), root, mode))
+            except OSError:
+                continue
+
+    def token_usage(path):
+        total = [0, 0, 0]
+        completed = False
+        try:
+            with Path(path).open(errors="replace") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(event, dict) or event.get("type") != "turn.completed":
+                        continue
+                    usage = event.get("usage")
+                    if not isinstance(usage, dict):
+                        return None
+                    values = [usage.get(k) for k in ("input_tokens", "cached_input_tokens", "output_tokens")]
+                    if any(type(v) is not int or v < 0 for v in values) or values[1] > values[0]:
+                        return None
+                    total = [a + b for a, b in zip(total, values)]
+                    completed = True
+        except OSError:
+            return None
+        return tuple(total) if completed else None
+
+    claimed, ambiguous = set(), 0
+    for mtime, path, root, mode in sorted(events):
+        candidates = [i for i, call in enumerate(calls)
+                      if i not in claimed and "start" in call and call["mode"] == mode
+                      and (call["root"] == root or call["workdir"] == root)
+                      and call["start"] <= mtime and call["earlier_latest_start"] <= mtime + 2]
+        if not candidates:
+            continue
+        latest = max(calls[i]["start"] for i in candidates)
+        tied = [i for i in candidates if calls[i]["start"] == latest]
+        if len(tied) > 1:
+            if len(tied) == 2 and calls[tied[1]]["fallback"] == calls[tied[0]]["model"]:
+                chosen = tied[1]
+            else:
+                ambiguous += 1
+                continue
+        else:
+            chosen = tied[0]
+        # A failed/empty file still claims its call; another file must not reuse it.
+        claimed.add(chosen)
+        calls[chosen]["usage"] = token_usage(path)
+
+    window_calls = [call for call in calls if call["in_window"]]
+    rows = defaultdict(lambda: {"calls": 0, "fast_calls": 0, "tokens": [0, 0, 0],
+                                "observed": Decimal(0), "counterfactual": Decimal(0)})
+    unpriced, rate_unknown = defaultdict(int), defaultdict(int)
+    priced = fast_priced = 0
+    fast_known, fast_unknown = set(), set()
+    observed = counterfactual = Decimal(0)
+
+    def cost(tokens, rate, model, fast):
+        value = sum(Decimal(n) * r for n, r in zip(tokens, rate)) / Decimal(1000000)
+        return value * multipliers.get(model, Decimal(1)) if fast else value
+
+    def usd(value):
+        return str(value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+
+    # Retain exact arithmetic even when a local policy uses more precision than
+    # Decimal's default context, including through Fast multiplication and totals.
+    numbers = [v for rate in rates.values() for v in rate] + list(multipliers.values())
+    policy_digits = sum(len(v.as_tuple().digits) + abs(v.as_tuple().exponent) for v in numbers)
+    token_digits = max((Decimal(n).adjusted() + 1 for call in window_calls
+                        if call["usage"] is not None for n in call["usage"]), default=1)
+    with localcontext() as context:
+        context.prec = max(28, policy_digits + token_digits + len(str(len(calls))) + 16)
+        for call in window_calls:
+            model, usage = call["model"], call["usage"]
+            if usage is None:
+                unpriced[model] += 1
+                continue
+            tokens = (usage[0] - usage[1], usage[1], usage[2])
+            row = rows[model]
+            row["calls"] += 1
+            row["fast_calls"] += int(call["fast"])
+            row["tokens"] = [a + b for a, b in zip(row["tokens"], tokens)]
+            rate = rate_for(model)
+            if cf_rate is not None:
+                cf_value = cost(tokens, cf_rate, cf_model, call["fast"])
+                row["counterfactual"] += cf_value
+            if rate is None:
+                rate_unknown[model] += 1
+                continue
+            priced += 1
+            value = cost(tokens, rate, model, call["fast"])
+            row["observed"] += value
+            observed += value
+            if cf_rate is not None:
+                counterfactual += cf_value
+            if call["fast"]:
+                fast_priced += 1
+                (fast_known if model in multipliers else fast_unknown).add(model)
+
+        print(f"\nCodex estimated cost ({label})")
+        print("Codex calls here are billed against ChatGPT-plan quota, not per token: these dollar figures are a relative-load proxy only.")
+        print(f"pricing: {policy_path} (effective {policy.get('PRICING_EFFECTIVE_DATE') or 'unknown'}; source {policy.get('PRICING_SOURCE_URL') or 'unknown'}; Standard column, USD per 1M tokens)")
+        print(f"counterfactual: same observed tokens re-priced at {cf_model} rates (same-tokens assumption; {cf_model} would use different token counts)")
+        print(f"model\tcalls\tfast_calls\tinput_uncached\tinput_cached\toutput\test_usd\tall_{cf_model}_est_usd\tbasis")
+        for model, row in sorted(rows.items()):
+            observed_cell = usd(row["observed"]) if model in rates else "rate-unknown"
+            cf_cell = usd(row["counterfactual"]) if cf_rate is not None else "rate-unknown"
+            print("\t".join(map(str, (model, row["calls"], row["fast_calls"], *row["tokens"], observed_cell, cf_cell, label))))
+        unpriced_count = sum(unpriced.values())
+        print(f"unpriced\t{unpriced_count}\t-\t-\t-\t-\t-\t-\t-")
+        print(f"observed: ${usd(observed)} ({label})")
+        cf_total = f"${usd(counterfactual)}" if cf_rate is not None else "rate unknown"
+        difference = f"${usd(counterfactual - observed)}" if cf_rate is not None else "rate unknown"
+        print(f"all-{cf_model} counterfactual: {cf_total} ({label})")
+        print(f"difference (counterfactual - observed): {difference} ({label})")
+        percent = Decimal(priced) * 100 / len(window_calls) if window_calls else Decimal(0)
+        print(f"coverage: {priced}/{len(window_calls)} calls priced ({percent:.1f}%)")
+
+    def counts_text(counts):
+        return ", ".join(f"{model} {count}" for model, count in sorted(counts.items()))
+
+    if unpriced_count:
+        print(f"unpriced: {unpriced_count} call(s) without surviving token data ({counts_text(unpriced)})")
+    if rate_unknown:
+        print(f"rate unknown: {sum(rate_unknown.values())} call(s) with tokens but no valid rate ({counts_text(rate_unknown)})")
+    if ambiguous:
+        print(f"ambiguous: {ambiguous} event file(s) could not be attributed to a single call; their calls stay unpriced")
+    if fast_priced:
+        print(f"fast-mode: {fast_priced} priced call(s) ran in Fast mode")
+        if fast_unknown:
+            print(f"fast-mode observed: Standard-rate estimate, Fast multiplier unknown ({', '.join(sorted(fast_unknown))})")
+        if fast_known:
+            print(f"fast-mode observed: policy Fast multiplier applied ({', '.join(sorted(fast_known))})")
+        cf_basis = "policy Fast multiplier applied" if cf_model in multipliers else "Standard-rate estimate, Fast multiplier unknown"
+        print(f"fast-mode counterfactual: {cf_basis} ({cf_model})")
+    print("note: long-context surcharges are not applied (per-request prompt sizes are not recorded)")
 PY
