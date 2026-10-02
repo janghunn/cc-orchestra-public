@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import stat
 import subprocess
@@ -45,8 +46,8 @@ def put(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data if isinstance(data, bytes) else data.encode())
 
-def run(*args, code=0, env=None):
-    result = subprocess.run([str(command), *args], env=env, text=True, capture_output=True)
+def run(*args, code=0, env=None, preexec_fn=None):
+    result = subprocess.run([str(command), *args], env=env, preexec_fn=preexec_fn, text=True, capture_output=True)
     if result.returncode != code:
         print(result.stdout)
         print(result.stderr)
@@ -124,6 +125,8 @@ copy_task = task(p1, '09-copy', '## Status: BLOCKED (tooling policy conflict)\n'
 cleanup_container = p1 / '.orchestra/archive/20260101-cleanup-x'
 copy_root = cleanup_container / 'copy/.orchestra'
 shutil.copytree(copy_task, copy_root / '09-copy')
+numeric_container = p1 / '.orchestra/20261001-cleanup'
+overlapping_task = task(numeric_container / 'copy', '01-task', 'STATUS: PASS\n')
 put(p1 / '.orchestra/REGISTRY.md', '| task | dir | branch | status | owner | risk | date | note |\n'
     '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
     f'| 5 | .orchestra/05-dup | orch/05-dup | PASS | lead | normal | today | 한국어 원문 보존 [[missing-note]] {token} |\n')
@@ -170,7 +173,7 @@ for base, recorded in ((p1, 1767225600), (p2, 1767312000), (p3, 1767225600)):
 tree_before = listing(home)
 sources_before = source_hashes()
 report = json.loads(run('--json'))
-ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 9,
+ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 10,
    'default plan writes nothing and discovers nested, empty and Codex-only tasks')
 first = run('apply')
 generated_bytes = sum(p.stat().st_size for p in vault.rglob('*') if p.is_file() and '.git' not in p.relative_to(vault).parts)
@@ -180,10 +183,12 @@ ok(source_hashes() == sources_before and 'commit:' in first and report['vault_by
 vault_before, raw_before = hashes(vault, True), hashes(raw)
 mtimes_before = listing(vault, (vault / '.git',)), listing(raw)
 count_before = git_read('rev-list', '--count', 'HEAD')
+lock_inode = (raw / '.lock').stat().st_ino
 second = run('apply')
 ok(hashes(vault, True) == vault_before and hashes(raw) == raw_before and count_before == git_read('rev-list', '--count', 'HEAD')
    and mtimes_before == (listing(vault, (vault / '.git',)), listing(raw)) and '0 files written' in second and 'commit: none' in second,
    're-apply preserves bytes, mtimes and commit count')
+assert (raw / '.lock').stat().st_ino == lock_inode
 cat = catalog()
 dup = cat['tasks']['demo--05-dup']
 fields, body = archive.frontmatter((vault / 'tasks/demo--05-dup.md').read_text())
@@ -212,7 +217,7 @@ ok(len(dup['snapshots']) == 2 and len(dup['locations']) == 2 and 'status' in fie
    'compact sources/manifests, deepest session ownership, home project and conflicting snapshot provenance')
 copied = cat['tasks']['demo--09-copy']
 copy_fields, _ = archive.frontmatter((vault / 'tasks/demo--09-copy.md').read_text())
-assert archive.Discovery.task_dir(cleanup_container)
+assert not archive.Discovery.task_dir(cleanup_container)
 assert {location['path'] for location in copied['locations'].values()} == {
     str(copy_task), str(copy_root / '09-copy')}
 assert any(root['path'] == str(copy_root) and root['kind'] == 'nested' for root in report['roots'])
@@ -224,6 +229,40 @@ assert lowercase['status'] == 'unknown' and lowercase['status_mentions'] == []
 ok(len(copied['snapshots']) == 1 and len(copied['locations']) == 2 and copy_fields['status'] == 'blocked' and
    copied['fields']['status_mentions'][0]['line'] == '## Status: BLOCKED (tooling policy conflict)',
    'numeric cleanup containers reveal nested roots; identical copies dedupe and mixed-case STATUS labels keep uppercase values')
+overlapping = cat['tasks']['demo--01-task']
+overlapping_fields, _ = archive.frontmatter((vault / 'tasks/demo--01-task.md').read_text())
+assert 'demo--20261001-cleanup' not in cat['tasks']
+assert any(item['path'] == str(numeric_container) and item['reason'] == 'checkout container'
+           for item in report['skipped'])
+assert not list(archive.walk(numeric_container, skip_nested=True))
+task_walk_paths = [str(path.relative_to(overlapping_task)) for path in archive.walk(overlapping_task, skip_nested=True)]
+assert task_walk_paths == ['brief.md', 'plan.md', 'summary.md']
+capture_guard = archive.Guard(archive.load_policy())
+capture_probe = archive.Archive(archive.load_policy(), archive.Discovery(archive.load_policy(), capture_guard).run(), capture_guard)
+captured_paths = []
+archive._after_stat = lambda path: captured_paths.append(Path(path))
+first_capture = capture_probe.captured(overlapping_task / 'brief.md', keep=True)
+capture_probe.capture_cache[str((overlapping_task / 'brief.md').resolve())] = dict(first_capture, data=None, gzip=None)
+second_capture = capture_probe.captured(overlapping_task / 'brief.md', keep=True)
+archive._after_stat = lambda path: None
+assert first_capture is not second_capture and len(captured_paths) == 2
+assert second_capture['data'] == (overlapping_task / 'brief.md').read_bytes()
+archive._WRITE_BASES = {vault.resolve(), raw.resolve()}
+spool_probe = archive.Archive(archive.load_policy(), capture_probe.d, capture_guard, apply=True)
+first_spool = spool_probe.captured(overlapping_task / 'brief.md', keep=False)
+second_spool = spool_probe.captured(overlapping_task / 'brief.md', keep=True)
+try:
+    assert second_spool['data'] == second_capture['data']
+    assert gzip.decompress(first_spool['gzip'].path.read_bytes()) == second_capture['data']
+    assert gzip.decompress(second_spool['gzip'].path.read_bytes()) == second_capture['data']
+finally:
+    first_spool['gzip'].close()
+    second_spool['gzip'].close()
+overlapping_snapshot = next(iter(overlapping['snapshots']))
+overlapping_artifacts = vault / f'artifacts/tasks/demo--01-task/{overlapping_snapshot}'
+ok(overlapping_fields['status'] == 'pass' and all((overlapping_artifacts / name).read_bytes() ==
+   (overlapping_task / name).read_bytes() for name in ('brief.md', 'plan.md', 'summary.md')),
+   'numeric overlapping roots are containers; nested walks exclude them and stripped captures are refreshed')
 ok('한국어 원문 보존 [[missing-note]]' in body and '[[ -f x ]]' in body and 'verify: OK' in run('verify'),
    'Korean history and historical wikilinks are fenced; verify passes')
 running_fields, _ = archive.frontmatter((vault / 'tasks/demo--06-running.md').read_text())
@@ -288,7 +327,14 @@ else:
 ok(token in released_note and '[withheld:' in released_note and 'verify: OK' in run('verify') and
    all(other_token.encode() not in data for data in all_released_vault),
    'allow-listed conf value is released and verifies; a different secret stays withheld and backstop rejects it')
-put(home / 'allowlist.txt', f'sha256:{digest}\n')
+retained_conf = home / 'state/sessions/retained-release.conf'
+put(retained_conf, f'LAUNCH_NAME=retained-release\nPRIVATE={token}\n')
+run('apply')
+retained_conf.unlink()
+run('apply')
+ok(catalog()['sessions']['retained-release']['fields']['PRIVATE'] == token and
+   token in (vault / 'sessions/retained-release.md').read_text() and 'verify: OK' in run('verify'),
+   'allow-listed catalog metadata stays released after its source conf is deleted')
 ok('verify: OK' in run('verify') and run('show', '05-dup').startswith('---\n') and
    run('show', 'does-not-exist', code=1).strip() == 'show: unknown or ambiguous id', 'verify and show support known and unknown ids')
 
@@ -377,6 +423,40 @@ with (raw / '.lock').open('rb') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     run('apply', code=3)
 ok(True, 'apply returns lock-busy exit 3')
+
+# First-time contenders must share the holder's inode, regardless of its contents.
+fresh_store = home / 'fresh-lock-store'
+fresh_raw = fresh_store / 'raw'
+fresh_raw.mkdir(parents=True)
+fresh_lock = fresh_raw / '.lock'
+fresh_env = dict(os.environ, ORCH_ARCHIVE_RAW=str(fresh_raw), ORCH_ARCHIVE_VAULT=str(fresh_store / 'vault'))
+fresh_fd = os.open(fresh_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+try:
+    fcntl.flock(fresh_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(fresh_fd, b'held by regression test\n')
+    fresh_inode = os.fstat(fresh_fd).st_ino
+    run('apply', '--no-commit', code=3, env=fresh_env)
+    assert fresh_lock.stat().st_ino == fresh_inode
+finally:
+    os.close(fresh_fd)
+run('apply', '--no-commit', env=fresh_env)
+run('apply', '--no-commit', env=fresh_env)
+ok(fresh_lock.stat().st_ino == fresh_inode and fresh_lock.read_bytes() == b'held by regression test\n',
+   'first-time lock contenders return busy without replacement; lock inode stays stable across applies')
+shutil.rmtree(fresh_store)
+
+pressure_project = home / 'claude-projects/many-unlinked'
+for number in range(200):
+    put(pressure_project / f'{number:03}.jsonl', '{"cwd":"/not/cc-orch"}\n')
+def limit_descriptors():
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (64 if hard == resource.RLIM_INFINITY else min(64, hard), hard))
+pressure_report = json.loads(run('--json', preexec_fn=limit_descriptors))
+ok(pressure_report['transcripts']['unlinked_projects'] == report['transcripts']['unlinked_projects'] + 1 and
+   any(item['path'] == str(pressure_project) and item['reason'] == 'not linked to a cc-orch base'
+       for item in pressure_report['skipped']),
+   '200 unlinked transcripts under a 64-fd limit are reported without descriptor exhaustion')
+shutil.rmtree(pressure_project)
 
 for path in (vault / '.obsidian/graph.json', *vault.glob('dashboards/*.base')):
     json.loads(path.read_text())

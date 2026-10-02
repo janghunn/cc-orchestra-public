@@ -257,7 +257,9 @@ def capture(path, level=6, keep=False, opened=None, counting=False, raw_dir=None
         if raw_dir is None:
             compress_into(packed)
         else:
-            rel = ".capture-" + sha(str(path).encode())[:24] + "-" + str(os.getpid()) + ".gz"
+            # Re-captures may coexist with a previously returned PackedFile.
+            # Temporary names do not enter gzip headers or archive pointers.
+            rel = ".capture-" + sha(str(path).encode())[:24] + "-" + str(os.getpid()) + "-" + os.urandom(8).hex() + ".gz"
             _write_atomic(raw_dir, rel, compress_into)
             packed = PackedFile(Path(raw_dir) / rel)
     return {"stat": st, "length": st.st_size - remaining, "sha256": digest.hexdigest(),
@@ -407,6 +409,18 @@ class Guard:
             return [self.tree(v, owner, context) for v in value]
         return self.value(value, owner, context)
 
+    def seed_released(self, value):
+        """Restore explicit releases from retained catalog strings, including keys."""
+        if isinstance(value, dict):
+            for key, item in value.items():
+                self.seed_released(key)
+                self.seed_released(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.seed_released(item)
+        elif isinstance(value, str) and sha(value.encode()) in self.allow:
+            self.value(value)
+
     def file(self, data, owner, rel):
         text = data.decode("utf-8")
         return self.value(text, owner, rel, "artifact") != text
@@ -446,7 +460,7 @@ def entries(path):
         return []
 
 
-def walk(path, skipped=None):
+def walk(path, skipped=None, skip_nested=False):
     """Yield regular files, links and specials; never descend directory symlinks."""
     try:
         with os.scandir(path) as scan:
@@ -456,13 +470,13 @@ def walk(path, skipped=None):
             skipped.append({"path": str(path), "reason": "unreadable", "errno": error.errno})
         return
     for entry in children:
-        if entry.name in EXCLUDED:
+        if entry.name in EXCLUDED or (skip_nested and entry.name == ".orchestra" and entry.is_dir(follow_symlinks=False)):
             if skipped is not None:
                 skipped.append({"path": entry.path, "reason": "excluded dir"})
             continue
         try:
             if entry.is_dir(follow_symlinks=False):
-                yield from walk(entry.path, skipped)
+                yield from walk(entry.path, skipped, skip_nested=skip_nested)
             else:
                 yield Path(entry.path)
         except OSError:
@@ -649,8 +663,9 @@ class Discovery:
 
     @staticmethod
     def task_dir(path):
-        return bool(re.match(r"^\d+[-_]", path.name)) or any(
-            (path / name).is_file() and not (path / name).is_symlink() for name in ("brief.md", "summary.md", "plan.md"))
+        documents = any((path / name).is_file() and not (path / name).is_symlink()
+                        for name in ("brief.md", "summary.md", "plan.md"))
+        return documents or (bool(re.match(r"^\d+[-_]", path.name)) and not Discovery.container(path))
 
     def nested(self, directory, depth):
         if depth >= self.p["NESTED_ROOT_MAX_DEPTH"]:
@@ -663,7 +678,7 @@ class Discovery:
                 self.add_root(path, "nested")
                 self.nested(path, 0)
             # Numeric container names alone must not hide historical roots.
-            # Direct root children still use task_dir()'s broader definition.
+            # Direct root children use task_dir()'s task/container classification.
             elif not any((path / name).is_file() and not (path / name).is_symlink()
                          for name in ("brief.md", "summary.md", "plan.md")):
                 self.nested(path, depth + 1)
@@ -955,6 +970,7 @@ class Archive:
         existing = policy["VAULT_DIR"] / "_meta/catalog.json"
         if existing.exists():
             self.catalog = json.loads(existing.read_text())
+            self.guard.seed_released(self.catalog)
         self.previous_generated = list(self.catalog["generated"])
         self.skipped = Samples(top, guard)
         for item in discovery.skipped:
@@ -981,7 +997,7 @@ class Archive:
 
     def captured(self, path, keep):
         key = str(path.resolve())
-        if key not in self.capture_cache:
+        if key not in self.capture_cache or (keep and self.capture_cache[key]["data"] is None):
             self.capture_cache[key] = capture(path, self.p["GZIP_LEVEL"], keep, counting=not self.apply,
                                               raw_dir=self.raw.root if self.apply else None)
         return self.capture_cache[key]
@@ -992,7 +1008,7 @@ class Archive:
         # Neither pass retains Paths/dicts for the potentially millions of links.
         paths = sorted(paths) if paths is not None else None
         payload_total = 0
-        for path in paths if paths is not None else walk(base):
+        for path in paths if paths is not None else walk(base, skip_nested=True):
             try:
                 st = path.lstat()
                 if stat.S_ISREG(st.st_mode) and path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] and path.name != ".codex-session":
@@ -1002,7 +1018,7 @@ class Archive:
         texts, artifacts, archived = {}, {}, []
         counts, total, file_count = collections.Counter(), 0, 0
         identity, body = hashlib.sha256(), io.BytesIO()
-        for path in paths if paths is not None else walk(base, self.skipped):
+        for path in paths if paths is not None else walk(base, self.skipped, skip_nested=True):
             rel = str(path.relative_to(base))
             entry = {"relpath": rel}
             try:
@@ -1105,7 +1121,7 @@ class Archive:
                 project_record["roots"].append(safe_root)
             root_files, task_paths = [], []
             for entry in entries(root):
-                if entry.name in EXCLUDED:
+                if entry.name in EXCLUDED or (entry.name == ".orchestra" and entry.is_dir(follow_symlinks=False)):
                     self.skipped.append({"path": entry.path, "reason": "excluded dir"})
                     continue
                 path = Path(entry.path)
@@ -1115,7 +1131,7 @@ class Archive:
                     elif self.d.container(path):
                         self.skipped.append({"path": str(path), "reason": "checkout container", "bytes": byte_total(path)})
                     else:
-                        root_files.extend(walk(path, self.skipped))
+                        root_files.extend(walk(path, self.skipped, skip_nested=True))
                 else:
                     root_files.append(path)
             # A root's artifacts use the same dispositions, but no extra snapshot directory.
@@ -1237,14 +1253,10 @@ class Archive:
                             candidates.append(Path(sub.path))
             matched = next((base for base in bases if entry.name == encoded(base) or
                             (base != home and entry.name.startswith(encoded(base) + "--orchestra-"))), None)
-            pending = {}
             if matched is None:
                 for path in sorted(p for p in candidates if p.parent == directory):
-                    st = path.lstat()
-                    _after_stat(path)
-                    stream = open(path, "rb")
-                    initial = stream.read(min(st.st_size, 65536))
-                    pending[path] = (st, stream, initial)
+                    with open(path, "rb") as stream:
+                        initial = stream.read(65536)
                     cwd = None
                     for line in initial.splitlines():
                         try:
@@ -1260,27 +1272,20 @@ class Archive:
                     if matched:
                         break
             if matched is None:
-                for _, stream, _ in pending.values():
-                    stream.close()
                 self.transcripts["unlinked_projects"] += 1
                 size = byte_total(directory)
                 self.transcripts["unlinked_bytes"] += size
                 self.skipped.append({"path": str(directory), "reason": "not linked to a cc-orch base", "bytes": size})
                 continue
             owner = self.owner_for_base(matched)
-            try:
-                for path in sorted(candidates):
-                    opened = pending.get(path)
-                    pointers = self.raw.archive(path, "transcripts", opened=opened)
-                    self.add_raw(owner, pointers)
-                    size = sum(p["length"] for p in pointers)
-                    self.transcripts["files"] += 1
-                    self.transcripts["bytes"] += size
-                    if size > self.p["SIZE_REPORT_BYTES"]:
-                        self.large.append({"path": str(path), "bytes": size, "kind": "transcript"})
-            finally:
-                for _, stream, _ in pending.values():
-                    stream.close()
+            for path in sorted(candidates):
+                pointers = self.raw.archive(path, "transcripts")
+                self.add_raw(owner, pointers)
+                size = sum(p["length"] for p in pointers)
+                self.transcripts["files"] += 1
+                self.transcripts["bytes"] += size
+                if size > self.p["SIZE_REPORT_BYTES"]:
+                    self.large.append({"path": str(path), "bytes": size, "kind": "transcript"})
 
     def codex_rollouts(self):
         indexed = {}
@@ -1819,8 +1824,10 @@ def main(argv=None):
         lock_path = raw / ".lock"
         if lock_path.is_symlink():
             raise ArchiveError("raw lock is a symlink")
-        _write_atomic(raw, ".lock", b"")
-        with open(lock_path, "rb") as lock:
+        if not under(lock_path, raw):
+            raise ArchiveError("raw lock escapes store")
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(lock_fd, "r+b") as lock:
             os.fchmod(lock.fileno(), 0o600)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
