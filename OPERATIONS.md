@@ -1093,6 +1093,7 @@ Import preserves existing local files and catalog records. Shared model notes, t
 dashboards, graph configuration and catalog are regenerated only as supersets. Imported
 text is checked against the local allow-list; withheld text becomes placeholders or is
 omitted from copied artifacts, while original raw content remains in the raw store.
+Import refuses shared-page changes pinned by retained catalog, note or JSON pointers, and withholds artifact paths that the local policy flags as secret-shaped.
 `--dry-run --json` reports additions and collisions without creating directories, a lock or
 any files. `--top N` limits report samples; `--no-commit` suppresses the vault commit.
 An unchanged repeat writes no changed content and makes no commit. Host import order does

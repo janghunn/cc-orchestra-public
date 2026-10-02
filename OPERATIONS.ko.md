@@ -1137,7 +1137,9 @@ secret-shaped 바이트 문자열을 검사한다. 발견하면 thumbnail을 보
 기존 로컬 파일과 catalog 레코드는 유지한다. 모델 노트, index, dashboard, graph 설정과
 catalog 등 공유 페이지는 기존 내용을 포함하는 상위 집합으로만 다시 생성한다.
 가져온 텍스트는 로컬 allow-list로 다시 판단한다. 보류 텍스트는 placeholder로 바꾸거나
-artifact 복사를 생략하고, 원본 raw 내용은 raw 저장소에 유지한다. `--dry-run --json`은
+artifact 복사를 생략하고, 원본 raw 내용은 raw 저장소에 유지한다.
+기존 catalog·노트·JSON의 포인터가 고정한 공유 페이지를 바꾸는 import는 거부하며, 로컬 정책이 secret-shaped로 판단한 artifact 경로는 보류한다.
+`--dry-run --json`은
 디렉터리·잠금·파일을 만들지 않고 추가 항목과 충돌을 보고한다. `--top N`은 보고서의
 표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다. 변경 없는 재실행은 내용과
 commit을 추가하지 않는다. 호스트를 가져오는 순서가 달라도 vault/raw 바이트는 같다.

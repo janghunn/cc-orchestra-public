@@ -2923,6 +2923,12 @@ class Importer:
             parts, kind, record_kind, identifier, thumbnail = parsed
             new_owner = self.maps[record_kind][identifier]
             dest = "/".join(parts[:2] + [new_owner] + parts[3:])
+            artifact_paths = [dest] if thumbnail else ["/".join(parts[5:]), dest]
+            withheld_paths = [self.guard.value(value, new_owner, "import/artifact-path", "path") != value
+                              for value in artifact_paths]
+            if any(withheld_paths):
+                self.artifacts_withheld += 1
+                continue
             path = self.src_vault / rel
             try:
                 if not under(path, self.src_vault) or not stat.S_ISREG(path.lstat().st_mode):
@@ -3101,6 +3107,50 @@ class Importer:
                     self.check_merged_pointer(pointer, rel)
             except (OSError, *self.MALFORMED):
                 self.reject("merged-verify", f"{rel}: missing or invalid output")
+        self.validate_retained_pointers()
+
+    def validate_retained_pointers(self):
+        # Immutable local data must not pin bytes that this import replaces.
+        changed = {(self.vault / rel).resolve() for rel in self.changed_files}
+        if not changed:
+            return
+
+        def check(value, context):
+            for pointer in pointer_values(value):
+                if "blob" in pointer or not isinstance(pointer.get("path"), str):
+                    continue
+                try:
+                    target = (self.vault / pointer["path"]).resolve()
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                if target in changed:
+                    self.reject("merged-verify", f"{context}: retained pointer to changed file {pointer['path']}")
+
+        for kind in self.KINDS:
+            for identifier, record in self.union[kind].items():
+                if kind == "models" or record.get("host") != self.host:
+                    check(record, f"_meta/catalog.json: {kind}/{identifier}")
+        for host, record in self.union.get("hosts", {}).items():
+            if host != self.host:
+                check(record, f"_meta/catalog.json: hosts/{host}")
+        for key, value in self.union.items():
+            if key not in (*self.KINDS, "hosts"):
+                check(value, f"_meta/catalog.json: {key}")
+        for rel in sorted(set(self.local["generated"]) - set(self.files) - set(self.artifacts)):
+            note_file = rel.endswith(".md") and not rel.startswith("artifacts/")
+            json_file = rel == ".obsidian/graph.json" or re.fullmatch(
+                r"(?:dashboards/[^/]+\.base|artifacts/(?:tasks|sessions|projects)/[^/]+/raw\.json)", rel)
+            if not (note_file or json_file):
+                continue
+            try:
+                path = self.vault / rel
+                if not under(path, self.vault):
+                    raise ValueError("retained file escapes vault")
+                text = path.read_text()
+                value = frontmatter(text)[0] if note_file else json.loads(text)
+                check(value, rel)
+            except (OSError, *self.MALFORMED):
+                self.reject("merged-verify", f"{rel}: missing or invalid retained file")
 
     def counts(self):
         return {**{kind: len(self.incoming[kind]) if isinstance(self.incoming.get(kind), dict) else 0

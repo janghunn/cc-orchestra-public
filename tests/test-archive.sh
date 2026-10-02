@@ -2235,7 +2235,73 @@ if have_encoder:
 else:
     skip('secret-shaped thumbnail bytes')
 
-# 15: syntax checks keep caches in the fixture home.
+# Retained pointers must not pin shared pages that import is about to replace.
+for location in ('catalog', 'note', 'top-level', 'other-host', 'json'):
+    dest = 'retained-' + location
+    clone('original', dest)
+    if location == 'other-host':
+        imported(dest, 'cat')
+    receipt = {'path': './index.md', 'sha256': archive.sha((home / dest / 'vault/index.md').read_bytes())}
+    value = catalog(dest)
+    if location == 'note':
+        path = home / dest / 'vault/tasks/demo--01-shared.md'
+        fields, body = archive.frontmatter(path.read_text())
+        fields['receipt'] = receipt
+        put(path, archive.note(fields, body))
+    elif location == 'json':
+        rel = 'artifacts/projects/retained/raw.json'
+        put(home / dest / 'vault' / rel, archive.json_bytes({'receipt': receipt}))
+        value['generated'].append(rel)
+        save_catalog(dest, value)
+    else:
+        if location == 'top-level':
+            value['receipt'] = receipt
+        else:
+            owner = 'cat--demo' if location == 'other-host' else 'demo'
+            value['projects'][owner]['receipt'] = receipt
+        save_catalog(dest, value)
+    assert verified(dest) and verified('bee'), location
+    rejected(dest, 'bee', 'merged-verify')
+    rejected(dest, 'bee', 'merged-verify', 'bee', '--dry-run')
+    ok(True, f'retained {location} pointers to changed shared pages reject import and dry-run without writes')
+
+# Unchanged shared pages may still be referenced by retained records.
+clone('A', 'retained-unchanged')
+value = catalog('retained-unchanged')
+value['projects']['demo']['receipt'] = {
+    'path': 'index.md', 'sha256': archive.sha((home / 'retained-unchanged/vault/index.md').read_bytes())}
+save_catalog('retained-unchanged', value)
+assert verified('retained-unchanged')
+before = state('retained-unchanged', git=True)
+data = report(imported('retained-unchanged', 'bee', 'bee', '--no-commit'))
+ok(data['files']['changed_count'] == 0 and state('retained-unchanged', git=True) == before
+   and verified('retained-unchanged'), 'retained pointers to unchanged shared pages allow a no-op import')
+
+# Artifact filenames must be guarded even when a release exempts the compact catalog line.
+clone('bee', 'secret-artifact-path')
+rel = 'artifacts/roots/demo/000000000000/files/' + secret + '.md'
+put(home / 'secret-artifact-path/vault' / rel, b'benign\n')
+value = catalog('secret-artifact-path')
+value['generated'].append(rel)
+save_catalog('secret-artifact-path', value)
+assert verified('secret-artifact-path')
+for with_release in (True, False):
+    dest = 'artifact-path-' + ('released' if with_release else 'control')
+    clone('original', dest)
+    if with_release:
+        marker = 'AKIA' + 'PONMLKJIHGFEDCBA'
+        value = catalog(dest)
+        value['projects']['demo']['release_marker'] = marker
+        save_catalog(dest, value)
+        put(home / dest / 'allowlist', 'sha256:' + archive.sha(marker.encode()) + '\n')
+    assert verified(dest)
+    data = report(imported(dest, 'secret-artifact-path', 'bee', code=4))
+    assert data['withheld_count'] >= 1 and data['incoming']['artifacts_withheld'] >= 1
+    assert not data['rejected']['count'], data
+    assert all(secret.encode() not in path.read_bytes() for path in (home / dest / 'vault').rglob('*') if path.is_file())
+    ok(verified(dest), f'secret artifact paths are withheld with exit 4, no rejection or leak ({dest})')
+
+# Syntax checks keep caches in the fixture home.
 subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)
 subprocess.run(['python3', '-m', 'py_compile', str(command), str(repo / 'lib/orch_archive.py')], check=True,
                env=dict(os.environ, PYTHONPYCACHEPREFIX=str(home / 'compile-cache')))
