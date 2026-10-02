@@ -110,6 +110,40 @@ load_metrics() {
   : "${CLAUDE_WEEK_STATE:=unknown}" "${CLAUDE_WEEK_RANK:=-1}" "${CLAUDE_WEEK_RATIO:=?}" "${CLAUDE_WEEK_REMAIN:=?}" "${CLAUDE_WEEK_PROJECTED:=?}"
   : "${CLAUDE_STATE:=unknown}" "${CLAUDE_RANK:=-1}" "${CLAUDE_RATIO:=?}" "${CLAUDE_LIMITING:=none}"
   : "${CODEX_STATE:=unknown}" "${CODEX_RANK:=-1}" "${CODEX_RATIO:=?}" "${CODEX_REMAIN:=?}" "${CODEX_PROJECTED:=?}"
+  resolve_codex_pin
+}
+
+# Apply policy only to the effective routing tier; cached metrics keep the real pressure.
+resolve_codex_pin() {
+  CODEX_EFFECTIVE_STATE="$CODEX_STATE"; CODEX_EFFECTIVE_RANK="$CODEX_RANK"
+  CODEX_PIN_ACTIVE=0; CODEX_PIN_UNTIL_EPOCH=""; CODEX_PIN_NOTE=""
+  local pin="${CODEX_PRESSURE_PIN:-}" until="${CODEX_PRESSURE_PIN_UNTIL:-}" until_epoch=""
+  local absolute_date='^[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?$'
+  [ -n "$pin" ] || return 0
+  if [ "$pin" != healthy ]; then
+    CODEX_PIN_NOTE="ignored: CODEX_PRESSURE_PIN='$pin' is not supported (only 'healthy'); Codex routing stays dynamic"
+  elif [ -n "$until" ]; then
+    if [[ "$until" =~ ^[0-9]+$ ]]; then
+      until_epoch="$until"
+    elif [[ "$until" =~ $absolute_date ]]; then
+      until_epoch="$(date -d "$until" +%s 2>/dev/null)" || until_epoch=""
+    fi
+    if [ -z "$until_epoch" ]; then
+      CODEX_PIN_NOTE="ignored: CODEX_PRESSURE_PIN_UNTIL='$until' is not an epoch or date; Codex routing stays dynamic"
+    elif [ "$(now_epoch)" -ge "$until_epoch" ]; then
+      CODEX_PIN_NOTE="expired at $(human_reset "$until_epoch") (ignored); Codex routing is dynamic"
+      return 0
+    fi
+  fi
+  if [ -n "$CODEX_PIN_NOTE" ]; then
+    if [ "${CODEX_PIN_WARNED:-0}" != 1 ]; then
+      printf 'orch-model-guard: %s\n' "$CODEX_PIN_NOTE" >&2
+      CODEX_PIN_WARNED=1
+    fi
+    return 0
+  fi
+  CODEX_PIN_ACTIVE=1; CODEX_PIN_UNTIL_EPOCH="$until_epoch"
+  CODEX_EFFECTIVE_STATE=healthy; CODEX_EFFECTIVE_RANK=0
 }
 
 human_reset() {
@@ -127,6 +161,13 @@ human_duration() {
 
 compact_budget() {
   ensure_budget; load_metrics
+  if [ "$CODEX_PIN_ACTIVE" = 1 ]; then
+    printf 'claude=%s(5h:%s%%/%s,7d:%s%%/%s) codex=healthy(pinned; real=%s, 7d:%s%%/%s)' \
+      "$CLAUDE_STATE" "$(bget claude_five_pct || true)" "$(human_duration "$CLAUDE_FIVE_REMAIN")" \
+      "$(bget claude_week_pct || true)" "$(human_duration "$CLAUDE_WEEK_REMAIN")" \
+      "$CODEX_STATE" "$(bget codex_pct || true)" "$(human_duration "$CODEX_REMAIN")"
+    return
+  fi
   printf 'claude=%s(5h:%s%%/%s,7d:%s%%/%s) codex=%s(7d:%s%%/%s)' \
     "$CLAUDE_STATE" "$(bget claude_five_pct || true)" "$(human_duration "$CLAUDE_FIVE_REMAIN")" \
     "$(bget claude_week_pct || true)" "$(human_duration "$CLAUDE_WEEK_REMAIN")" \

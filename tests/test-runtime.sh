@@ -27,6 +27,8 @@ ok "runtime shell syntax"
 # Resolve inherited PLAN_REVIEW values and check both policy rows in pressure order.
 (
   source "$ROOT/budget-policy.conf"
+  assert_eq "$CODEX_PRESSURE_PIN" healthy "shipped Codex pressure pin"
+  assert_eq "$CODEX_PRESSURE_PIN_UNTIL" "" "shipped pin has no expiry"
   for review_mode in REVIEW PLAN_REVIEW; do
     previous_rank=6
     for pressure in HEALTHY WATCH TIGHT CRITICAL; do
@@ -56,6 +58,13 @@ cp "$ROOT/bin/cc-orch-runtime" "$ROOT/bin/cc-orch-session" "$ROOT/bin/orch-cli-u
    "$ROOT/bin/orch-model-guard-runtime" "$HARNESS/bin/"
 cp "$ROOT/hooks/orch-runtime-context.sh" "$ROOT/hooks/orch-statusline.sh" "$HARNESS/hooks/"
 cp "$ROOT/budget-policy.conf" "$ROOT/build-roster-runtime.sh" "$HARNESS/"
+# Existing fixtures must keep testing dynamic pressure even though the shipped pin is on.
+cp "$HARNESS/budget-policy.conf" "$HARNESS/budget-policy.conf.repo"
+set_codex_pin() {
+  cp "$HARNESS/budget-policy.conf.repo" "$HARNESS/budget-policy.conf"
+  printf '\nCODEX_PRESSURE_PIN=%q\nCODEX_PRESSURE_PIN_UNTIL=%q\n' "${1-}" "${2-}" >> "$HARNESS/budget-policy.conf"
+}
+set_codex_pin ""
 cp "$ROOT/lib/"*.sh "$HARNESS/lib/"
 chmod +x "$HARNESS/build-roster-runtime.sh" "$HARNESS/bin/"* "$HARNESS/hooks/"*
 mkdir -p "$HARNESS/templates"
@@ -334,6 +343,145 @@ args_out="$(cat "$TMP/codex-args")"
 assert_not_has "$args_out" "--fast-mode" "healthy mechanical path has no Fast mode"
 assert_not_has "$args_out" "gpt-6-astra" "healthy mechanical path has no Astra"
 ok "healthy Codex Astra routing and explicit marker isolation"
+
+# Independent cache and rollout fixtures keep the earlier pressure clocks untouched.
+PIN_STATE="$TMP/pin-state"; PIN_CODEX="$TMP/pin-codex"
+PIN_NOW=$((NOW3+120))
+mkdir -p "$PIN_STATE" "$PIN_CODEX/sessions/$DAY"
+pin_guard() {
+  HOME="$TMP/home" CC_ORCH_STATE_DIR="$PIN_STATE" CC_ORCH_NOW_EPOCH="$PIN_NOW" \
+    CODEX_HOME="$PIN_CODEX" "$HARNESS/bin/orch-model-guard-runtime" "$@"
+}
+# As in the original Codex fixture, Claude is healthy because its high usage resets soon.
+printf '%s' "$claude_json" | pin_guard ingest-claude
+for real_state in watch tight critical; do
+  case "$real_state" in watch) pct=70 ;; tight) pct=90 ;; critical) pct=95 ;; esac
+  cat > "$PIN_CODEX/sessions/$DAY/rollout-pin.jsonl" <<EOF2
+{"event":{"rate_limits":{"primary":{"used_percent":$pct,"window_minutes":10080,"resets_at":$((NOW+518400))}}}}
+EOF2
+  touch -d "@$PIN_NOW" "$PIN_CODEX/sessions/$DAY/rollout-pin.jsonl"
+  set_codex_pin healthy
+  for mode in implement investigate intake review plan-review verify; do
+    route="$(pin_guard route codex "$mode")"
+    if [ "$mode" = implement ]; then effort=xhigh; else effort=high; fi
+    assert_eq "$(route_field "$route" model)" gpt-6-astra "pinned $real_state $mode model"
+    assert_eq "$(route_field "$route" effort)" "$effort" "pinned $real_state $mode effort"
+    assert_eq "$(route_field "$route" allow)" 1 "pinned $real_state $mode available"
+    assert_eq "$(route_field "$route" pressure)" healthy "pinned pressure stays a bare tier"
+    assert_has "$(route_field "$route" reason)" pinned "pinned $real_state $mode reason"
+    assert_has "$(route_field "$route" reason)" "real=$real_state" "real $mode pressure visible"
+  done
+  assert_eq "$(sed -n 's/^codex_state=//p' "$PIN_STATE/budget-state")" "$real_state" "recorded real pressure"
+  compact="$(pin_guard budget --compact)"
+  assert_has "$compact" "codex=healthy(pinned; real=$real_state, 7d:$pct%/" "compact pin marker"
+  assert_eq "$(printf '%s\n' "$compact" | wc -l)" 1 "compact stays one line"
+  budget="$(pin_guard budget)"
+  header="$(printf '%s\n' "$budget" | sed -n '/^codex   /p')"
+  assert_has "$header" pinned "Codex budget header pin marker"
+  assert_has "$header" "real=$real_state" "Codex budget header real pressure"
+  lanes="$(pin_guard lanes)"
+  assert_eq "$(printf '%s\n' "$lanes" | head -1)" dispatch=codex-first "pinned dispatch first line"
+  assert_has "$lanes" "pressure=healthy(pinned; real=$real_state)" "lanes real pressure"
+  assert_has "$(printf '%s\n' "$lanes" | sed -n '/^reason:/p')" pinned "lanes pin reason"
+
+  if [ "$real_state" = watch ]; then
+    context="$(printf '{"prompt_id":"pin-test"}' | HOME="$TMP/home" CC_ORCH_STATE_DIR="$PIN_STATE" \
+      CC_ORCH_NOW_EPOCH="$PIN_NOW" CODEX_HOME="$PIN_CODEX" CC_ORCH_PROJECT=demo \
+      "$HARNESS/hooks/orch-runtime-context.sh")"
+    printf '%s' "$context" | python3 -c '
+import json, sys
+context = json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]
+assert "\n" not in context
+assert "codex=healthy(pinned; real=watch," in context
+'
+  fi
+  if [ "$real_state" = critical ]; then
+    pinned_lead="$(pin_guard route lead normal)"
+    TEST_ARGS="$TMP/pin-codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$PIN_STATE" \
+      CC_ORCH_NOW_EPOCH="$PIN_NOW" CODEX_HOME="$PIN_CODEX" \
+      "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --model sol --effort low --dry-run
+    assert_has "$(cat "$TMP/pin-codex-args")" "--model sol --effort low" "explicit flags beat critical pin"
+  fi
+
+  set_codex_pin ""
+  for mode in implement investigate intake review plan-review verify; do
+    route="$(pin_guard route codex "$mode")"
+    expected="$(
+      source "$ROOT/budget-policy.conf"
+      upper_mode="${mode^^}"; upper_mode="${upper_mode//-/_}"
+      prefix="CODEX_AUTO_${upper_mode}_${real_state^^}"
+      model_var="${prefix}_MODEL"; effort_var="${prefix}_EFFORT"; allow_var="${prefix}_ALLOW"
+      printf '%s|%s|%s' "${!model_var}" "${!effort_var}" "${!allow_var:-1}"
+    )"
+    assert_eq "$(route_field "$route" model)|$(route_field "$route" effort)|$(route_field "$route" allow)" \
+      "$expected" "empty pin dynamic $real_state $mode row"
+    assert_eq "$(route_field "$route" pressure)" "$real_state" "empty pin real pressure"
+    assert_not_has "$route" pinned "empty pin route marker absent"
+  done
+  if [ "$real_state" = critical ]; then
+    assert_eq "$(pin_guard route lead normal)" "$pinned_lead" "Claude route unaffected by Codex pin"
+    assert_eq "$(pin_guard lanes | sed -n '1p')" dispatch=codex-sparing "empty pin restores reserve"
+  fi
+  # Compare files so every output byte, including trailing newlines, is checked.
+  pin_guard route codex implement > "$TMP/pin-empty-route"
+  pin_guard lanes > "$TMP/pin-empty-lanes"
+  pin_guard budget > "$TMP/pin-empty-budget"
+  pin_guard budget --compact > "$TMP/pin-empty-compact"
+  for output in route lanes budget compact; do
+    assert_not_has "$(cat "$TMP/pin-empty-$output")" pinned "empty pin $output marker absent"
+  done
+  grep -v '^CODEX_PRESSURE_PIN' "$HARNESS/budget-policy.conf.repo" > "$HARNESS/budget-policy.conf"
+  pin_guard route codex implement > "$TMP/pin-unset-route"
+  pin_guard lanes > "$TMP/pin-unset-lanes"
+  pin_guard budget > "$TMP/pin-unset-budget"
+  pin_guard budget --compact > "$TMP/pin-unset-compact"
+  for output in route lanes budget compact; do
+    cmp "$TMP/pin-empty-$output" "$TMP/pin-unset-$output" || fail "empty != unset ($real_state $output)"
+  done
+  PIN_NOW=$((PIN_NOW+120))
+done
+
+# Invalid and expired pins leave the critical reserve in force.
+for invalid_pin in watch HEALTHY ' healthy'; do
+  set_codex_pin "$invalid_pin"
+  route="$(pin_guard route codex implement 2> "$TMP/pin-stderr")"
+  assert_eq "$(route_field "$route" allow)" 0 "invalid pin restores dynamic route"
+  assert_has "$(cat "$TMP/pin-stderr")" CODEX_PRESSURE_PIN "invalid pin warning"
+  assert_not_has "$route" pinned "invalid pin stdout stays dynamic"
+  assert_eq "$(pin_guard lanes 2>/dev/null | sed -n '1p')" dispatch=codex-sparing "invalid pin dispatch"
+  budget="$(pin_guard budget 2> "$TMP/pin-stderr")"
+  assert_has "$budget" "  pin   ignored:" "invalid pin full budget note"
+  assert_eq "$(wc -l < "$TMP/pin-stderr")" 1 "invalid pin warns once despite two metric loads"
+done
+for invalid_until in not-a-date tomorrow '2026-02-30'; do
+  set_codex_pin healthy "$invalid_until"
+  route="$(pin_guard route codex implement 2> "$TMP/pin-stderr")"
+  assert_eq "$(route_field "$route" allow)" 0 "invalid expiry restores dynamic route"
+  assert_has "$(cat "$TMP/pin-stderr")" CODEX_PRESSURE_PIN_UNTIL "invalid expiry warning"
+  assert_not_has "$route" pinned "invalid expiry stdout stays dynamic"
+  assert_eq "$(pin_guard lanes 2>/dev/null | sed -n '1p')" dispatch=codex-sparing "invalid expiry dispatch"
+done
+for expired_until in "$((PIN_NOW-1))" "$(date -u -d "@$((PIN_NOW-86400))" '+%Y-%m-%d %H:%M')" "$PIN_NOW"; do
+  set_codex_pin healthy "$expired_until"
+  route="$(TZ=UTC pin_guard route codex implement 2> "$TMP/pin-stderr")"
+  assert_eq "$(route_field "$route" allow)" 0 "expired pin restores dynamic route"
+  assert_eq "$(cat "$TMP/pin-stderr")" "" "expired pin is silent on stderr"
+  assert_not_has "$route" pinned "expired pin stdout stays dynamic"
+  assert_eq "$(TZ=UTC pin_guard lanes | sed -n '1p')" dispatch=codex-sparing "expired pin dispatch"
+  assert_has "$(TZ=UTC pin_guard budget)" expired "expired pin budget note"
+done
+for future_until in "$((PIN_NOW+86400))" "$(date -u -d "@$((PIN_NOW+86400))" '+%Y-%m-%dT%H:%M:%S')"; do
+  set_codex_pin healthy "$future_until"
+  route="$(TZ=UTC pin_guard route codex implement)"
+  assert_eq "$(route_field "$route" model)" gpt-6-astra "future expiry stays pinned"
+  assert_eq "$(route_field "$route" effort)" xhigh "future pin healthy effort"
+  assert_eq "$(route_field "$route" allow)" 1 "future pin allows implementation"
+  assert_eq "$(route_field "$route" pressure)" healthy "future pin pressure"
+  assert_has "$route" pin-until= "route pin expiry visible"
+  assert_has "$(TZ=UTC pin_guard budget | sed -n '/^codex   /p')" '; until ' "budget pin expiry visible"
+done
+set_codex_pin ""
+ok "Codex pressure pin preserves real metrics, visibility, expiry and explicit overrides"
 
 cat > "$HARNESS/bin/cc-orch" <<'CORE'
 #!/usr/bin/env bash

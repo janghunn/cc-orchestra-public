@@ -411,6 +411,17 @@ boundary (`BUDGET_CODEX_SPARING_MIN_RANK=3`) when Codex is more constrained than
 If both are critical, `BUDGET_PROVIDER_SWITCH_MARGIN` compares their headroom. Claude critical
 with Codex below critical stays `codex-first`. Sparing preserves Codex review/verify quota.
 
+### Codex pressure pin
+
+`budget-policy.conf` ships with `CODEX_PRESSURE_PIN="healthy"` and `CODEX_PRESSURE_PIN_UNTIL=""` (no expiry).
+This selects the healthy Codex rows (Astra, Fast on) and keeps dispatch `codex-first` regardless of Codex pressure; Claude routing is unchanged.
+The hook/compact status shows `codex=healthy(pinned; real=watch, …)`; `budget`, `lanes` and the `route codex` reason also mark the pin and real state, which remains recorded in `budget-state`.
+Only `healthy` is accepted: invalid values warn on stderr and leave routing dynamic.
+`CODEX_PRESSURE_PIN_UNTIL` accepts epoch seconds or an absolute local `YYYY-MM-DD[ HH:MM[:SS]]` date/time; at or after expiry the pin is ignored. Invalid or relative dates warn and leave routing dynamic.
+Explicit `--model`, `--effort`, `--critical` and `--fast` flags still win.
+The review/verify reserve is gone while pinned; exhausted quota fails at the provider with existing exit-code handling. Missing Astra falls back per `model-policy.conf`.
+No `cc-orch --reload` is needed: the policy is read per invocation and excluded from the policy revision. Set `CODEX_PRESSURE_PIN=""` to restore dynamic routing.
+
 ## Jev advisory sidecar (optional, hybrid mode only)
 
 `orch-jev` adds a third-model advisory signal from TypeSafe AI's Jev. Invoke it explicitly;

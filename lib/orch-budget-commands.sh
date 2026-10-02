@@ -91,7 +91,7 @@ cmd_route() {
       ;;
     codex)
       case "$arg" in implement|investigate|intake|review|plan-review|verify) ;; *) echo "usage: orch-model-guard route codex <mode>" >&2; return 2 ;; esac
-      state="$CODEX_STATE"; [ "$state" = unknown ] && state=healthy
+      state="$CODEX_EFFECTIVE_STATE"; [ "$state" = unknown ] && state=healthy
       values="$(codex_route_values "$arg" "$state")" || return 2
       IFS='|' read -r model effort allow <<< "$values"
       echo "kind=codex"
@@ -99,8 +99,16 @@ cmd_route() {
       echo "model=$model"
       echo "effort=$effort"
       echo "allow=$allow"
-      echo "pressure=$CODEX_STATE"
-      echo "reason=Codex weekly headroom ratio=${CODEX_RATIO}; reset=$(human_reset "$(bget codex_resets_at)")"
+      if [ "$CODEX_PIN_ACTIVE" = 1 ]; then
+        echo "pressure=healthy"
+        printf 'reason=Codex pressure pinned to healthy by CODEX_PRESSURE_PIN (real=%s); weekly headroom ratio=%s; reset=%s' \
+          "$CODEX_STATE" "$CODEX_RATIO" "$(human_reset "$(bget codex_resets_at)")"
+        if [ -n "$CODEX_PIN_UNTIL_EPOCH" ]; then printf ' pin-until=%s' "$(human_reset "$CODEX_PIN_UNTIL_EPOCH")"; fi
+        echo
+      else
+        echo "pressure=$CODEX_STATE"
+        echo "reason=Codex weekly headroom ratio=${CODEX_RATIO}; reset=$(human_reset "$(bget codex_resets_at)")"
+      fi
       ;;
     *) echo "usage: orch-model-guard route <lead|orchestrator|codex> ..." >&2; return 2 ;;
   esac
@@ -111,10 +119,10 @@ cmd_lanes() {
   local hint=codex-first why="Codex owns heavy work; Claude already pays for orchestration"
   local c_ratio="$CLAUDE_RATIO" x_ratio="$CODEX_RATIO"
   local sparing_rank="${BUDGET_CODEX_SPARING_MIN_RANK:-3}"
-  if [ "$CODEX_RANK" -ge "$sparing_rank" ] && [ "$CODEX_RANK" -gt "$CLAUDE_RANK" ]; then
+  if [ "$CODEX_EFFECTIVE_RANK" -ge "$sparing_rank" ] && [ "$CODEX_EFFECTIVE_RANK" -gt "$CLAUDE_RANK" ]; then
     hint=codex-sparing
     why="Codex pressure ($CODEX_STATE) reached the provider reserve boundary; reserve it for gates"
-  elif [ "$CODEX_RANK" -ge "$sparing_rank" ] && [ "$CODEX_RANK" -eq "$CLAUDE_RANK" ] && \
+  elif [ "$CODEX_EFFECTIVE_RANK" -ge "$sparing_rank" ] && [ "$CODEX_EFFECTIVE_RANK" -eq "$CLAUDE_RANK" ] && \
        is_numeric "$x_ratio" && is_numeric "$c_ratio"; then
     if awk -v x="$x_ratio" -v c="$c_ratio" -v m="$BUDGET_PROVIDER_SWITCH_MARGIN" \
        'BEGIN { exit !(x + m < c) }'; then
@@ -122,13 +130,18 @@ cmd_lanes() {
       why="Codex has materially less reset-time headroom than Claude at the reserve boundary"
     fi
   fi
-  if [ "$CLAUDE_RANK" -ge 3 ] && [ "$CODEX_RANK" -lt 3 ]; then
+  if [ "$CLAUDE_RANK" -ge 3 ] && [ "$CODEX_EFFECTIVE_RANK" -lt 3 ]; then
     hint=codex-first
     why="Claude is critical; spend the separate Codex pool"
   fi
   echo "dispatch=$hint"
   echo "claude: pressure=$CLAUDE_STATE limiting=$CLAUDE_LIMITING 5h=$(bget claude_five_pct)% reset=$(human_reset "$(bget claude_five_resets_at)") 7d=$(bget claude_week_pct)% reset=$(human_reset "$(bget claude_week_resets_at)")"
-  echo "codex:  pressure=$CODEX_STATE 7d=$(bget codex_pct)% reset=$(human_reset "$(bget codex_resets_at)")"
+  if [ "$CODEX_PIN_ACTIVE" = 1 ]; then
+    echo "codex:  pressure=healthy(pinned; real=$CODEX_STATE) 7d=$(bget codex_pct)% reset=$(human_reset "$(bget codex_resets_at)")"
+    why+="; Codex pressure pinned to healthy by CODEX_PRESSURE_PIN (real=$CODEX_STATE), so Codex pressure cannot trigger codex-sparing"
+  else
+    echo "codex:  pressure=$CODEX_STATE 7d=$(bget codex_pct)% reset=$(human_reset "$(bget codex_resets_at)")"
+  fi
   echo "reason: $why; codex-run auto-selects model/effort per invocation"
 }
 
@@ -139,8 +152,15 @@ cmd_budget() {
   echo "claude  $CLAUDE_STATE (limiting: $CLAUDE_LIMITING)"
   echo "  5h    used=$(bget claude_five_pct)% headroom=${CLAUDE_FIVE_RATIO} reset=$(human_reset "$(bget claude_five_resets_at)") in $(human_duration "$CLAUDE_FIVE_REMAIN") source=$(bget claude_source)"
   echo "  7d    used=$(bget claude_week_pct)% headroom=${CLAUDE_WEEK_RATIO} reset=$(human_reset "$(bget claude_week_resets_at)") in $(human_duration "$CLAUDE_WEEK_REMAIN")"
-  echo "codex   $CODEX_STATE"
+  if [ "$CODEX_PIN_ACTIVE" = 1 ]; then
+    printf 'codex   healthy (pinned by CODEX_PRESSURE_PIN; real=%s' "$CODEX_STATE"
+    if [ -n "$CODEX_PIN_UNTIL_EPOCH" ]; then printf '; until %s' "$(human_reset "$CODEX_PIN_UNTIL_EPOCH")"; fi
+    echo ')'
+  else
+    echo "codex   $CODEX_STATE"
+  fi
   echo "  7d    used=$(bget codex_pct)% headroom=${CODEX_RATIO} reset=$(human_reset "$(bget codex_resets_at)") in $(human_duration "$CODEX_REMAIN") source=$(bget codex_source)"
+  if [ "$CODEX_PIN_ACTIVE" != 1 ] && [ -n "$CODEX_PIN_NOTE" ]; then echo "  pin   $CODEX_PIN_NOTE"; fi
   echo
   cmd_lanes
 }
