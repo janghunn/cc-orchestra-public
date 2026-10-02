@@ -232,7 +232,9 @@ def recognised(hook, basename):
     if not isinstance(hook, dict) or not isinstance(hook.get('command'), str):
         return False
     try:
-        tokens = shlex.split(hook['command'])
+        lex = shlex.shlex(hook['command'], posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
     except ValueError:
         return False
     return any(token == 'hooks/' + basename or token.endswith('/hooks/' + basename) for token in tokens)
@@ -245,6 +247,8 @@ if case == 'wrong-matcher':
         entry = {'hooks': [stale(basename, 'keep')]}
         if basename != 'orch-compact-context.sh':
             entry['matcher'] = matcher + '-wrong'
+        else:
+            entry['hooks'][0]['command'] += '||true'
         if event == 'SubagentStop':
             user_hook = {'type': 'command', 'command': 'echo colocated-stop'}
             entry['hooks'].append(user_hook)
@@ -257,6 +261,7 @@ else:
         if basename == 'orch-worktree-guard.sh':
             settings['hooks'][event] = [
                 {'matcher': 'Write', 'hooks': [stale(basename, 'drop')]}, first]
+            settings['hooks'][event][0]['hooks'][0]['command'] += '||true'
         elif basename == 'orch-stop-gate.sh':
             settings['hooks'][event] = [first, {'matcher': matcher, 'hooks': [stale(basename, 'drop')]}]
         else:

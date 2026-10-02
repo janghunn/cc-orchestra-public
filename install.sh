@@ -147,7 +147,9 @@ def is_safety_hook(hook, basename):
     if not isinstance(hook, dict) or not isinstance(hook.get("command"), str):
         return False
     try:
-        tokens = shlex.split(hook["command"])
+        lex = shlex.shlex(hook["command"], posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
     except ValueError:
         return False
     path = "hooks/" + basename
