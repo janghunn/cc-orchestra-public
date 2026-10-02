@@ -148,6 +148,7 @@ def is_safety_hook(hook, basename):
         return False
     try:
         lex = shlex.shlex(hook["command"], posix=True, punctuation_chars=True)
+        lex.commenters = ''
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:

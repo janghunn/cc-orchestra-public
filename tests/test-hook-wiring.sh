@@ -233,6 +233,7 @@ def recognised(hook, basename):
         return False
     try:
         lex = shlex.shlex(hook['command'], posix=True, punctuation_chars=True)
+        lex.commenters = ''
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
@@ -275,6 +276,7 @@ else:
             {'matcher': 'Edit', 'hooks': [{'type': 'command', 'command': "bash '/x/hooks/orch-worktree-guard.sh.bak'"}]},
             {'matcher': 'Glob', 'hooks': [{'type': 'command', 'command': "bash '/u/hooks/orch-worktree-guard.sh backup'"}]},
             {'matcher': 'Grep', 'hooks': [{'type': 'command', 'command': "bash '/u/hooks/orch-worktree-guard.sh;backup'"}]},
+            {'matcher': 'LS', 'hooks': [{'type': 'command', 'command': 'bash /u/hooks/orch-worktree-guard.sh#backup'}]},
         ],
         'SubagentStop': [
             {'matcher': '.*', 'hooks': [{'type': 'command', 'command': 'bash /x/hooks/my-orch-stop-gate.sh'}]},
