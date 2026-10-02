@@ -1507,10 +1507,132 @@ for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
        description)
 
 # policy validation ---------------------------------------------------------------------------------------
+# Per-task sample: selection is fixed before validation, with compact folder summaries -------------------
+indices = archive.thumbnail_sample_indices
+hundred = indices(100, 48)
+ok(len(hundred) == len(set(hundred)) == 48 and hundred == sorted(hundred) and hundred[0] == 0 and hundred[-1] == 99
+   and indices(5, 48) == [0, 1, 2, 3, 4] and indices(100, 1) == [0] and indices(100, 0) == []
+   and indices(100, 2) == [0, 99] and indices(0, 48) == [],
+   'thumbnail sample indices cover all images below the limit, evenly spaced endpoints, and limits 0/1/2')
+
+SAMPLE_FILES = {f'{"a" if i < 4 else "b"}/{i}.png': solid_png(8 + i, 6) for i in reversed(range(7))}
+SAMPLE_PATHS = sorted(SAMPLE_FILES)
+SAMPLED = [SAMPLE_PATHS[i] for i in (0, 3, 6)]
+
+def sample_folders(thumbnails):
+    return [{'folder': folder, 'pngs': count,
+             'source_bytes': sum(len(data) for rel, data in SAMPLE_FILES.items() if rel.startswith(folder + '/')),
+             'thumbnails': thumbs}
+            for folder, count, thumbs in (('a', 4, 2 if thumbnails else 0), ('b', 3, 1 if thumbnails else 0))]
+
+if HAVE_ANY:
+    sampled = Scn('sampled', SAMPLE_FILES, 'THUMB_MAX_PER_TASK=3\nTHUMB_EMBED_MAX=2\n')
+    sampled_report = sampled.report('apply', '--json')
+    sampled_task = sampled.task_record()
+    sid, snap = next(iter(sampled_task['snapshots'].items()))
+    manifest = json.loads(gzip.decompress((sampled.raw / snap['manifest']['blob']).read_bytes()))
+    png_entries = {entry['relpath']: entry for entry in manifest['entries'] if entry['kind'] == 'image'}
+    image_section = (sampled.vault / f'tasks/{TID}.md').read_text().split('## Images', 1)[1].split('## Per-snapshot', 1)[0]
+    blocks = re.findall(r'```text\n(.*?)\n```', image_section, re.S)
+    listing = json.loads(blocks[1])
+    expected_folders = sample_folders(True)
+    expected_table = 'snapshot | folder | pngs | source_bytes | thumbnails\n' + '\n'.join(
+        f"{sid} | {row['folder']} | {row['pngs']} | {row['source_bytes']} | {row['thumbnails']}" for row in expected_folders)
+    before = sampled.hashes(sampled.vault), sampled.hashes(sampled.raw), sampled.commits()
+    again = sampled.run('apply')
+    ok(sampled_report['images']['thumbnails'] == 3 and sampled_report['images']['max_per_task'] == 3
+       and sampled_report['images']['metadata_only'] == {'not-sampled': 4} and len(sampled.thumbs()) == 3
+       and [row['relpath'] for row in snap['images']] == SAMPLED and [row['relpath'] for row in listing] == SAMPLED
+       and set(png_entries) == set(SAMPLE_PATHS) and all(
+           entry['sha256'] == sha(SAMPLE_FILES[rel]) and entry['width'] == 8 + int(Path(rel).stem) and entry['height'] == 6
+           and (('sampled' not in entry) if rel in SAMPLED else entry.get('sampled') is False)
+           for rel, entry in png_entries.items())
+       and snap['image_folders'] == expected_folders and blocks[0] == expected_table
+       and image_section.count('![[artifacts/') == 2
+       and 'Sampled: 3 thumbnails of 7 PNG files (THUMB_MAX_PER_TASK=3);' in image_section
+       and before == (sampled.hashes(sampled.vault), sampled.hashes(sampled.raw), sampled.commits())
+       and '0 files written' in again and 'commit: none' in again and 'images: 0 encoded, 3 reused' in again
+       and 'verify: OK' in sampled.run('verify'),
+       '7 PNGs sample sorted positions 0/3/6: only 3 catalog/note rows, 7 manifest entries, exact folder totals, bounded embeds and no-op re-apply')
+
+    many = Scn('sample-budget', {f'{i:03}.png': solid_png(i + 1, 1) for i in range(200)},
+               'THUMB_MAX_PER_TASK=2\nTHUMB_MAX_BYTES=65536\nPAYLOAD_TASK_MAX_BYTES=262144\n')
+    many_report = many.report('apply', '--json')
+    ok(many_report['images']['thumbnails'] == 2 and len(many.thumbs()) == 2
+       and many_report['images']['metadata_only'] == {'not-sampled': 198}
+       and [row['relpath'] for row in many.snapshot_rows()] == ['000.png', '199.png']
+       and many_report['payload_over_budget']['files'] == 0 and 'verify: OK' in many.run('verify'),
+       '200 tiny PNGs reserve only min(n, K) times the thumbnail cap: K=2 fits a 256 KiB task budget')
+
+    sampled.set_conf('THUMB_MAX_PER_TASK=0\n')
+    zero_report = sampled.report('apply', '--json')
+    zero_note = (sampled.vault / f'tasks/{TID}.md').read_text()
+    ok(zero_report['images']['metadata_only'] == {'not-sampled': 7} and zero_report['images']['thumbnails'] == 0
+       and not zero_report['images']['resolved'] and not sampled.snapshot_rows()
+       and next(iter(sampled.task_record()['snapshots'].values()))['image_folders'] == sample_folders(False)
+       and '![[artifacts/' not in zero_note and 'Sampled: 0 thumbnails of 7 PNG files (THUMB_MAX_PER_TASK=0);' in zero_note
+       and 'verify: OK' in sampled.run('verify'),
+       'changing the sample limit to zero clears current image rows and embeds, retaining folder summaries and existing artifacts')
+else:
+    skip('sample selection, manifest metadata, folder table, re-apply, sampled budget and zero-limit transition',
+         'neither Pillow nor ffmpeg is available')
+
+sample_none = Scn('sample-none', SAMPLE_FILES, 'THUMB_MAX_PER_TASK=3\nTHUMB_ENCODER=none\n')
+none_sample_report = sample_none.report('apply', '--json')
+none_sample_note = (sample_none.vault / f'tasks/{TID}.md').read_text()
+ok(none_sample_report['images']['metadata_only'] == {'no-encoder': 3, 'not-sampled': 4}
+   and not sample_none.thumbs() and [row['relpath'] for row in sample_none.snapshot_rows()] == SAMPLED
+   and all(row['reason'] == 'no-encoder' for row in sample_none.snapshot_rows())
+   and next(iter(sample_none.task_record()['snapshots'].values()))['image_folders'] == sample_folders(False)
+   and 'Sampled: 0 thumbnails of 7 PNG files (THUMB_MAX_PER_TASK=3);' in none_sample_note
+   and '![[artifacts/' not in none_sample_note and 'verify: OK' in sample_none.run('verify'),
+   'without an encoder only sampled PNGs get no-encoder rows; the rest are not-sampled and folder thumbnail counts are zero')
+
+sample_invalid = Scn('sample-invalid', {'a.png': b'not png', 'b.png': truncated_png,
+                                      'c.png': solid_png(2, 2), 'd.png': solid_png(3, 2), 'e.png': solid_png(4, 2)},
+                     'THUMB_MAX_PER_TASK=2\nTHUMB_ENCODER=none\n')
+invalid_report = sample_invalid.report('apply', '--json', code=4)
+invalid_snap = next(iter(sample_invalid.task_record()['snapshots'].values()))
+ok(invalid_report['images']['invalid'] == invalid_report['source_errors']['count'] == 2
+   and invalid_report['images']['metadata_only'] == {'no-encoder': 1, 'not-sampled': 2}
+   and [row['relpath'] for row in invalid_snap['images']] == ['e.png']
+   and invalid_snap['image_folders'][0]['folder'] == '.' and invalid_snap['image_folders'][0]['pngs'] == 5
+   and invalid_snap['image_folders'][0]['source_bytes'] == sum((sample_invalid.task / f'{name}.png').stat().st_size for name in 'abcde'),
+   'invalid PNGs inside and outside the fixed sample still exit 4 and count in folder totals; invalid slots are not refilled')
+
+zero = Scn('sample-zero', SAMPLE_FILES, 'THUMB_MAX_PER_TASK=0\n')
+root_pngs = {zero.base / '.orchestra' / f'{i}.png': solid_png(5 + i, 2) for i in range(3)}
+for path, data in root_pngs.items():
+    put(path, data)
+zero_first = zero.report('apply', '--json')
+zero_project = zero.catalog()['projects']['proj']
+zero_snap = next(iter(zero.task_record()['snapshots'].values()))
+zero_entries = json.loads(gzip.decompress((zero.raw / zero_snap['manifest']['blob']).read_bytes()))['entries']
+ok(zero_first['images']['metadata_only'] == {'not-sampled': 10} and not zero_first['images']['resolved']
+   and not zero.snapshot_rows() and zero_snap['image_folders'] == sample_folders(False)
+   and all(entry['sampled'] is False for entry in zero_entries if entry['kind'] == 'image')
+   and next(iter(zero_project['image_folders'].values())) == [
+       {'folder': '.', 'pngs': 3, 'source_bytes': sum(map(len, root_pngs.values())), 'thumbnails': 0}]
+   and 'images' not in zero_project and 'verify: OK' in zero.run('verify'),
+   'a zero limit validates every task/root PNG without resolving an encoder and still stores folder summaries and manifest metadata')
+
+zero.set_conf('THUMB_MAX_PER_TASK=1\nTHUMB_ENCODER=none\n')
+one_report = zero.report('apply', '--json')
+one_project = zero.catalog()['projects']['proj']
+assert one_report['images']['metadata_only'] == {'no-encoder': 2, 'not-sampled': 8}
+assert [row['relpath'] for row in zero.snapshot_rows()] == [SAMPLE_PATHS[0]]
+assert [row['relpath'] for row in next(iter(one_project['images'].values()))] == ['0.png']
+for path in root_pngs:
+    path.unlink()
+zero.run('apply')
+ok('image_folders' not in zero.catalog()['projects']['proj'] and 'images' not in zero.catalog()['projects']['proj'],
+   'each task/root scan gets its own sample; root folder and image summaries are removed when root PNGs disappear')
+
 policy_checks = [('IMAGE_EXTENSIONS=.bmp\n', 'IMAGE_EXTENSIONS supports only .png'), ('THUMB_ENCODER=magic\n', 'THUMB_ENCODER must be auto, pillow, ffmpeg or none'),
                  ('THUMB_QUALITY=0\n', 'THUMB_QUALITY must be 1..95'), ('THUMB_QUALITY=96\n', 'THUMB_QUALITY must be 1..95'),
                  ('THUMB_MAX_EDGE=0\n', 'at least 1'), ('THUMB_MAX_BYTES=0\n', 'at least 1'), ('THUMB_MAX_PIXELS=0\n', 'at least 1'),
-                 ('THUMB_EMBED_MAX=-1\n', 'THUMB_EMBED_MAX must be nonnegative'), ('TEXT_EXTENSIONS=.md .png\n', 'IMAGE_EXTENSIONS overlaps TEXT_EXTENSIONS'),
+                 ('THUMB_EMBED_MAX=-1\n', 'THUMB_EMBED_MAX must be nonnegative'), ('THUMB_MAX_PER_TASK=-1\n', 'THUMB_MAX_PER_TASK must be nonnegative'),
+                 ('THUMB_MAX_PER_TASK=abc\n', 'THUMB_MAX_PER_TASK must be an integer'), ('TEXT_EXTENSIONS=.md .png\n', 'IMAGE_EXTENSIONS overlaps TEXT_EXTENSIONS'),
                  ('CHECKPOINT_EXTENSIONS=.PNG\n', 'IMAGE_EXTENSIONS overlaps CHECKPOINT_EXTENSIONS')]
 validation = Scn('policy')
 messages = []

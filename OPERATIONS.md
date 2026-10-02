@@ -995,18 +995,24 @@ forces a choice. With no encoder the image is recorded as metadata only (`no-enc
 report prints `no image encoder` once. Defaults: `THUMB_MAX_EDGE=512` px longest edge,
 `THUMB_QUALITY=70`, `THUMB_MAX_BYTES=65536` per thumbnail, `THUMB_MAX_PIXELS=100000000`
 (larger sources are metadata only, `over-pixel-cap`, and are never decoded) and
-`THUMB_EMBED_MAX=8` Obsidian embeds in the task note. A thumbnail above the byte cap is retried
+`THUMB_EMBED_MAX=8` Obsidian embeds in the task note, with `THUMB_MAX_PER_TASK=48` thumbnails
+per task (0 disables thumbnails). A thumbnail above the byte cap is retried
 with lower quality, then smaller sizes; if none fits it is metadata only (`thumbnail-over-cap`).
 Every file named `.png` first gets a structural check (signature, IHDR, chunk CRCs, chunks
 through IEND). A file that fails it (`not-png`, `bad-header`, `bad-chunk-crc`, `truncated`) is
 a source error (`invalid-image`, exit **4**) and the run continues; so is pixel data that
 looks valid but cannot be decoded (`decode-failed`, metadata only). The task note and catalog
-record, per image, the relative path, size, UTC mtime, source SHA-256, pixel dimensions, thumbnail
+record, per sampled image, the relative path, size, UTC mtime, source SHA-256, pixel dimensions, thumbnail
 path, size and dimensions, encoder id and version, and the parameters used. The SHA-256 (and the
 full chunk-CRC read) is computed only for sources within `PAYLOAD_FILE_MAX_BYTES`; larger
-sources are validated by a seek-only chunk walk and keep no hash. The task payload budget
-makes each image reserve `THUMB_MAX_BYTES` (its thumbnail cap), not its source bytes, and only one
-decoded image is held in memory at a time.
+sources are validated by a seek-only chunk walk and keep no hash. Each task gets at most
+`THUMB_MAX_PER_TASK` (48) thumbnails chosen at evenly spaced positions of its sorted PNG list
+(first and last included when the sample has at least two images; a sample of one selects the first).
+The rest are metadata only (`not-sampled`), summarized per folder in the note and listed per file
+in the raw-store manifest. All PNGs still undergo validation; invalid sampled files leave empty
+slots, and the sample is not refilled. The budget reserves `min(n, THUMB_MAX_PER_TASK) × THUMB_MAX_BYTES`
+for `n` PNGs, never their source bytes. Selection and reservation apply separately to each task
+location and root scan. Only one decoded image is held in memory at a time.
 
 Thumbnails are idempotent per machine, not across machines: an image is re-encoded only when its
 source (hash, size, mtime), the encoder id/version or the parameters change; JPEG output differs
@@ -1052,6 +1058,9 @@ verified; Bases needs Obsidian >= 1.9.0.
 - Obsidian rendering (graph colors and Bases dashboards) has not been checked visually.
 - Thumbnails, once written, stay in the vault's git history like other artifacts; changing the
   encoder or parameters adds new versions, and old versions are not pruned.
+- The per-file `sampled: false` flag lives in the immutable snapshot manifest. Changing
+  `THUMB_MAX_PER_TASK` later updates the catalog, note and folder summary, but not the flags
+  in manifests already written for that snapshot.
 - `plan` without `--measure-thumbnails` cannot detect pixel-data corruption (reported as
   `pending`); only `apply` or the measuring plan decodes. Sources above `PAYLOAD_FILE_MAX_BYTES`
   get no chunk-CRC check and no hash before encoding.

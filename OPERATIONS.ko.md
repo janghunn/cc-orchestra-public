@@ -1044,16 +1044,22 @@ thumbnail 하나만 `artifacts/tasks/<task>/thumbs/`(루트는
 `no image encoder`를 한 번 표시한다. 기본값: 긴 변 `THUMB_MAX_EDGE=512` px,
 `THUMB_QUALITY=70`, thumbnail당 `THUMB_MAX_BYTES=65536`, `THUMB_MAX_PIXELS=100000000`
 (초과하면 디코딩하지 않고 metadata만 기록, `over-pixel-cap`), 작업 노트의 Obsidian embed
-`THUMB_EMBED_MAX=8`개. 바이트 한도를 넘으면 품질을 낮추고 그다음 크기를 줄여 다시 시도하며
+`THUMB_EMBED_MAX=8`개, 작업당 thumbnail은 `THUMB_MAX_PER_TASK=48`개(0이면 생성하지 않음).
+바이트 한도를 넘으면 품질을 낮추고 그다음 크기를 줄여 다시 시도하며
 모두 실패하면 metadata만 기록한다(`thumbnail-over-cap`). `.png` 파일은 먼저 구조 검사(시그니처,
 IHDR, chunk CRC, IEND까지의 chunk)를 거친다. 통과하지 못한 파일(`not-png`, `bad-header`,
 `bad-chunk-crc`, `truncated`)은 원본 오류(`invalid-image`, 종료 코드 **4**)로 기록하고 실행은
 계속한다. 구조는 정상이지만 디코딩할 수 없는 픽셀 데이터도 마찬가지다(`decode-failed`, metadata만
-기록). 작업 노트와 catalog에는 이미지마다 상대 경로, 크기, UTC mtime, 원본 SHA-256, 픽셀
+기록). 작업 노트와 catalog에는 표본으로 선택한 이미지마다 상대 경로, 크기, UTC mtime, 원본 SHA-256, 픽셀
 크기, thumbnail 경로·바이트 수·픽셀 크기, 인코더 id와 버전, 사용한 파라미터를 기록한다. SHA-256과
 전체 chunk CRC 검사는 `PAYLOAD_FILE_MAX_BYTES` 이내의 원본에만 수행하며, 더 큰 원본은 seek만
-하는 chunk 순회로 검증하고 해시를 남기지 않는다. 작업 payload 예산은 이미지마다 원본 크기가 아니라
-`THUMB_MAX_BYTES`(thumbnail 상한)를 예약하며, 한 번에 이미지 하나만 메모리에 디코딩한다.
+하는 chunk 순회로 검증하고 해시를 남기지 않는다. 각 작업은 정렬한 PNG 목록에서 균등 간격으로
+최대 `THUMB_MAX_PER_TASK`(48)개를 선택해 thumbnail을 만든다(표본이 두 개 이상이면 처음과
+마지막을 포함하며, 한 개이면 첫 이미지만 선택). 나머지는 metadata만 기록하며(`not-sampled`),
+노트에는 폴더별 요약을, raw 저장소의 manifest에는 파일별 정보를 남긴다. 모든 PNG를 검증하며,
+선택한 파일이 잘못되었어도 다른 이미지로 표본을 채우지 않는다. PNG가 n개이면 예산은 원본 크기가
+아니라 `min(n, THUMB_MAX_PER_TASK) × THUMB_MAX_BYTES`를 예약한다. 표본 선택과 예산 예약은
+각 작업 위치와 루트 스캔에 따로 적용하며, 한 번에 이미지 하나만 메모리에 디코딩한다.
 
 thumbnail의 멱등성은 한 머신 안에서만 보장한다. 원본(해시·크기·mtime), 인코더 id/버전,
 파라미터 중 하나가 바뀔 때만 다시 인코딩한다. JPEG 출력은 인코더와 Pillow 버전마다 다르므로
@@ -1098,6 +1104,9 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
 - Obsidian 렌더링(graph 색상과 Bases dashboard)은 시각적으로 확인하지 않았다.
 - 한 번 기록한 thumbnail은 다른 artifact처럼 vault의 git 이력에 남는다. 인코더나 파라미터를
   바꾸면 새 버전이 추가되며 이전 버전은 정리하지 않는다.
+- 파일별 `sampled: false` 플래그는 변경 불가능한 snapshot manifest에 기록된다. 나중에
+  `THUMB_MAX_PER_TASK`를 바꾸면 catalog, 노트와 폴더별 요약은 갱신되지만, 해당 snapshot에
+  이미 작성된 manifest의 플래그는 바뀌지 않는다.
 - `--measure-thumbnails` 없는 `plan`은 픽셀 데이터 손상을 감지할 수 없다(`pending`으로 보고).
   `apply`와 측정 plan만 디코딩한다. `PAYLOAD_FILE_MAX_BYTES`를 넘는 원본은 인코딩 전에
   chunk CRC 검사와 해시가 없다.
