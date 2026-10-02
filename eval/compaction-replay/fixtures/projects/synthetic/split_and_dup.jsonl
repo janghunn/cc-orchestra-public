@@ -1,0 +1,11 @@
+{"message": {"content": [{"id": "t-split", "input": {"command": "invented command"}, "name": "Bash", "type": "tool_use"}], "id": "shared"}, "timestamp": "2026-01-02T00:00:00Z", "type": "assistant", "uuid": "split-call"}
+{"message": {"content": [{"content": [{"text": "FIXTURE-SECRET-TEXT", "type": "text"}, {"source": {"data": "SYNTHETIC-IMAGE"}, "type": "image"}], "tool_use_id": "t-split", "type": "tool_result"}], "id": "m-split-result"}, "timestamp": "2026-01-02T00:00:00Z", "type": "user", "uuid": "split-result"}
+{"message": {"content": [{"text": "split continuation", "type": "text"}], "id": "shared"}, "timestamp": "2026-01-02T00:00:00Z", "type": "assistant", "uuid": "split-text"}
+{"message": {"content": [{"text": "split continuation", "type": "text"}], "id": "shared"}, "timestamp": "2026-01-02T00:00:00Z", "type": "assistant", "uuid": "split-text"}
+{"message": {"content": [{"text": "conflicting copy", "type": "text"}], "id": "shared"}, "timestamp": "2026-01-02T00:00:00Z", "type": "assistant", "uuid": "split-text"}
+{"isMeta": true, "message": {"content": "should never appear", "id": "m-excluded-isMeta"}, "timestamp": "2026-01-02T00:00:00Z", "type": "user", "uuid": "excluded-isMeta"}
+{"isCompactSummary": true, "message": {"content": "should never appear", "id": "m-excluded-isCompactSummary"}, "timestamp": "2026-01-02T00:00:00Z", "type": "user", "uuid": "excluded-isCompactSummary"}
+{"isVisibleInTranscriptOnly": true, "message": {"content": "should never appear", "id": "m-excluded-isVisibleInTranscriptOnly"}, "timestamp": "2026-01-02T00:00:00Z", "type": "user", "uuid": "excluded-isVisibleInTranscriptOnly"}
+{"attachment": {"text": "ignored"}, "timestamp": "2026-01-02T00:00:00Z", "type": "attachment", "uuid": "attachment-1"}
+{"message": {"content": [{"id": "t-secret", "input": {"command": "invented command"}, "name": "Bash", "type": "tool_use"}], "id": "m-secret-call"}, "timestamp": "2026-01-02T00:00:00Z", "type": "assistant", "uuid": "secret-call"}
+{"message": {"content": [{"content": "password=\"s3cr3tvaluewithmorethan20chars\"", "tool_use_id": "t-secret", "type": "tool_result"}], "id": "m-secret-result"}, "timestamp": "2026-01-02T00:00:00Z", "type": "user", "uuid": "secret-result"}

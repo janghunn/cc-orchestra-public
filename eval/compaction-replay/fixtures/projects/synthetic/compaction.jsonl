@@ -1,0 +1,8 @@
+{"message": {"content": [{"id": "t-epoch-old", "input": {"command": "invented command"}, "name": "Bash", "type": "tool_use"}], "id": "m-epoch-old-call"}, "timestamp": "2026-01-03T00:00:00Z", "type": "assistant", "uuid": "epoch-old-call"}
+{"message": {"content": [{"content": "/work/old.py", "tool_use_id": "t-epoch-old", "type": "tool_result"}], "id": "m-epoch-old-result"}, "timestamp": "2026-01-03T00:00:00Z", "type": "user", "uuid": "epoch-old-result"}
+{"compactMetadata": {"postTokens": 2345, "preTokens": 12345, "trigger": "auto"}, "logicalParentUuid": "epoch-old-result", "parentUuid": null, "subtype": "compact_boundary", "timestamp": "2026-01-03T00:00:00Z", "type": "system", "uuid": "boundary-1"}
+{"timestamp": "2026-01-03T00:00:00Z", "type": "attachment", "uuid": "attachment-summary"}
+{"isCompactSummary": true, "message": {"content": "/work/old.py summary excluded", "id": "m-summary"}, "parentUuid": "attachment-summary", "timestamp": "2026-01-03T00:00:00Z", "type": "user", "uuid": "summary"}
+{"message": {"content": [{"id": "t-epoch-new", "input": {"command": "invented command"}, "name": "Bash", "type": "tool_use"}], "id": "m-epoch-new-call"}, "timestamp": "2026-01-03T00:00:00Z", "type": "assistant", "uuid": "epoch-new-call"}
+{"message": {"content": [{"content": "/work/new.py", "tool_use_id": "t-epoch-new", "type": "tool_result"}], "id": "m-epoch-new-result"}, "timestamp": "2026-01-03T00:00:00Z", "type": "user", "uuid": "epoch-new-result"}
+{"message": {"content": [{"text": "Use /work/old.py and /work/new.py", "type": "text"}], "id": "m-epoch-use"}, "timestamp": "2026-01-03T00:00:00Z", "type": "assistant", "uuid": "epoch-use"}
