@@ -1083,6 +1083,11 @@ Each imported project, task and session keeps `source_id`, its id on the source 
 items. Incoming blobs are checked for gzip integrity and uncompressed SHA-256, then new
 blobs are recompressed deterministically; existing blobs are never rewritten. Source
 histories live under `sources/<host>/`, keeping machine-specific watermarks separate.
+Import also verifies every local blob it reuses and refuses damaged blobs without rewriting
+them. Before writing, including during `--dry-run`, it validates its own rendered links and
+pointers against the merged output. Copied thumbnails are scanned for secret-shaped byte
+strings unless their full SHA-256 is locally allow-listed; a match refuses the import rather
+than withholding the thumbnail.
 
 Import preserves existing local files and catalog records. Shared model notes, the index,
 dashboards, graph configuration and catalog are regenerated only as supersets. Imported
@@ -1104,6 +1109,8 @@ Open limitations:
 - A host can be re-imported only from an unchanged source. Changes to any existing record or
   file are refused; import newer work under a new host name until an explicit refresh mode exists.
 - The source vault and raw store must pass `verify`, including note links and source histories.
+- Passing source verification is insufficient: damaged reused local blobs, invalid output
+  links/pointers, or secret-shaped thumbnail bytes without a local hash release refuse import.
 - Historical root artifacts absent from the current root manifest are copied without a
   manifest hash check and counted as `artifacts_unverified`.
 - A crash during writing can leave a partial, re-runnable import; there is no transaction

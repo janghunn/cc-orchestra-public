@@ -2426,6 +2426,13 @@ def pointer_values(value):
             yield from pointer_values(child)
 
 
+def live_links(fields, body):
+    # Only tool-created link properties contain live frontmatter wikilinks.
+    active_keys = {"project", "models", "sessions", "predecessors", "successors", "supersedes", "superseded_by", "overlaps", "mentions", "tasks"}
+    live = json.dumps({key: fields[key] for key in active_keys if key in fields}, ensure_ascii=False) + "\n" + strip_code(body)
+    return [re.split(r"[|#]", target, 1)[0] for target in re.findall(r"\[\[([^]\n]+)\]\]", live)]
+
+
 def verify_problems(vault, raw):
     problems, links, pointers, notes = [], 0, 0, 0
     try:
@@ -2486,11 +2493,7 @@ def verify_problems(vault, raw):
             if rel.endswith(".md") and not rel.startswith("artifacts/"):
                 fields, body = frontmatter(text)
                 notes += 1
-                # Only tool-created link properties contain live frontmatter wikilinks.
-                active_keys = {"project", "models", "sessions", "predecessors", "successors", "supersedes", "superseded_by", "overlaps", "mentions", "tasks"}
-                live = json.dumps({key: fields[key] for key in active_keys if key in fields}, ensure_ascii=False) + "\n" + strip_code(body)
-                for target in re.findall(r"\[\[([^]\n]+)\]\]", live):
-                    target = re.split(r"[|#]", target, 1)[0]
+                for target in live_links(fields, body):
                     links += 1
                     candidate = vault / target
                     if not under(candidate, vault) or not (candidate.is_file() or (vault / (target + ".md")).is_file()):
@@ -2580,6 +2583,7 @@ class Importer:
         self.rejected, self.renamed = [], []
         self.incoming, self.maps, self.records = {}, {}, {}
         self.blobs, self.sources, self.artifacts, self.thumbnail_refs = {}, {}, {}, {}
+        self.available, self.local_blobs_checked = {}, set()
         self.new_blobs, self.new_sources = [], []
         self.files, self.new_files, self.changed_files = {}, [], []
         self.models = set()
@@ -2678,6 +2682,33 @@ class Importer:
             self.reject("existing-differs", rel)
         return path
 
+    @staticmethod
+    def blob_identity(path):
+        digest, length = hashlib.sha256(), 0
+        with gzip.open(path, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                length += len(chunk)
+        return digest.hexdigest(), length
+
+    def local_blob(self, digest, expected_length=None):
+        if digest in self.local_blobs_checked:
+            return
+        path = self.raw / f"blobs/{digest[:2]}/{digest}.gz"
+        if not path.exists() and not path.is_symlink():
+            return
+        self.local_blobs_checked.add(digest)
+        try:
+            if not under(path, self.raw) or not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("not a regular local blob")
+            actual, length = self.blob_identity(path)
+            if actual != digest or expected_length is not None and length != expected_length:
+                raise ValueError("local blob hash or length mismatch")
+        except (OSError, EOFError, ValueError, zlib.error):
+            self.reject("local-blob", str(path.relative_to(self.raw)))
+            return
+        self.available[digest] = length
+
     def scan_raw(self):
         blob_root = self.src_raw / "blobs"
         if blob_root.exists():
@@ -2698,21 +2729,20 @@ class Importer:
                                 or not path.name.startswith(directory.name)):
                             self.reject("blob-name", rel)
                             continue
-                        digest, length = hashlib.sha256(), 0
                         try:
-                            with gzip.open(path, "rb") as stream:
-                                while chunk := stream.read(1024 * 1024):
-                                    digest.update(chunk)
-                                    length += len(chunk)
+                            digest, length = self.blob_identity(path)
                         except (OSError, EOFError, zlib.error):
                             self.reject("blob-gzip", rel)
                             continue
-                        if digest.hexdigest() != path.stem:
+                        if digest != path.stem:
                             self.reject("blob-hash", rel)
                             continue
                         self.blobs[path.stem] = length
-                        target = self.destination(self.raw, rel)
-                        if target is not None and not target.exists():
+                        target = self.raw / rel
+                        if target.exists() or target.is_symlink():
+                            self.local_blob(path.stem, length)
+                        elif self.destination(self.raw, rel) is not None:
+                            self.available[path.stem] = length
                             self.new_blobs.append(path.stem)
         source_root = self.src_raw / "sources"
         if source_root.exists():
@@ -2792,18 +2822,33 @@ class Importer:
                     self.reject("malformed-record", f"{kind}/{identifier}")
 
     def manifest_entries(self, pointer):
-        # Raw scan and verify have already checked this pointer's uncompressed digest/length.
-        data = gzip.decompress((self.src_raw / pointer["blob"]).read_bytes())
+        # Availability checks accept a verified incoming or local manifest blob.
+        root = self.src_raw if pointer["sha256"] in self.blobs else self.raw
+        data = gzip.decompress((root / pointer["blob"]).read_bytes())
+        if sha(data) != pointer["sha256"] or len(data) != pointer["length"]:
+            raise ValueError("manifest changed during import")
         return json.loads(data)["entries"]
+
+    def blob_pointer_problem(self, pointer):
+        digest = pointer.get("sha256")
+        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or
+                pointer["blob"] != f"blobs/{digest[:2]}/{digest}.gz"):
+            return "blob-name"
+        if digest not in self.available:
+            self.local_blob(digest)
+        if digest not in self.available:
+            return "blob-missing"
+        if pointer.get("length") != self.available[digest]:
+            return "blob-length"
+        return None
 
     def check_blob_pointers(self, value):
         for pointer in pointer_values(value):
             if "blob" not in pointer:
                 continue
-            digest = pointer.get("sha256")
-            if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or
-                    pointer["blob"] != f"blobs/{digest[:2]}/{digest}.gz"):
-                self.reject("blob-name", pointer["blob"])
+            problem = self.blob_pointer_problem(pointer)
+            if problem:
+                self.reject(problem, pointer["blob"])
 
     def validate_raw_pointers(self):
         # verify permits other contained paths; import copies only canonical blobs.
@@ -2820,9 +2865,6 @@ class Importer:
             manifests.extend(pointer for project in self.incoming["projects"].values()
                              for pointer in project.get("manifests", []))
             for pointer in manifests:
-                if pointer["sha256"] not in self.blobs:
-                    self.reject("source-verify", pointer["blob"])
-                    continue
                 self.check_blob_pointers(self.manifest_entries(pointer))
         except (OSError, EOFError, zlib.error, *self.MALFORMED):
             self.reject("source-verify", "invalid manifest")
@@ -2830,6 +2872,7 @@ class Importer:
     def validate_vault_pointers(self):
         for records in self.records.values():
             for record in records.values():
+                self.check_blob_pointers(record)
                 for pointer in pointer_values(record):
                     if "blob" not in pointer and (
                             not isinstance(pointer["path"], str) or pointer["path"] not in self.artifacts):
@@ -2892,6 +2935,9 @@ class Importer:
                     if (not data.startswith(b"\xff\xd8") or reference is not None and
                             (reference["sha256"] != digest or reference["bytes"] != len(data))):
                         self.reject("artifact-thumbnail", rel)
+                        continue
+                    if digest not in self.guard.allow and scan_record(data.decode("latin-1"))[0]:
+                        self.reject("artifact-secret", rel)
                         continue
                 else:
                     if not self.artifact_hash(kind, identifier, parts[3], "/".join(parts[5:]), digest):
@@ -2992,6 +3038,70 @@ class Importer:
             self.guard.check(data, rel, artifact=True)
         return data
 
+    def merged_path(self, rel):
+        """Resolve a file in the prospective vault without materializing the write set."""
+        if not isinstance(rel, str):
+            return None
+        path = self.vault / rel
+        try:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(self.vault) or path.is_symlink():
+                return None
+            key = str(resolved.relative_to(self.vault))
+            if key in self.files or key in self.artifacts or path.is_file():
+                return key
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return None
+
+    def check_merged_pointer(self, pointer, rel):
+        try:
+            if "blob" in pointer:
+                problem = self.blob_pointer_problem(pointer)
+            else:
+                key = self.merged_path(pointer["path"])
+                problem = "missing or unsafe vault pointer"
+                if key is not None:
+                    if key in self.files:
+                        digest = sha(self.files[key])
+                    elif key in self.artifacts:
+                        digest = self.artifacts[key][1]
+                    else:
+                        digest = sha((self.vault / key).read_bytes())
+                    problem = None if digest == pointer["sha256"] else "vault pointer hash mismatch"
+        except (OSError, *self.MALFORMED):
+            problem = "invalid pointer"
+        if problem:
+            self.reject("merged-verify", f"{rel}: {problem}: {json.dumps(pointer, ensure_ascii=False, sort_keys=True)}")
+
+    def validate_merged(self):
+        # The source's generated list is not authority for our rendered output.
+        for rel, data in sorted(self.files.items()):
+            try:
+                if rel.endswith(".md") and not rel.startswith("artifacts/"):
+                    value, body = frontmatter(data.decode("utf-8"))
+                    for target in live_links(value, body):
+                        try:
+                            contained = under(self.vault / target, self.vault)
+                        except (OSError, ValueError, RuntimeError):
+                            contained = False
+                        if not contained or (self.merged_path(target) is None and self.merged_path(target + ".md") is None):
+                            self.reject("merged-verify", f"{rel}: unresolved wikilink {target}")
+                elif rel == "_meta/catalog.json":
+                    catalog = json.loads(data)
+                    value = [record for kind in ("tasks", "sessions", "projects")
+                             for record in catalog[kind].values() if record.get("host") == self.host]
+                    value.append(catalog["hosts"][self.host])
+                elif rel == ".obsidian/graph.json" or re.fullmatch(
+                        r"(?:dashboards/[^/]+\.base|artifacts/[^/]+/[^/]+/raw\.json)", rel):
+                    value = json.loads(data)
+                else:
+                    continue
+                for pointer in pointer_values(value):
+                    self.check_merged_pointer(pointer, rel)
+            except (OSError, *self.MALFORMED):
+                self.reject("merged-verify", f"{rel}: missing or invalid output")
+
     def counts(self):
         return {**{kind: len(self.incoming[kind]) if isinstance(self.incoming.get(kind), dict) else 0
                    for kind in ("tasks", "sessions", "projects")},
@@ -3040,6 +3150,8 @@ class Importer:
             self.validate_vault_pointers()
         if not self.rejected:
             self.render()
+        if not self.rejected:
+            self.validate_merged()
 
     def write(self):
         for digest in self.new_blobs:

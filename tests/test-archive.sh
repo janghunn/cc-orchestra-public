@@ -1972,9 +1972,9 @@ ok(before == host_files('legacy') and verified('legacy') and all('manifest' in s
    for snapshot in item['snapshots'].values()), 'legacy local catalogs import unchanged and migrate only on later apply')
 
 # Rejection helper proves all local bytes and metadata are preserved.
-def rejected(dest, source, reason, host='bee'):
+def rejected(dest, source, reason, host='bee', *options):
     before = state(dest, git=True)
-    data = report(imported(dest, source, host, code=4))
+    data = report(imported(dest, source, host, *options, code=4))
     assert reason in {item['reason'] for item in data['rejected']['items']}, data
     assert state(dest, git=True) == before, (source, reason)
     return data
@@ -2147,6 +2147,93 @@ save_catalog('extra-vault-pointer', value)
 assert verified('extra-vault-pointer')
 rejected('reject', 'extra-vault-pointer', 'unsafe-path')
 ok(True, 'vault pointers outside the copied artifact set reject before writes')
+
+# Round 3: a source verify pass must not hide bad reused blobs or catalog-only pointers.
+clone('original', 'damaged-local-blob')
+bee_only = next(rel for rel in hashes(home / 'bee/raw')
+                if rel.startswith('blobs/') and not (home / 'original/raw' / rel).exists())
+put(home / 'damaged-local-blob/raw' / bee_only, b'garbage local blob\n')
+assert verified('bee') and verified('damaged-local-blob')
+rejected('damaged-local-blob', 'bee', 'local-blob')
+ok(True, 'damaged unreferenced local blobs are refused before becoming imported references')
+
+for source_name, reason in (('missing-catalog-blob', 'blob-missing'), ('short-catalog-blob', 'blob-length')):
+    clone('bee', source_name)
+    value = catalog(source_name)
+    pointer = value['sessions']['alpha']['raw'][0]
+    if reason == 'blob-missing':
+        digest = archive.sha(b'not present in either raw store\n')
+        pointer.update(sha256=digest, blob=f'blobs/{digest[:2]}/{digest}.gz')
+        assert not (home / source_name / 'raw' / pointer['blob']).exists()
+        assert not (home / 'reject/raw' / pointer['blob']).exists()
+    else:
+        pointer['length'] += 1
+    value['generated'].remove('_meta/catalog.json')
+    save_catalog(source_name, value)
+    assert verified(source_name)
+    rejected('reject', source_name, reason)
+    ok(True, f'{reason} is detected even when the source generated list omits its catalog')
+
+# A catalog-only pointer can also use a good local blob absent from the incoming store.
+clone('bee', 'local-only-source')
+clone('original', 'local-only-dest')
+value = catalog('local-only-source')
+payload = b'verified local-only content\n'
+digest = archive.sha(payload)
+rel = f'blobs/{digest[:2]}/{digest}.gz'
+value['sessions']['alpha']['raw'][0].update(sha256=digest, blob=rel, length=len(payload))
+value['generated'].remove('_meta/catalog.json')
+save_catalog('local-only-source', value)
+put(home / 'local-only-dest/raw' / rel, gzip.compress(payload, mtime=0))
+assert verified('local-only-source') and verified('local-only-dest')
+before = (home / 'local-only-dest/raw' / rel).read_bytes()
+imported('local-only-dest', 'local-only-source', 'bee')
+ok(verified('local-only-dest') and (home / 'local-only-dest/raw' / rel).read_bytes() == before,
+   'a pointer can reuse a verified local-only blob without rewriting it')
+
+clone('bee', 'rendered-broken-link')
+value = catalog('rendered-broken-link')
+snapshot = next(iter(value['tasks']['demo--01-shared']['snapshots'].values()))
+snapshot['counts']['x [[nowhere]]'] = 1
+save_catalog('rendered-broken-link', value)
+assert verified('rendered-broken-link')
+rejected('reject', 'rendered-broken-link', 'merged-verify')
+rejected('reject', 'rendered-broken-link', 'merged-verify', 'bee', '--dry-run')
+clone('original', 'escaped-link-dest')
+put(home / 'outside-link', 'outside vault\n')
+(home / 'escaped-link-dest/vault/nowhere').symlink_to(home / 'outside-link')
+put(home / 'escaped-link-dest/vault/nowhere.md', 'an existing alias does not authorize an escaping target\n')
+assert verified('escaped-link-dest')
+rejected('escaped-link-dest', 'rendered-broken-link', 'merged-verify')
+ok(True, 'rendered live links are checked before import and dry-run, independent of source notes')
+
+clone('bee', 'rendered-bad-pointer')
+value = catalog('rendered-bad-pointer')
+artifact = next(rel for rel in value['generated'] if re.fullmatch(
+    r'artifacts/tasks/demo--01-shared/[0-9a-f]{12}/files/brief.md', rel))
+value['sessions']['alpha']['fields']['extra'] = {
+    'path': artifact.replace('/demo--01-shared/', '/bee--demo--01-shared/', 1), 'sha256': '0' * 64}
+value['generated'].remove('_meta/catalog.json')
+save_catalog('rendered-bad-pointer', value)
+assert verified('rendered-bad-pointer')
+rejected('reject', 'rendered-bad-pointer', 'merged-verify')
+ok(True, 'rendered pointers must match copied artifact bytes, even for catalog-only fields')
+
+if have_encoder:
+    clone('bee', 'secret-thumbnail')
+    value = catalog('secret-thumbnail')
+    thumbnail = next(iter(value['tasks']['demo--02-bee-only']['thumbnails'].values()))
+    path = home / 'secret-thumbnail/vault' / thumbnail['path']
+    data = path.read_bytes() + b'\n' + secret.encode() + b'\n'
+    put(path, data)
+    thumbnail.update(sha256=archive.sha(data), bytes=len(data))
+    save_catalog('secret-thumbnail', value)
+    assert verified('secret-thumbnail')
+    rejected('reject', 'secret-thumbnail', 'artifact-secret')
+    ok(all(secret.encode() not in p.read_bytes() for p in (home / 'reject/vault').rglob('*') if p.is_file()),
+       'secret-shaped thumbnail bytes reject import without leaking into the destination vault')
+else:
+    skip('secret-shaped thumbnail bytes')
 
 # 15: syntax checks keep caches in the fixture home.
 subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)

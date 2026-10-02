@@ -1129,6 +1129,10 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
 보류한 항목을 기록한다. 입력 blob의 gzip 무결성과 압축 전 SHA-256을 검증하고 새
 blob만 결정적으로 재압축한다. 기존 blob은 다시 쓰지 않는다. 원본 이력은
 `sources/<host>/`에 저장하므로 호스트별 inode/device watermark가 섞이지 않는다.
+재사용하는 로컬 blob도 검증하며 손상된 blob은 다시 쓰지 않고 import를 거부한다.
+`--dry-run`을 포함해 쓰기 전에 직접 생성한 링크와 포인터가 병합 결과에서 유효한지
+검증한다. 복사할 thumbnail은 전체 SHA-256이 로컬 allow-list에 있는 경우를 제외하고
+secret-shaped 바이트 문자열을 검사한다. 발견하면 thumbnail을 보류하지 않고 import를 거부한다.
 
 기존 로컬 파일과 catalog 레코드는 유지한다. 모델 노트, index, dashboard, graph 설정과
 catalog 등 공유 페이지는 기존 내용을 포함하는 상위 집합으로만 다시 생성한다.
@@ -1150,6 +1154,8 @@ commit을 추가하지 않는다. 호스트를 가져오는 순서가 달라도 
 - 같은 호스트는 원본이 그대로일 때만 다시 가져올 수 있다. 기존 파일·레코드를 바꿀
   변경은 거부한다. 명시적인 refresh 모드가 생기기 전에는 새 호스트 이름을 사용한다.
 - 입력 vault/raw는 노트 링크와 원본 이력을 포함한 `verify`를 통과해야 한다.
+- 원본 검증 통과만으로는 충분하지 않다. 재사용할 로컬 blob의 손상, 생성 결과의 잘못된
+  링크·포인터, 로컬 해시 승인이 없는 thumbnail의 secret-shaped 바이트가 있으면 import를 거부한다.
 - 현재 root manifest에 없는 과거 root artifact는 manifest 해시 검증 없이 복사하며
   `artifacts_unverified`로 집계한다.
 - 쓰는 도중 중단되면 일부만 저장될 수 있다. 재실행할 수 있지만 파일 전체를 아우르는
