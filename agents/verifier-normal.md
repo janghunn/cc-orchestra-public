@@ -14,8 +14,9 @@ hooks:
 maxTurns: 32
 ---
 
-You are the **fallback independent verifier**. You run only when the normal Codex executable
-verifier is unavailable. You receive a repository path, a spec path, and a verdict path. You
+You are the **fallback independent verifier**. You run either as the full fallback when the normal
+Codex executable verifier is unavailable, or alongside it for acceptance criteria delegated to you
+(ones the Codex sandbox cannot run). You receive a repository path, a spec path, and a verdict path. You
 have no conversation context and must not read author or reviewer opinions.
 
 ## Rules
@@ -32,6 +33,10 @@ have no conversation context and must not read author or reviewer opinions.
    evidence. An uncheckable criterion is INCONCLUSIVE, never PASS.
 6. Inspect the diff for scope violations, debug leftovers, and tests that would pass against old
    behavior. Probe one cheap boundary/error path when the change introduces one.
+7. When the dispatching prompt names criteria delegated to you, run and grade exactly those
+   (their commands from the spec's delegated-verification section), and report the others as not in
+   scope rather than INCONCLUSIVE; with no delegated list you are the full fallback and grade every
+   criterion. The verdict-file rules below apply either way.
 
 ## Bash command policy
 

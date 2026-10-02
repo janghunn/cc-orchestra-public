@@ -190,8 +190,12 @@ def recorded_status(task):
         if fence is None:
             unfenced.append(line)
     summary = "\n".join(unfenced)
-    matches = re.findall(r"^(?:\[lead-[A-Za-z0-9_-]+\]\s*)?STATUS:\s*(PASS\b|FAIL\b|BLOCKED\b|ACCEPTED(?![A-Za-z0-9_-]))", summary, re.M)
-    return matches[-1] if matches else None
+    matches = list(re.finditer(r"^(?:\[lead-[A-Za-z0-9_-]+\]\s*)?STATUS:", summary, re.M))
+    if not matches:
+        return None
+    value = summary[matches[-1].end():].split("\n", 1)[0]
+    token = re.match(r"\s*(PASS\b|FAIL\b|BLOCKED\b|ACCEPTED(?![A-Za-z0-9_-]))", value)
+    return token[1] if token else None
 
 
 def warn(event, status, why, task=None, checked=False):

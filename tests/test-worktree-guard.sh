@@ -72,7 +72,7 @@ from pathlib import Path
 repo, mode = Path(sys.argv[1]), sys.argv[2]
 rows = [('lead-charlie', 'cccccccc', 'orch/12-c', 'RUNNING')]
 if mode != 'one':
-    rows.append(('lead-alpha', 'aaaaaaaa', 'orch/10-a', 'PASS' if mode == 'inactive' else mode if mode.startswith('PASS ') else 'RUNNING'))
+    rows.append(('lead-alpha', 'aaaaaaaa', 'orch/10-a', 'ACCEPTED' if mode == 'accepted' else 'PASS' if mode == 'inactive' else mode if mode.startswith('PASS ') else 'RUNNING'))
 if mode == 'four':
     rows += [('lead-bravo', 'bbbbbbbb', 'orch/11-b', 'WORKING'), ('lead-delta', 'dddddddd', 'orch/13-d', 'WORKING')]
 text = '| slot | agentId | task | branch | dir | status | last update |\n| --- | --- | --- | --- | --- | --- | --- |\n'
@@ -136,6 +136,8 @@ head_at "$REPO/.git/worktrees/lead-charlie/HEAD" orch/10-a
 check deny 'R2 other branch in own worktree' "$OWN" 'git commit' lead-charlie R2
 registry inactive
 check allow 'PASS row is inactive' "$OWN" 'git commit'
+registry accepted
+check allow 'ACCEPTED row is inactive' "$OWN" 'git commit'
 registry 'PASS (worktree)'
 check deny 'annotated PASS remains conservatively active' "$OWN" 'git commit' lead-charlie R2
 head_at "$REPO/.git/worktrees/lead-charlie/HEAD" orch/12-c

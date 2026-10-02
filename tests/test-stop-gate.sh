@@ -365,6 +365,16 @@ transcript $'STATUS: ACCEPTED\nGATES: codex-verify PASS'
 check warn-mismatch 'ACCEPTED-ish summary disagrees with ACCEPTED claim' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
 [[ "$RUN_OUTPUT" == *'summary.md STATUS: unknown'* ]] || fail 'ACCEPTED-ish was parsed as a terminal status'
 
+cat >> "$PASSED_ESCALATION/summary.md" <<'SUMMARY'
+STATUS: ACCEPTED
+STATUS: ACCEPTED-ish
+SUMMARY
+check warn-mismatch 'later ACCEPTED-ish supersedes an earlier ACCEPTED summary status' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: unknown'* ]] || fail 'earlier ACCEPTED concealed the later unrecognised status'
+CHECKER_OUTPUT="$("$TEST_REAL_CHECKER" --strict "$PASSED_ESCALATION")" || fail 'checker rejected the later unrecognised status with passing gates'
+[[ "$CHECKER_OUTPUT" != *'authorised by brief.md USER ACCEPTED'* ]] || fail 'checker treated the later unrecognised status as ACCEPTED'
+ok 'real checker treats the same later ACCEPTED-ish summary as not ACCEPTED'
+
 cat >> "$GOOD/summary.md" <<'SUMMARY'
 ~~~
 STATUS: BLOCKED
