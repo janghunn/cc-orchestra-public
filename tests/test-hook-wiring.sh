@@ -136,7 +136,8 @@ def install_links(text):
 old_links, new_links = install_links(old_installer), install_links(installer)
 # Additive backend aliases are intentional. Preserve every existing hybrid link in order;
 # the safety-only filesystem assertion below still prohibits creating any of these links.
-added = {'cc-orch-codex', 'codex-run-codex', 'orch-codex-route'}
+# orch-archive is an intentional additive command link (task 38).
+added = {'cc-orch-codex', 'codex-run-codex', 'orch-codex-route', 'orch-archive'}
 # agents/verifier.md is generated from templates/verifier.md.tpl since the verifier became a
 # roster artifact; its installer symlink is intentionally gone. Every other historical link
 # must still be present, in order, and re-introducing a verifier.md link still fails below.

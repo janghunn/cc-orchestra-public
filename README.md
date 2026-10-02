@@ -49,6 +49,7 @@ Codex CLI의 로그인도 확인한다. 자세한 준비와 확인 명령은
 | 다시 접속·정지·재시작 | `cc-orch session attach main` · `cc-orch session stop main` · `cc-orch session restart main` |
 | 작업 폴더 찾기 | `cc-orch session path main` |
 | 사용량·모델 배정 상태 | `orch-usage-report --days 1` · `orch-model-guard budget` · `orch-model-guard lanes` |
+| 작업 기록 보관(아카이브) | `orch-archive` · `orch-archive apply` · `orch-archive verify` |
 
 ### 막혔을 때
 

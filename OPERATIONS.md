@@ -45,6 +45,7 @@ The main installed paths are:
 ~/.local/bin/orch-model-guard              -> bin/orch-model-guard-runtime
 ~/.local/bin/orch-summary-check
 ~/.local/bin/orch-usage-report
+~/.local/bin/orch-archive
 ```
 
 The installer also configures the legacy Fable guard timer, Claude 5h/7d status-line quota tap,
@@ -902,6 +903,58 @@ repository. `PreToolUse` subagent identity was measured; stop-event identity/tra
 still needs a live-session check. Inspect the journal after a known gate claim: a missing record
 may mean an unsupported payload, a hook that did not fire, or an off-switch. `systemMessage`
 display on `SubagentStop` is also unconfirmed; stderr and the journal preserve warnings.
+
+## Archive (orch-archive)
+
+`orch-archive` archives cc-orch sessions, task directories (including unfinished work and
+nested historical copies), registries, linked Claude transcripts and referenced Codex rollouts.
+Native Codex rollouts without a cc-orch link are counted but not copied. Generated structure
+is English; historical prose, including Korean registry cells, is preserved verbatim.
+
+The private local git vault defaults to `~/orchestra-vault`; lossless compressed raw files
+live outside git at `~/.claude/orchestra-archive/raw` (directories 0700, files 0600).
+Sources are never modified, moved or deleted. Live logs use byte-offset watermarks for
+complete lines; any unterminated tail is also preserved separately. Snapshots are immutable,
+and the cumulative catalog retains tasks whose source checkout was deleted.
+
+```bash
+orch-archive                       # read-only plan; creates nothing
+orch-archive plan --json --top 20
+orch-archive apply                 # writes locally and commits changes in the vault
+orch-archive apply --no-commit
+orch-archive verify
+orch-archive show cc-orchestra--38-orch-archive
+```
+
+`archive-policy.conf` controls storage paths, discovery bases, inclusion switches and size
+limits. `ORCH_ARCHIVE_POLICY` selects an override policy. Path overrides are
+`ORCH_ARCHIVE_VAULT`, `ORCH_ARCHIVE_RAW`, `ORCH_ARCHIVE_ALLOWLIST`,
+`ORCH_ARCHIVE_STATE_DIRS`, `ORCH_ARCHIVE_CLAUDE_PROJECTS`, `ORCH_ARCHIVE_CODEX_HOME`
+(then `CODEX_HOME`) and `ORCH_ARCHIVE_EXTRA_BASES`. Policy is parsed as data, never sourced.
+Vault/raw overlap or destinations inside source roots are rejected.
+
+Every text-like file is copied into the raw store. Payload files default to a 16 MiB per-file
+and 256 MiB total per-task budget; if total payload exceeds the task budget, all payload in
+that snapshot is manifest-only. Change `PAYLOAD_FILE_MAX_BYTES` and `PAYLOAD_TASK_MAX_BYTES`
+before apply (`0` means unlimited), or set `INCLUDE_PAYLOAD=0`. Every omitted payload file
+is listed with its size and reason; the plan reports sizes before and after compression, plus
+vault bytes split into artifacts, manifests, notes, catalog and other files. File entries live
+only in compact manifests; catalog snapshots hold counts and a manifest hash. Artifact copies
+are restored from verified raw blobs at write time, so plans retain lengths and pointers.
+
+The existing advisory secret scanner guards all vault-bound text; false positives and false
+negatives are possible. Withheld content stays in the private raw store. `_meta/withheld.md`
+lists hashes and locations, never matched content. To release an item, append
+`sha256:<full hash from the report>` to `~/.claude/orchestra-archive/allowlist.txt`
+(or the configured allow-list) and re-run apply. Raw logs are lossless and are not scanned.
+The full-text backstop honors released values in both raw and JSON-escaped metadata while
+rejecting other secret-shaped lines.
+The tool makes no network or model calls, configures no remote, and never pushes.
+
+The managed `.obsidian/graph.json` is regenerated on apply and excludes artifacts, metadata
+and dashboards from the graph. Frontmatter and `.base` dashboards use JSON-compatible YAML
+flow syntax, validated with the Python standard library. Obsidian rendering was not visually
+verified; Bases needs Obsidian >= 1.9.0.
 
 ## Tuning
 
