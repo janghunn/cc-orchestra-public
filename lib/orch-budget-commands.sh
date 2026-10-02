@@ -119,6 +119,7 @@ cmd_lanes() {
   local hint=codex-first why="Codex owns heavy work; Claude already pays for orchestration"
   local c_ratio="$CLAUDE_RATIO" x_ratio="$CODEX_RATIO"
   local sparing_rank="${BUDGET_CODEX_SPARING_MIN_RANK:-3}"
+  if [ "$CODEX_PIN_ACTIVE" != 1 ]; then
   if [ "$CODEX_EFFECTIVE_RANK" -ge "$sparing_rank" ] && [ "$CODEX_EFFECTIVE_RANK" -gt "$CLAUDE_RANK" ]; then
     hint=codex-sparing
     why="Codex pressure ($CODEX_STATE) reached the provider reserve boundary; reserve it for gates"
@@ -129,6 +130,7 @@ cmd_lanes() {
       hint=codex-sparing
       why="Codex has materially less reset-time headroom than Claude at the reserve boundary"
     fi
+  fi
   fi
   if [ "$CLAUDE_RANK" -ge 3 ] && [ "$CODEX_EFFECTIVE_RANK" -lt 3 ]; then
     hint=codex-first

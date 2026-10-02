@@ -480,6 +480,13 @@ for future_until in "$((PIN_NOW+86400))" "$(date -u -d "@$((PIN_NOW+86400))" '+%
   assert_has "$route" pin-until= "route pin expiry visible"
   assert_has "$(TZ=UTC pin_guard budget | sed -n '/^codex   /p')" '; until ' "budget pin expiry visible"
 done
+# A custom reserve boundary must never let real Codex pressure override an active pin.
+set_codex_pin healthy
+printf '\nBUDGET_CODEX_SPARING_MIN_RANK=0\n' >> "$HARNESS/budget-policy.conf"
+assert_eq "$(pin_guard lanes | sed -n '1p')" dispatch=codex-first "pin overrides custom sparing boundary"
+set_codex_pin ""
+printf '\nBUDGET_CODEX_SPARING_MIN_RANK=0\n' >> "$HARNESS/budget-policy.conf"
+assert_eq "$(pin_guard lanes | sed -n '1p')" dispatch=codex-sparing "empty pin honors custom sparing boundary"
 set_codex_pin ""
 ok "Codex pressure pin preserves real metrics, visibility, expiry and explicit overrides"
 
