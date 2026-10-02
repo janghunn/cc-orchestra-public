@@ -21,10 +21,11 @@ from policies import load_jev
 assert_out_of_tree = load_jev("common").assert_out_of_tree
 MODEL_DIGEST = "408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6"
 MODEL_ALIAS = "compaction-replay-" + MODEL_DIGEST[:16]
-PROMPT_INPUT_CHARS = 2000
-PROMPT_RESULT_CHARS = 6000
+PROMPT_INPUT_CHARS = 1500
+PROMPT_RESULT_CHARS = 4000
+PROMPT_CONTROLS = {code: " " for code in (*range(32), 127) if code not in (9, 10)}
 # LocalError, RESPONSE_MAX_BYTES, connect_unix and post_unix copied from
-# bin/orch-jev-local (AF_UNIX HTTP transport with a total request deadline).
+# bin/orch-jev-local; transport generalized for GET /health with the same deadline.
 RESPONSE_MAX_BYTES = 1_048_576
 
 
@@ -45,7 +46,8 @@ def connect_unix(sock, path):
         sock.connect(str(path))
 
 
-def post_unix(path, body, timeout):
+def request_unix(path, method, target, timeout, body=None):
+    """Return GET status or parsed POST JSON, bounded by one total deadline."""
     deadline = time.monotonic() + timeout
 
     def remaining():
@@ -67,20 +69,23 @@ def post_unix(path, body, timeout):
         except OSError:
             pass
 
-    timer = threading.Timer(remaining(), expire)
-    timer.daemon = True
+    timer = None
     try:
+        timer = threading.Timer(remaining(), expire)
+        timer.daemon = True
         timer.start()
         sock.settimeout(remaining())
         connect_unix(sock, path)
         sock.settimeout(remaining())
-        conn.request("POST", "/v1/chat/completions",
-                     body=json.dumps(body, ensure_ascii=False).encode(),
+        conn.request(method, target,
+                     body=json.dumps(body, ensure_ascii=False).encode() if body is not None else None,
                      headers={"Content-Type": "application/json", "Accept": "application/json",
                               "User-Agent": "cc-orchestra-orch-jev-local"})
         sock.settimeout(remaining())
         response = conn.getresponse()
         remaining()
+        if method == "GET":
+            return response.status
         if response.status != 200:
             raise LocalError(f"http {response.status}")
         data = bytearray()
@@ -101,9 +106,18 @@ def post_unix(path, body, timeout):
         remaining()
         raise
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
         conn.close()
         sock.close()
+
+
+def post_unix(path, body, timeout):
+    return request_unix(path, "POST", "/v1/chat/completions", timeout, body)
+
+
+def get_unix(path, timeout):
+    return request_unix(path, "GET", "/health", timeout)
 
 
 def file_digest(path):
@@ -182,13 +196,15 @@ class LocalServer:
                 if self.process.poll() is not None:
                     raise LocalError("local server exited during startup")
                 try:
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                        probe.settimeout(0.2)
-                        connect_unix(probe, self.socket_path)
-                    ready = True
-                    return self
-                except OSError:
-                    time.sleep(0.05)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if get_unix(self.socket_path, timeout=min(1.0, remaining)) == 200:
+                        ready = True
+                        return self
+                except (OSError, http.client.HTTPException):
+                    pass
+                time.sleep(0.05)
             raise LocalError("local server startup timed out")
         finally:
             # __exit__ is not invoked when __enter__ raises, including Ctrl-C.
@@ -219,8 +235,9 @@ class LocalScorer:
 
     @staticmethod
     def requests(tool_name, input_text, result_text):
-        context = json.dumps({"tool": tool_name, "input": input_text[:PROMPT_INPUT_CHARS],
-                              "result": result_text[:PROMPT_RESULT_CHARS]},
+        context = json.dumps({"tool": tool_name.translate(PROMPT_CONTROLS),
+                              "input": input_text.translate(PROMPT_CONTROLS)[:PROMPT_INPUT_CHARS],
+                              "result": result_text.translate(PROMPT_CONTROLS)[:PROMPT_RESULT_CHARS]},
                              ensure_ascii=False, sort_keys=True)
         for question in ("Keep the tool call for future context?",
                          "Keep the tool result verbatim for future context?"):

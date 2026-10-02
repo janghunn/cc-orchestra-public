@@ -43,6 +43,9 @@ bootstrap count, criteria commit and the same input snapshot to reproduce it.
 
 P3 uses only an already-installed pinned GGUF and `llama-server`, and requires a
 GPU with at least 12288 MiB free. Missing prerequisites produce `P3 skipped:
-<reason>` while P0–P2 continue. The suite always reports that the real GPU/model
-path is untested; an AF_UNIX bind denial is delegated explicitly to normal
-verification. No downloads, DNS or network connections are used.
+<reason>` while P0–P2 continue. Local scoring waits for HTTP 200 from `/health`
+over the private AF_UNIX socket. Any scorer error sets P3 status to `errors`;
+its metrics remain available, but it is excluded from the verdict. The suite
+always reports that the real GPU/model path is untested; an AF_UNIX bind denial
+is delegated explicitly to normal verification. No downloads, DNS or network
+connections are used.

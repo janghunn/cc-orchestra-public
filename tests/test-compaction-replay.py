@@ -186,13 +186,16 @@ def verdicts():
     for policy in aggregate["policies"].values():
         policy["file_kind"]["subagent"]["classes"]["path"]["retained"] = 189
     assert score.verdict(aggregate)["overall"] == "do not pursue"
-    for status in ("off", "skipped", "fake"):
+    for status in ("off", "skipped", "fake", "errors"):
         aggregate["p3"] = {"status": status}
         aggregate["policies"]["P3"] = sufficient()["policies"]["P2"]
         assert "P3" not in score.verdict(aggregate)["arms"]
         assert score.verdict(aggregate)["overall"] == "do not pursue"
     aggregate["p3"] = {"status": "ran"}
     assert score.verdict(aggregate)["overall"] == "proceed to design discussion"
+    aggregate["policies"]["P3"]["pooled"]["p3_errors"] = 1
+    assert "P3" not in score.verdict(aggregate)["arms"]
+    assert score.verdict(aggregate)["overall"] == "do not pursue"
     # Threshold failures with sufficient cells precede unrelated insufficient cells.
     aggregate = sufficient()
     aggregate["policies"]["P1"]["pooled"]["classes"]["sha"]["needed"] = 1
@@ -312,6 +315,17 @@ def containment():
 def fake_p3():
     requests = list(local_scorer.LocalScorer.requests("Read", "i" * 10000, "r" * 50000))
     assert all(len(request["messages"][0]["content"]) < 8500 for request in requests)
+    assert local_scorer.PROMPT_INPUT_CHARS == 1500 and local_scorer.PROMPT_RESULT_CHARS == 4000
+    controls = "".join(chr(code) for code in (*range(32), 127) if code not in (9, 10))
+    for result_text in ((controls * 300)[:8000], "\n\t" * 4000):
+        requests = list(local_scorer.LocalScorer.requests("Read", "\n\t" * 5000, result_text))
+        assert len(requests) == 2
+        for request in requests:
+            content = request["messages"][0]["content"]
+            assert len(content) < 12000
+            context = json.loads(content.split("\n")[1])
+            assert context["input"] == "\n\t" * 750
+            assert context["result"] == (" " * 4000 if result_text[0] == "\x00" else "\n\t" * 2000)
     for answer, expected in (((False, True), "keep"), ((True, False), "truncate"), ((False, False), "drop")):
         seq = unpinned()
         assert policies.decide("P3", seq, len(seq), {"scorer": lambda *a: answer}) == [expected]
@@ -319,6 +333,12 @@ def fake_p3():
     secret = 'password="s3cr3tvaluewithmorethan20chars"'
     for where in ("text", "input_text", "name"):
         seq = unpinned(**{where: secret})
+        ctx = {"scorer": lambda *a: calls.append(a)}
+        assert policies.decide("P3", seq, len(seq), ctx) == ["keep"]
+        assert ctx["p3_secret_skips"] == 1 and calls == []
+    # Secrets beyond both caps still prevent the scorer from seeing any text.
+    for where in ("text", "input_text"):
+        seq = unpinned(**{where: "padding\n" * 2000 + secret})
         ctx = {"scorer": lambda *a: calls.append(a)}
         assert policies.decide("P3", seq, len(seq), ctx) == ["keep"]
         assert ctx["p3_secret_skips"] == 1 and calls == []
@@ -348,6 +368,25 @@ def fake_p3():
     cached("Read", "input changed", "output")
     assert len(calls) == 2
     assert all(json.loads(p.read_text()) == [True, False] for p in (TMP / "cache").glob("*.json"))
+    # Exercise the local replay path without a model, socket or GPU. Every
+    # unpinned result errors: basic contributes 1+5+9; each of main-copy,
+    # partial-copy and subagent contributes 0+1+3, totaling 27 decisions.
+    out, note = TMP / "p3-errors", TMP / "p3-errors.md"
+    with patch.object(local_scorer, "preflight", return_value=None), \
+         patch.object(local_scorer, "LocalServer") as server, \
+         patch.object(local_scorer.LocalScorer, "__call__", side_effect=broken):
+        server.return_value.__enter__.return_value.socket_path = TMP / "unused.sock"
+        code, stdout, stderr = cli("--out", out, "--note", note, "--p3", "local")
+    assert code == 0, (stdout, stderr)
+    data = json.loads((out / "aggregate.json").read_text())
+    assert data["p3"] == {"status": "errors", "errors": 27}
+    assert data["policies"]["P3"]["pooled"]["p3_errors"] == 27
+    assert data["policies"]["P3"]["pooled"]["bytes_removed"] == 0
+    assert "P3" not in data["verdict"]["arms"]
+    assert "P3 status: errors (27 scorer errors; not a verdict arm)" in note.read_text().splitlines()
+    assert "| P3 | pooled |" in note.read_text()
+    assert "must not appear in artifacts" not in (note.read_text() + stdout + stderr
+                                                  + (out / "aggregate.json").read_text())
 
 
 def executable(path, text):
@@ -384,6 +423,39 @@ def preflight():
         executable(nvidia, "print('0, 1000\\n1, 12288')\n")
         assert local_scorer.preflight(model, str(server)) is None
         assert local_scorer.select_gpu() == ("1", None)
+    health_readiness()
+
+
+def health_readiness():
+    """Readiness retry/cleanup must run even where AF_UNIX bind is denied."""
+    fake = executable(TMP / "health-probe-server", "import time\ntime.sleep(30)\n")
+    with patch.object(local_scorer, "select_gpu", return_value=("0", None)):
+        for name, first in (("loading", 503), ("unreachable", OSError("synthetic connection failure"))):
+            server = local_scorer.LocalServer(TMP / "synthetic.gguf", str(fake),
+                                              TMP / ("health-" + name), startup_timeout=1)
+            with patch.object(local_scorer, "get_unix", side_effect=[first, 200]) as probe, \
+                 patch.object(local_scorer.time, "sleep", wraps=time.sleep) as pause:
+                with server:
+                    assert probe.call_count == 2 and server.process.poll() is None
+                    pause.assert_called_once_with(0.05)
+                    assert all(0 < call.kwargs["timeout"] <= 1 for call in probe.call_args_list)
+            assert server.process.poll() is not None and not server.directory.exists()
+        server = local_scorer.LocalServer(TMP / "synthetic.gguf", str(fake),
+                                          TMP / "health-timeout", startup_timeout=.12)
+        with patch.object(local_scorer, "get_unix", return_value=503) as probe:
+            try:
+                with server:
+                    raise AssertionError("HTTP 503 was accepted as ready")
+            except local_scorer.LocalError as error:
+                assert str(error) == "local server startup timed out"
+            assert probe.call_count >= 2
+        assert server.process.poll() is not None and not server.directory.exists()
+        try:
+            os.kill(server.process.pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("server survived HTTP readiness timeout")
 
 
 def unix_client_and_lifecycle():
@@ -438,7 +510,15 @@ assert not any(k.startswith("LLAMA_ARG_") or k == "TYPESAFE_API_KEY" for k in os
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.bind(sys.argv[sys.argv.index("--host") + 1])
 sock.listen(4)
-time.sleep(30)
+while True:
+    conn, _ = sock.accept()
+    with conn:
+        stream = conn.makefile("rb")
+        assert stream.readline().startswith(b"GET /health ")
+        while stream.readline() != b"\\r\\n":
+            pass
+        conn.sendall(b"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+        stream.close()
 ''')
     with patch.object(local_scorer, "select_gpu", return_value=("2", None)), \
          patch.dict(os.environ, {"LLAMA_ARG_HOST": "forbidden", "TYPESAFE_API_KEY": "synthetic"}):
@@ -534,7 +614,7 @@ def main():
               ("frozen verdict mechanics", verdicts), ("deterministic aggregates", determinism),
               ("dedup, normalization and snapshot discovery", normalization),
               ("output containment and aggregate privacy", containment),
-              ("P3 fake scorer, screening and cache", fake_p3), ("P3 preflight skips", preflight),
+              ("P3 fake scorer, screening and cache", fake_p3), ("P3 preflight skips and health readiness", preflight),
               ("AF_UNIX client and server lifecycle", unix_client_and_lifecycle),
               ("real local model", None), ("static egress and network guard", static_egress),
               ("read-only sources", source_read_only)]

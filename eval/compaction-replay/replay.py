@@ -196,7 +196,7 @@ def bootstrap(metrics, seed, repetitions):
 
 
 def aggregate_rows(rows, counts, p3, seed, repetitions):
-    names = ["P0", "P1", "P2"] + (["P3"] if p3["status"] in ("fake", "ran") else [])
+    names = ["P0", "P1", "P2"] + (["P3"] if p3["status"] in ("fake", "ran", "errors") else [])
     aggregate = dict(counts=counts, p3=p3, policies={p: empty_policy() for p in names})
     for name, policy in aggregate["policies"].items():
         by_cell = {scope: [] for scope, _ in cells(policy)}
@@ -208,6 +208,10 @@ def aggregate_rows(rows, counts, p3, seed, repetitions):
                 merge_metric(cell, metric)
             finish_metric(cell)
             cell["bootstrap"] = bootstrap(by_cell[scope], seed, repetitions)
+    if "P3" in aggregate["policies"]:
+        errors = aggregate["policies"]["P3"]["pooled"]["p3_errors"]
+        if errors:
+            aggregate["p3"] = {"status": "errors", "errors": errors}
     aggregate["verdict"] = verdict(aggregate)
     return aggregate
 

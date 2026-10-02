@@ -167,8 +167,12 @@ pre-cut events; post-cut changes cannot change decisions.
 The deterministic fake scorer keeps verbatim iff the first hex character of
 SHA-256(result text) is in `0123`, and keeps the call iff SHA-256(input text)
 starts in `01234567`. `--p3 fake` is labelled **DEMONSTRATION** and excluded from
-verdict arms. P0 is always a reference, never a verdict arm. Only a successfully
-started `--p3 local` may enter the verdict as P3. P3 failure/skip is not a score.
+verdict arms. P0 is always a reference, never a verdict arm. P3 enters the verdict
+only when `--p3 local` reports `p3.status == "ran"` with zero scorer errors.
+If pooled `p3_errors` is positive, report `p3.status = "errors"` and an `errors`
+field containing that count. Keep P3's numeric results for inspection, but
+exclude P3 from the verdict. The note prints
+`P3 status: errors (<n> scorer errors; not a verdict arm)`. A skipped P3 has no score.
 
 ## Local P3 preflight, lifecycle and caching
 
@@ -192,8 +196,12 @@ install a server. Select the first suitable GPU and expose just that index via
 environment. Create a private 0700 socket directory inside the guarded output
 directory. Launch with its cwd there, `--host <socket name>`, `--offline`,
 `-ngl 999`, `--jinja`, `--reasoning-budget 0`, `--no-webui`, `--no-slots`,
-`-c 8192`, `-np 1`; suppress server output. Wait for AF_UNIX readiness with a
-deadline. A startup failure records `P3 skipped: local server startup failed`.
+`-c 8192`, `-np 1`; suppress server output. Wait until an HTTP `GET /health` over
+the AF_UNIX socket returns 200. Other statuses (including 503 while the model
+loads), connection errors and malformed HTTP responses retry after 0.05 seconds
+until the startup deadline. Each probe uses the same total-deadline transport as
+scoring, with its timeout bounded by the remaining startup time. A startup
+failure records `P3 skipped: local server startup failed`.
 
 Always terminate only this run's Popen PID, wait up to ten seconds, then kill
 that PID if necessary. The startup path has a `finally` cleanup covering timeout,
@@ -206,10 +214,12 @@ disabled. Ask two A/B questions (A = yes), with `max_tokens=1`, `temperature=0`,
 `chat_template_kwargs.enable_thinking=false`. Normalize A/B top-logprob mass;
 A probability >= 0.5 is true. Malformed responses raise a conservative scorer
 error. The prompt treats supplied tool text as data, not instructions.
-Local prompts include only the first 2000 characters of input text
-(`PROMPT_INPUT_CHARS`) and the first 6000 characters of result text
-(`PROMPT_RESULT_CHARS`) to limit context use. Secret screening in
-`policies.decide` still examines the full tool name, input and result texts.
+Before building local prompts, replace C0 control characters other than newline
+(`\n`) and tab (`\t`), plus DEL, with spaces. Then cap input text to its first
+1500 characters (`PROMPT_INPUT_CHARS`) and result text to its first 4000
+characters (`PROMPT_RESULT_CHARS`). This bounds JSON-escaping expansion as well
+as context use. Secret screening in `policies.decide` still examines the full,
+original tool name, input and result texts before normalization or capping.
 
 Cache booleans only under `<out>/p3-cache/<sha256>.json`. The key covers the exact
 screened request prompts and pinned model digest; screening precedes every cache

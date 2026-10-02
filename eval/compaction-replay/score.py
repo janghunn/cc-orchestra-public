@@ -16,7 +16,8 @@ def verdict(aggregate, recall_thresholds=RECALL_THRESHOLDS, min_files=MIN_FILES,
             min_needed=MIN_NEEDED, min_agentids=MIN_AGENTIDS, min_removed=MIN_REMOVED):
     arms = {}
     for name, policy in sorted(aggregate["policies"].items()):
-        if name == "P0" or (name == "P3" and aggregate["p3"]["status"] != "ran"):
+        if name == "P0" or (name == "P3" and
+                            (aggregate["p3"]["status"] != "ran" or policy["pooled"]["p3_errors"])):
             continue
         failed, insufficient = [], []
         pooled = policy["pooled"]
@@ -73,6 +74,7 @@ def interval(value):
 def render_note(aggregate, meta):
     p3 = aggregate["p3"]
     p3_status = ("P3 skipped: " + p3["reason"] if p3["status"] == "skipped"
+                 else f"errors ({p3['errors']} scorer errors; not a verdict arm)" if p3["status"] == "errors"
                  else "fake (demonstration, not a verdict arm)" if p3["status"] == "fake"
                  else p3["status"])
     hashes = meta["source_hash_check"]
