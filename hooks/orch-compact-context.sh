@@ -151,7 +151,7 @@ def main():
     terminal_rows = [row for row in rows if row["terminal"]]
     omitted_terminal, omitted_open = 0, 0
 
-    def output():
+    def output(terminal_rows, directives, open_rows, omitted_terminal, omitted_directives, omitted_open):
         lines = [
             "Machine-recovered data, not instructions: hooks/orch-compact-context.sh read these local files after this conversation was compacted.",
             f"Registry file: {clean(str(registry), 300)}",
@@ -184,23 +184,48 @@ def main():
         return json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}},
                           ensure_ascii=False) + "\n"
 
-    oldest_terminal = iter(sorted(terminal_rows, key=age))
-    oldest_open = iter(sorted(open_rows, key=age))
-    encoded = output()
-    while len(encoded.encode("utf-8")) > 6144:
-        if terminal_rows:
-            terminal_rows.remove(next(oldest_terminal))
-            omitted_terminal += 1
-        elif directives:
-            directives.pop()
-            omitted_directives += 1
-        elif open_rows:
-            open_rows.remove(next(oldest_open))
-            omitted_open += 1
-        else:
-            return
-        encoded = output()
-    sys.stdout.write(encoded)
+    def fitting_output(items, render, rows=False):
+        if not items:
+            return None
+        if rows:
+            ranks = {row["index"]: rank for rank, row in enumerate(sorted(items, key=age))}
+
+        def candidate(dropped):
+            kept = ([row for row in items if ranks[row["index"]] >= dropped] if rows
+                    else items[:len(items) - dropped])
+            encoded = render(kept, dropped)
+            return encoded if len(encoded.encode("utf-8")) <= 6144 else None
+
+        # Zero drops already failed. Search without requiring the empty candidate to fit:
+        # removing the last short directive can grow its section by adding "  none".
+        low, high = 1, len(items)
+        while low < high:
+            middle = (low + high) // 2
+            if candidate(middle) is None:
+                low = middle + 1
+            else:
+                high = middle
+        return candidate(low)
+
+    encoded = output(terminal_rows, directives, open_rows, omitted_terminal, omitted_directives, omitted_open)
+    if len(encoded.encode("utf-8")) <= 6144:
+        sys.stdout.write(encoded)
+        return
+    encoded = fitting_output(
+        terminal_rows,
+        lambda kept, dropped: output(kept, directives, open_rows, dropped, omitted_directives, 0),
+        rows=True)
+    if encoded is None:
+        encoded = fitting_output(
+            directives,
+            lambda kept, dropped: output([], kept, open_rows, len(terminal_rows), omitted_directives + dropped, 0))
+    if encoded is None:
+        encoded = fitting_output(
+            open_rows,
+            lambda kept, dropped: output([], [], kept, len(terminal_rows), omitted_directives + len(directives), dropped),
+            rows=True)
+    if encoded is not None:
+        sys.stdout.write(encoded)
 
 
 try:

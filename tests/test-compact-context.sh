@@ -14,6 +14,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import unicodedata
 
 root, tmp = map(Path, sys.argv[1:])
@@ -259,18 +260,46 @@ assert re.search(r'Omitted: 0 older terminal rows, [1-9]\d* open rows, 1 directi
 assert '  lead-alpha: ' + '가' * 59 + '… [RUNNING]' in text
 ok('UTF-8 cap drops directives before oldest open rows and retains the full board')
 
-socket_input, socket_writer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-with socket_input, socket_writer:
-    socket_payload = dict(session_id='s1', hook_event_name='SessionStart', source='compact', cwd=str(base))
-    socket_writer.sendall(json.dumps(socket_payload).encode())
-    socket_writer.shutdown(socket.SHUT_WR)
-    socket_result = subprocess.run(
-        ['bash', str(hook)], stdin=socket_input, capture_output=True, cwd=base,
-        env=dict(os.environ, CC_ORCH_PROJECT='t', CC_ORCH_STATE_DIR=str(state)), timeout=10)
-assert socket_result.returncode == 0, socket_result
-assert socket_result.stderr == b'', socket_result.stderr
-assert socket_result.stdout == out and out
-ok('socket-fed stdin produces the same nonempty context as pipe-fed stdin')
+# Claude Code passes hook stdin as a socket that cannot be reopened by path.
+hook_source = hook.read_text()
+assert 'payload="$(cat)"' in hook_source.splitlines()
+assert '/dev/stdin' not in hook_source
+ok('hook reads inherited stdin with cat without reopening it by path')
+
+large_repo = fixture('large-registry')
+large_terminal = [row('lead-bravo', 10000 + i, 'PASS', updated=
+                      (start + datetime.timedelta(minutes=i)).strftime('%Y%m%d-%H%M')) for i in range(10000)]
+large_open = row('lead-alpha', 20000, 'RUNNING')
+registry(large_repo, large_terminal + [large_open])
+large_payload = dict(session_id='s1', hook_event_name='SessionStart', source='compact', cwd=str(large_repo))
+started = time.perf_counter()
+large_result = subprocess.run(
+    ['bash', str(hook)], input=json.dumps(large_payload).encode(), capture_output=True, cwd=large_repo,
+    env=dict(os.environ, CC_ORCH_PROJECT='t', CC_ORCH_STATE_DIR=str(state)), timeout=10)
+elapsed = time.perf_counter() - started
+assert large_result.returncode == 0, large_result
+assert large_result.stderr == b'', large_result.stderr
+assert elapsed < 5, f'10,000-row hook took {elapsed:.3f}s (limit 5s)'
+text = context(large_result.stdout)
+assert large_open[1] in text and large_terminal[-1][1] in text and large_terminal[0][1] not in text
+ok(f'10,000 terminal rows retain the open and newest IDs within 5 seconds ({elapsed:.3f}s)')
+
+try:
+    socket_input, socket_writer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+except (PermissionError, OSError) as error:
+    print(f'SKIP: socket-fed stdin case: socketpair denied in this sandbox ({error})', flush=True)
+else:
+    with socket_input, socket_writer:
+        socket_payload = dict(session_id='s1', hook_event_name='SessionStart', source='compact', cwd=str(base))
+        socket_writer.sendall(json.dumps(socket_payload).encode())
+        socket_writer.shutdown(socket.SHUT_WR)
+        socket_result = subprocess.run(
+            ['bash', str(hook)], stdin=socket_input, capture_output=True, cwd=base,
+            env=dict(os.environ, CC_ORCH_PROJECT='t', CC_ORCH_STATE_DIR=str(state)), timeout=10)
+    assert socket_result.returncode == 0, socket_result
+    assert socket_result.stderr == b'', socket_result.stderr
+    assert socket_result.stdout == out and out
+    ok('socket-fed stdin produces the same nonempty context as pipe-fed stdin')
 
 print(f'PASS: {passed} compact-context cases')
 PY
