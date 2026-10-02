@@ -1412,7 +1412,7 @@ class Archive:
         for dirname in ("sessions", "archived_sessions"):
             for path in walk(self.p["CODEX_HOME_DIR"] / dirname, errors=self.errors, optional=True):
                 match = re.search(r"(" + UUID + r")\.jsonl$", path.name)
-                if match and path.name.startswith("rollout-") and not path.is_symlink():
+                if match and path.name.startswith("rollout-") and not source_test(path, "is_symlink", self.errors):
                     indexed.setdefault(match[1].lower(), []).append(path)
         for thread, owners in sorted(self.thread_owners.items()):
             matches = indexed.get(thread.lower(), [])
@@ -1835,7 +1835,11 @@ def verify(policy):
             if sha(data) != pointer["sha256"] or (is_raw and len(data) != pointer["length"]):
                 raise ValueError("hash or length mismatch")
             if is_raw and (rel, pointer["sha256"]) in manifest_blobs:
-                json.loads(data)
+                manifest = json.loads(data)
+                if isinstance(manifest, dict):
+                    for embedded in pointer_values(manifest.get("entries", [])):
+                        if "blob" in embedded:
+                            check_pointer(embedded, f"{context}: manifest {rel}")
         except (OSError, ValueError, EOFError, KeyError, TypeError, zlib.error) as error:
             problems.append(f"{context}: raw pointer or file pointer invalid ({type(error).__name__})")
 

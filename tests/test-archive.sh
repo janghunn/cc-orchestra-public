@@ -643,6 +643,64 @@ ok('commit: none' not in error_process.stdout and error_report['skipped_counts']
    'CLI source errors exit 4 while apply commits; restored sources archive normally with exit 0')
 shutil.rmtree(error_fixture)
 
+tail_fixture = home / 'manifest-tail-fixture'
+tail_base = tail_fixture / 'project'
+tail_task = task(tail_base, '01-tail', 'STATUS: PASS\n')
+tail_log = tail_task / 'history.log'
+put(tail_log, b'task complete line\nunique old task tail')
+put(tail_base / '.orchestra/root.log', b'unique root complete line\nroot tail')
+tail_vault, tail_raw = tail_fixture / 'vault', tail_fixture / 'raw'
+tail_env = dict(os.environ, ORCH_ARCHIVE_VAULT=str(tail_vault), ORCH_ARCHIVE_RAW=str(tail_raw),
+    ORCH_ARCHIVE_STATE_DIRS='', ORCH_ARCHIVE_EXTRA_BASES=str(tail_base),
+    ORCH_ARCHIVE_CLAUDE_PROJECTS=str(tail_fixture / 'claude'), ORCH_ARCHIVE_CODEX_HOME=str(tail_fixture / 'codex'))
+run('apply', '--no-commit', env=tail_env)
+tail_catalog = json.loads((tail_vault / '_meta/catalog.json').read_text())
+old_snapshot = next(iter(tail_catalog['tasks']['project--01-tail']['snapshots'].values()))
+old_manifest = old_snapshot['manifest']
+old_entries = json.loads(gzip.decompress((tail_raw / old_manifest['blob']).read_bytes()))['entries']
+old_tail = next(e for e in old_entries if e['relpath'] == 'history.log')['raw'][-1]
+assert old_tail['offset'] == len(b'task complete line\n')
+with tail_log.open('ab') as stream:
+    stream.write(b' extended tail')
+run('apply', '--no-commit', env=tail_env)
+current_source = json.loads((tail_raw / f'sources/{archive.sha(str(tail_log.resolve()).encode())[:24]}.json').read_text())
+assert not any(p.get('blob') == old_tail['blob'] for p in archive.pointer_values(current_source))
+assert 'verify: OK' in run('verify', env=tail_env)
+damaged_raw = tail_fixture / 'damaged-raw'
+shutil.copytree(tail_raw, damaged_raw)
+put(damaged_raw / old_tail['blob'], b'corrupt old tail gzip')
+tail_failure = run('verify', code=1, env=dict(tail_env, ORCH_ARCHIVE_RAW=str(damaged_raw)))
+assert 'manifest ' + old_manifest['blob'] in tail_failure
+# Project-root manifests must follow their embedded chunk pointers too.
+put(damaged_raw / old_tail['blob'], (tail_raw / old_tail['blob']).read_bytes())
+root_pointer = tail_catalog['projects']['project']['manifests'][0]
+root_entries = json.loads(gzip.decompress((tail_raw / root_pointer['blob']).read_bytes()))['entries']
+root_chunk = next(e for e in root_entries if e['relpath'] == 'root.log')['raw'][0]
+put(damaged_raw / root_chunk['blob'], b'corrupt root chunk gzip')
+root_failure = run('verify', code=1, env=dict(tail_env, ORCH_ARCHIVE_RAW=str(damaged_raw)))
+ok('manifest ' + root_pointer['blob'] in root_failure and 'verify: OK' in run('verify', env=tail_env),
+   'verify checks immutable task-manifest tails and project-manifest chunks, naming the manifest on corruption')
+shutil.rmtree(tail_fixture)
+
+if os.geteuid() != 0:
+    inaccessible_dir = home / 'codex/sessions/listable-not-traversable'
+    inaccessible_rollout = inaccessible_dir / 'rollout-55555555-5555-5555-5555-555555555555.jsonl'
+    put(inaccessible_rollout, '{"message":"blocked traversal"}\n')
+    inaccessible_mode = stat.S_IMODE(inaccessible_dir.stat().st_mode)
+    try:
+        inaccessible_dir.chmod(0o600)
+        inaccessible_report = json.loads(run('--json', code=4))
+        assert any(item['path'] == str(inaccessible_rollout) and item['reason'] == 'unreadable' and item['errno'] == 13
+                   for item in inaccessible_report['source_errors']['items'])
+        ok(inaccessible_report['source_errors']['count'] == 1 and inaccessible_report['logical_tasks'] > 0,
+           'a listable rollout directory without traversal permission completes plan with source-error exit 4')
+    finally:
+        inaccessible_dir.chmod(inaccessible_mode)
+        shutil.rmtree(inaccessible_dir)
+else:
+    print('SKIP: mode 0o600 rollout-directory sub-case (running as root)')
+    ok(True, 'rollout traversal regression skipped for root')
+
 for path in (vault / '.obsidian/graph.json', *vault.glob('dashboards/*.base')):
     json.loads(path.read_text())
 install = (repo / 'install.sh').read_text()
