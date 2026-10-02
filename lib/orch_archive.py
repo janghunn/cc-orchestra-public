@@ -662,7 +662,10 @@ class Discovery:
             if entry.name == ".orchestra":
                 self.add_root(path, "nested")
                 self.nested(path, 0)
-            elif not self.task_dir(path):
+            # Numeric container names alone must not hide historical roots.
+            # Direct root children still use task_dir()'s broader definition.
+            elif not any((path / name).is_file() and not (path / name).is_symlink()
+                         for name in ("brief.md", "summary.md", "plan.md")):
                 self.nested(path, depth + 1)
 
     @staticmethod
@@ -834,7 +837,7 @@ def extract(files, location, entries_list):
         if re.match(r"^\s*(`{3,}|~{3,})", original):
             continue
         line = strip_prefix(original)
-        status = re.match(r"^STATUS\s*:\s*([A-Z][A-Z-]*)", line)
+        status = re.match(r"^(?i:STATUS)\s*:\s*([A-Z][A-Z-]*)", line)
         if status:
             fields["status_mentions"].append({"value": status[1].lower(), "line": original,
                                                "source": f"{location}/summary.md:{n}", "final": original.startswith("[lead-")})

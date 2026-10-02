@@ -120,6 +120,10 @@ task(p1 / '.orchestra/wt/checkout', '07-old', 'STATUS: CLOSED\n')
 task(p3, '01-codex-task')
 home_task = task(home, '01-home')
 (p1 / '.orchestra/08-empty').mkdir()
+copy_task = task(p1, '09-copy', '## Status: BLOCKED (tooling policy conflict)\n')
+cleanup_container = p1 / '.orchestra/archive/20260101-cleanup-x'
+copy_root = cleanup_container / 'copy/.orchestra'
+shutil.copytree(copy_task, copy_root / '09-copy')
 put(p1 / '.orchestra/REGISTRY.md', '| task | dir | branch | status | owner | risk | date | note |\n'
     '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
     f'| 5 | .orchestra/05-dup | orch/05-dup | PASS | lead | normal | today | 한국어 원문 보존 [[missing-note]] {token} |\n')
@@ -166,7 +170,7 @@ for base, recorded in ((p1, 1767225600), (p2, 1767312000), (p3, 1767225600)):
 tree_before = listing(home)
 sources_before = source_hashes()
 report = json.loads(run('--json'))
-ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 8,
+ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 9,
    'default plan writes nothing and discovers nested, empty and Codex-only tasks')
 first = run('apply')
 generated_bytes = sum(p.stat().st_size for p in vault.rglob('*') if p.is_file() and '.git' not in p.relative_to(vault).parts)
@@ -206,6 +210,20 @@ ok(len(dup['snapshots']) == 2 and len(dup['locations']) == 2 and 'status' in fie
    {snap['fields']['risk'] for snap in dup['snapshots'].values()} == {'normal'} and
    (vault / 'models/claude-opus.md').is_file() and (vault / 'models/gpt-6.1-sol.md').is_file(),
    'compact sources/manifests, deepest session ownership, home project and conflicting snapshot provenance')
+copied = cat['tasks']['demo--09-copy']
+copy_fields, _ = archive.frontmatter((vault / 'tasks/demo--09-copy.md').read_text())
+assert archive.Discovery.task_dir(cleanup_container)
+assert {location['path'] for location in copied['locations'].values()} == {
+    str(copy_task), str(copy_root / '09-copy')}
+assert any(root['path'] == str(copy_root) and root['kind'] == 'nested' for root in report['roots'])
+for label in ('STATUS', 'Status', 'status', 'sTaTuS'):
+    parsed, _ = archive.extract({'summary.md': f'## {label}: BLOCKED (tooling policy conflict)\n'}, str(copy_task), [])
+    assert parsed['status'] == 'blocked'
+lowercase, _ = archive.extract({'summary.md': '## Status: blocked\n'}, str(copy_task), [])
+assert lowercase['status'] == 'unknown' and lowercase['status_mentions'] == []
+ok(len(copied['snapshots']) == 1 and len(copied['locations']) == 2 and copy_fields['status'] == 'blocked' and
+   copied['fields']['status_mentions'][0]['line'] == '## Status: BLOCKED (tooling policy conflict)',
+   'numeric cleanup containers reveal nested roots; identical copies dedupe and mixed-case STATUS labels keep uppercase values')
 ok('한국어 원문 보존 [[missing-note]]' in body and '[[ -f x ]]' in body and 'verify: OK' in run('verify'),
    'Korean history and historical wikilinks are fenced; verify passes')
 running_fields, _ = archive.frontmatter((vault / 'tasks/demo--06-running.md').read_text())
