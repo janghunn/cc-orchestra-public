@@ -21,7 +21,7 @@ CODEX_LOG="${CC_ORCH_CODEX_LOG:-$HOME/.claude/orchestra-state/codex.log}"
 PRICING_POLICY="${CC_ORCH_PRICING_POLICY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../pricing-policy.conf}"
 
 python3 - "$CLAUDE_ROOT" "$CODEX_LOG" "$DAYS" "$COST" "$PRICING_POLICY" <<'PY'
-import json, sys, time
+import json, os, sys, time
 from collections import defaultdict
 from pathlib import Path
 
@@ -102,9 +102,13 @@ for (model, kind, effort), row in sorted(totals.items(), key=lambda x: x[1]["con
     print(f"{model}\t{kind}\t{effort}\t{row['requests']}\t{row['output']/1000:.1f}\t{row['context']/1e6:.2f}")
 
 codex = defaultdict(int)
+log_lines, log_mtime = [], None
 if codex_log.exists():
+    with codex_log.open(errors="replace") as log_file:
+        log_mtime = os.fstat(log_file.fileno()).st_mtime
+        log_lines = log_file.read().splitlines()
     cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-    for line in codex_log.read_text(errors="replace").splitlines():
+    for line in log_lines:
         parts = line.split()
         if len(parts) < 3 or parts[0][:10] < cutoff_day: continue
         codex[(parts[1], parts[2])] += 1
@@ -114,7 +118,7 @@ for (mode, spec), count in sorted(codex.items(), key=lambda x: x[1], reverse=Tru
     print(f"{mode}\t{spec}\t{count}")
 
 if sys.argv[4] == "1":
-    import os, re
+    import re
     from datetime import datetime
     from decimal import Decimal, ROUND_HALF_UP, localcontext
 
@@ -175,7 +179,6 @@ if sys.argv[4] == "1":
     calls, roots = [], set()
     earlier_latest_start = float("-inf")
     cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-    log_lines = codex_log.read_text(errors="replace").splitlines() if codex_log.exists() else []
     for line in log_lines:
         parts = line.split()
         in_window = len(parts) >= 3 and parts[0][:10] >= cutoff_day
@@ -242,7 +245,11 @@ if sys.argv[4] == "1":
         return tuple(total) if completed else None
 
     claimed, ambiguous = set(), 0
+    pending = 0
     for mtime, path, root, mode in sorted(events):
+        if log_mtime is None or mtime > log_mtime:
+            pending += 1
+            continue
         candidates = [i for i, call in enumerate(calls)
                       if i not in claimed and "start" in call and call["mode"] == mode
                       and (call["root"] == root or call["workdir"] == root)
@@ -341,6 +348,8 @@ if sys.argv[4] == "1":
         print(f"rate unknown: {sum(rate_unknown.values())} call(s) with tokens but no valid rate ({counts_text(rate_unknown)})")
     if ambiguous:
         print(f"ambiguous: {ambiguous} event file(s) could not be attributed to a single call; their calls stay unpriced")
+    if pending:
+        print(f"pending: {pending} event file(s) completed after the wrapper-log snapshot were not attributed")
     if fast_priced:
         print(f"fast-mode: {fast_priced} priced call(s) ran in Fast mode")
         if fast_unknown:

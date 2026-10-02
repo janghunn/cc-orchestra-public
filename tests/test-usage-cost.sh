@@ -269,6 +269,29 @@ assert_has "$RUN_OUTPUT" 'coverage: 1/1 calls priced (100.0%)' 'symlink-only dis
 assert_has "$RUN_OUTPUT" "observed: \$0.1000 ($LABEL)" 'symlink-only cost'
 ok 'workdir and event aliases price each physical file once, including symlink-only discovery'
 
+# A later invocation can overwrite events before its wrapper-log line is appended.
+fixture pending-events
+call 0 verify gpt-6-astra@high "$REPO"
+touch -d "$(stamp 60)" "$CC_ORCH_CODEX_LOG"
+TOKENS="$REPO/.orchestra/task/codex-verify.jsonl"
+event "$TOKENS" 120 2000000 0 0
+run --cost
+assert_success 'event newer than wrapper-log snapshot'
+assert_has "$RUN_OUTPUT" 'coverage: 0/1 calls priced (0.0%)' 'pending event stays unpriced'
+assert_has "$RUN_OUTPUT" "observed: \$0.0000 ($LABEL)" 'no stale-model cost'
+assert_has "$RUN_OUTPUT" 'pending: 1 event file(s) completed after the wrapper-log snapshot were not attributed' 'pending count'
+assert_not_has "$RUN_OUTPUT" $'\ngpt-6-astra\t' 'no stale Astra token row'
+for event_time in 59 60; do
+  touch -d "$(stamp "$event_time")" "$TOKENS"
+  run --cost
+  assert_success 'event at or before wrapper-log snapshot'
+  assert_row $'gpt-6-astra\t1\t0\t2000000\t0\t0\t20.0000\t20.0000'
+  assert_has "$RUN_OUTPUT" 'coverage: 1/1 calls priced (100.0%)' 'snapshot control prices'
+  assert_not_has "$RUN_OUTPUT" 'pending:' 'no pending event in control'
+done
+assert_not_has "$MAIN_OUTPUT" 'pending:' 'existing fixture events predate log snapshot'
+ok 'events newer than the log snapshot stay pending; earlier and equal mtimes still price'
+
 # Additional input boundaries: named lanes, paths with spaces, multiple turns,
 # invalid usage, unknown tags, malformed log details and out-of-window claims.
 fixture 'nested worktree'
