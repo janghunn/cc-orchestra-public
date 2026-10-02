@@ -1020,6 +1020,22 @@ graph에서 제외한다. frontmatter와 `.base`는 Python 표준 라이브러�
 JSON-compatible YAML flow 형식이다. Obsidian 렌더링은 시각적으로 검증하지 않았다.
 Bases에는 Obsidian >= 1.9.0이 필요하다.
 
+### 남은 제한 사항 (재검증 안 됨)
+
+- 보류된 세션 conf 값에는 raw 백업이 없다. 세션 conf, named-launch record 또는
+  `project.json`의 secret-shaped 값은 vault catalog에서 가려지며 원본 파일 자체는
+  raw 저장소에 복사하지 않는다. 원본이 삭제되면 값을 복구할 수 없고, 나중에
+  allow-list에 추가해도 복원되지 않는다(`lib/orch_archive.py`, `Archive.build` 세션 루프;
+  최종 리뷰 지적 사항).
+- secret-shaped 파일명의 payload 한도 수정은 마지막 gate 이후 반영되었으며
+  gate 검증을 받지 않았다(`lib/orch_archive.py`, `Archive.scan_files`).
+- `.orchestra/wt`와 `.orchestra/archive` 컨테이너는 전체를 건너뛰고 합계 용량을 보고한다.
+  내부의 중첩된 `.orchestra` 루트만 보관하므로 `archive/<x>/handoff/` 같은 개별 파일은
+  복사하지 않는다.
+- Codex-only 설치(`install_codex_only`)는 `orch-archive` 링크를 만들지 않는다.
+- Obsidian 렌더링(graph 색상과 Bases dashboard)은 시각적으로 확인하지 않았다.
+- PNG-to-JPEG thumbnail은 별도 후속 작업이며 첫 실제 apply는 해당 작업을 기다려야 한다.
+
 ## 설정 튜닝
 
 `model-policy.conf`는 고정 role/profile의 model/effort 기본값,

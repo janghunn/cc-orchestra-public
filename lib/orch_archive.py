@@ -1135,7 +1135,7 @@ class Archive:
                 over = payload and (not self.p["INCLUDE_PAYLOAD"] or
                     (self.p["PAYLOAD_TASK_MAX_BYTES"] and payload_total > self.p["PAYLOAD_TASK_MAX_BYTES"]) or
                     (self.p["PAYLOAD_FILE_MAX_BYTES"] and entry["size"] > self.p["PAYLOAD_FILE_MAX_BYTES"]))
-                if over and safe_rel == rel:
+                if over:
                     entry.update(kind="payload-over-budget", reason="payload-over-budget" if self.p["INCLUDE_PAYLOAD"] else "payload-disabled")
                     self.payload["files"] += 1
                     self.payload["bytes"] += entry["size"]

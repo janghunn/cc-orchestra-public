@@ -971,6 +971,22 @@ and dashboards from the graph. Frontmatter and `.base` dashboards use JSON-compa
 flow syntax, validated with the Python standard library. Obsidian rendering was not visually
 verified; Bases needs Obsidian >= 1.9.0.
 
+### Open limitations (not re-gated)
+
+- Withheld session conf values have no raw backup: a secret-shaped value in a session conf,
+  named-launch record or `project.json` is redacted in the vault catalog, and the source file
+  itself is not copied to the raw store. The value is unrecoverable once the source is deleted;
+  allow-listing it later cannot restore it (`lib/orch_archive.py`, `Archive.build` session loop;
+  final review finding).
+- The payload-limit fix for secret-shaped filenames landed after the last gate and is not
+  gated (`lib/orch_archive.py`, `Archive.scan_files`).
+- `.orchestra/wt` and `.orchestra/archive` containers are skipped as a whole with their byte
+  totals reported. Only nested `.orchestra` roots inside them are archived; loose files such
+  as `archive/<x>/handoff/` are not copied.
+- Codex-only installs (`install_codex_only`) do not link `orch-archive`.
+- Obsidian rendering (graph colors and Bases dashboards) has not been checked visually.
+- PNG-to-JPEG thumbnails are a separate follow-up; the first real apply should wait for it.
+
 ## Tuning
 
 `model-policy.conf` owns static role/profile model and effort defaults;

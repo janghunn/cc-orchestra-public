@@ -145,6 +145,9 @@ for artifact_base in (t1, p1 / '.orchestra'):
     put(artifact_base / 'raw.json', 'Source raw.json is verbatim text.\n')
 put(t1 / f'{token}.md', 'A safe body with a secret-shaped filename.\n')
 put(t1 / 'payload.png', b'P' * 64)
+secret_payload = t1 / f'{token}.bin'
+secret_payload_bytes = b'Unique oversized payload with a secret-shaped filename.'
+put(secret_payload, secret_payload_bytes)
 put(t1 / 'tiny.png', b'P')
 put(t1 / 'partial.log', b'complete\nunterminated')
 outside = home / 'outside.txt'
@@ -198,6 +201,17 @@ manifest_pointer = next(p for p in task_fields['manifests'] if p['snapshot'] ==
 manifest_blob = raw / manifest_pointer['blob']
 manifest_bytes = gzip.decompress(manifest_blob.read_bytes())
 manifest_value = json.loads(manifest_bytes)
+secret_payload_digest = archive.sha(secret_payload_bytes)
+secret_path_digest = archive.sha(secret_payload.name.encode())
+secret_payload_entry = next(e for e in manifest_value['entries'] if e['relpath'] == f'[withheld:{secret_path_digest[:12]}]')
+ok(len(secret_payload_bytes) > archive.load_policy()['PAYLOAD_FILE_MAX_BYTES']
+   and secret_payload_entry['kind'] == 'payload-over-budget' and secret_payload_entry['reason'] == 'payload-over-budget'
+   and 'raw' not in secret_payload_entry and 'sha256' not in secret_payload_entry
+   and not (raw / f'blobs/{secret_payload_digest[:2]}/{secret_payload_digest}.gz').exists()
+   and not (raw / f'sources/{archive.sha(str(secret_payload.resolve()).encode())[:24]}.json').exists()
+   and f'| {secret_path_digest[:12]} | path |' in (vault / '_meta/withheld.md').read_text()
+   and all(token.encode() not in p.read_bytes() for p in vault.rglob('*') if p.is_file()),
+   'secret-shaped payload filenames keep oversized files manifest-only without raw capture or vault token leakage')
 assert archive.sha(manifest_bytes) == manifest_pointer['sha256'] and len(manifest_bytes) == manifest_pointer['length']
 assert any(e['relpath'] == 'outside-link' and e['kind'] == 'symlink' for e in manifest_value['entries'])
 original_blob = manifest_blob.read_bytes()
