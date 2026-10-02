@@ -1761,8 +1761,16 @@ verifier_limit_started=$SECONDS
 artifact_check 1 'X8 candidate limit' '1001 verifier verdict files exist'
 verifier_limit_elapsed=$((SECONDS - verifier_limit_started))
 assert_has "$TRIV_OUT" 'limit 1000' 'X8 candidate limit diagnostic'
-[ "$verifier_limit_elapsed" -lt 5 ] || fail "X8 candidate limit took ${verifier_limit_elapsed}s (must be under 5s)"
-printf 'NOTE: 1001-verifier limit check completed in %ss (under 5s)\n' "$verifier_limit_elapsed"
+# Structural guard: refusing at the limit must not touch candidates one by one, and host load cannot
+# change a count. Trace the same checker run and count fixture-name mentions (healthy: 0).
+verifier_limit_trace="$TMP/x8-candidate-limit.trace"
+PS4='+ ' BASH_XTRACEFD=9 bash -x "$ROOT/bin/orch-summary-check" --strict "$TRIV" 9>"$verifier_limit_trace" >/dev/null 2>&1 || :
+grep -qE '^[+]+ count=1001$' "$verifier_limit_trace" || fail 'X8 candidate limit trace did not reach the limit branch'
+verifier_limit_touches="$( { grep -o 'verifier-verdict-b[0-9]\{4\}\.md' "$verifier_limit_trace" || [ "$?" -eq 1 ]; } | wc -l)"
+[ "$verifier_limit_touches" -lt 100 ] || fail "X8 candidate limit touched candidates individually ($verifier_limit_touches trace mentions)"
+# Hang guard only: the advisory security scan alone can take seconds inside a git checkout.
+[ "$verifier_limit_elapsed" -lt 120 ] || fail "X8 candidate limit took ${verifier_limit_elapsed}s (hang guard 120s)"
+printf 'NOTE: 1001-verifier limit check completed in %ss; %s candidate mentions in trace\n' "$verifier_limit_elapsed" "$verifier_limit_touches"
 artifacts_ok
 for shape in 'We considered VERDICT: PASS but' 'VERDICT: PASS | FAIL | INCONCLUSIVE' $'```\nVERDICT: PASS\n```' $'## Verdict\nThe PASS criteria were checked.'; do
   printf '%s\n' "$shape" > "$TRIV/verdict.md"
