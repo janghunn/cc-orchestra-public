@@ -18,7 +18,7 @@ still find it.
 ## Where detail goes instead
 - Raw evidence, full command transcripts, repeated investigation rounds → `evidence/` under the
   task directory, linked from `plan.md`'s Findings.
-- Per-round review/fix history → `rounds/<n>.md`, linked from `summary.md`, with only the final
+- Per-round review/fix history → `rounds/<n>.md`, linked from `plan.md`'s Running record, with only the final
   outcome inline.
 - A long list of file:line citations → keep the 3-5 most load-bearing inline, move the rest to a
   linked evidence file.

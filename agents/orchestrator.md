@@ -84,6 +84,7 @@ Write the **full** agentId, not a truncation. Re-read this file rather than trus
 a conversation has been long or compacted.
 
 Get timestamps from `date +%Y%m%d-%H%M` — never invent one. Update the row on every state change.
+Terminal statuses: `PASS`, `FAIL`, `BLOCKED`, `ACCEPTED` (user-only, section 5), `CLOSED`.
 
 Whenever slots change, show the user the board so they always know who to address:
 
@@ -128,11 +129,11 @@ pollute the user's tracked files.
 | `verdict.md` | verifier | PASS / FAIL / INCONCLUSIVE + evidence |
 | `codex-verdict.md` | codex gate | executable PASS / FAIL / INCONCLUSIVE + evidence |
 | `codex-review.md` | codex gate | CODEX-REVIEW: CLEAR \| BLOCKING n + findings |
-| `summary.md` | lead | final report back to you |
+| `summary.md` | you | the lead's returned block, saved verbatim + `SAVED-BY:` trailer |
 
 (`.codex-session` and `codex-*.jsonl/.log` are codex-run plumbing — ignore them.)
 
-You read `summary.md` and `verdict.md` — the summary's `GATES:` line carries the codex verdict.
+You save and read `summary.md`, and read `verdict.md` — the summary's `GATES:` line carries the codex verdict.
 You do **not** read the impl reports or `codex-review.md` unless a task failed — that detail
 belongs to Tier 2.
 
@@ -199,6 +200,12 @@ round trip: if you cannot name the observation that would settle a criterion, it
 criterion yet. "성능이 개선된다" fails the test; "`bench/run.sh` 의 p95 가 현재 값 이하" passes it.
 When investigation genuinely has to determine the check, write `Verification: lead determines`
 rather than inventing a command that does not exist.
+
+Tag each Acceptance or Verification item that needs a GPU, loopback/network sockets or anything
+else the Codex verify sandbox lacks with `[verifier: normal]`, and name any GPU or resource lock.
+The lead runs those through `verifier-normal` from the start (verdict `verdict.md` or
+`verdict-<n>.md`) and reports
+`GATES: codex-verify PASS (criteria 3,5 delegated to verifier-normal) · codex-review CLEAR · claude-verifier PASS`.
 
 **Choosing RISK** — this line tunes how much decorrelated checking the lead buys:
 
@@ -288,11 +295,18 @@ with a real dependency, and state in the later brief what the earlier task chang
 While leads run, do not idle-poll and do not start doing the work — use the time to sharpen
 later briefs. When a lead returns:
 
+- **Every return** → save the lead's final block verbatim as `<task-dir>/summary.md` and append one
+  last line `SAVED-BY: tier-1 (transcribed from the lead's returned block)`; add no claims. If the
+  strict check needs a missing field (e.g. `ROUNDS`), ask the lead for a corrected block; a fact you
+  observed may go on the trailer, but it does not satisfy the check — never invent a gate result.
+  Then run `orch-summary-check --strict <task-dir>`.
 - **PASS** → run `orch-summary-check --strict <task-dir>` and check `GATES:`. Low/normal require
   Codex verify PASS plus Codex review CLEAR/NONBLOCKING; critical additionally requires the Opus
   verifier PASS. Trivial requires `GATES: self-check only (trivial) — …` naming what was
   run/checked; any other GATES text is rejected. A missing gate or an untagged Claude dev exception
   is not PASS.
+  A `GATES:` line with `delegated to verifier-normal` also needs `claude-verifier PASS`; there
+  `codex-verify INCONCLUSIVE` counts only if `codex-verdict.md` leaves just the delegated criteria open.
   Then update the registry, mark the todo done, move on.
 - **`BRIEF AUDIT: defective`** → the lead audited your brief against the real code and found a
   criterion it cannot check, a scope that does not match the code, or an overlap with a sibling
@@ -304,6 +318,12 @@ later briefs. When a lead returns:
 - **FAIL / BLOCKED** → read `verdict.md`. Then decide: send a sharpened correction to the
   *same* lead (its investigation in `plan.md` is intact — say what to keep), split the task, or
   escalate to the user. Never re-send an identical brief and hope.
+- **`ACCEPTED`** → only the user causes it, after seeing the actual gate results; never infer it.
+  Add `USER ACCEPTED: <YYYY-MM-DD> — <what was accepted and why, one line>` to `brief.md` (column 0,
+  outside any fenced block), change only the saved summary's `STATUS:` value to `ACCEPTED` and say so
+  on the `SAVED-BY:` line, set the REGISTRY status, re-run the strict check, and report it as
+  "accepted with exceptions" (예외 수락), never as PASS. It is not a merge approval and does not lift
+  the round cap.
 - **Scope creep** (files outside the brief) → reject, require the extra changes reverted, and
   send the lead a corrected scope.
 

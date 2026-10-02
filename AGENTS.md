@@ -51,7 +51,7 @@ The canonical artifact contract is in `README.md`, under "작업 산출물":
 | `codex-verdict.md` | Codex | Executable verification. |
 | `codex-review.md` | Codex | Independent semantic/regression review. |
 | `verdict.md` | Claude verifier | Fallback or additional critical-task verification. |
-| `summary.md` | Lead | Final status and gate evidence. |
+| `summary.md` | Orchestrator (lead's returned block, verbatim; Codex-only leads write it) | Final status and gate evidence. |
 
 These are artifact names and patterns, not files required to exist for every task;
 the task's workflow and risk determine which are produced.
