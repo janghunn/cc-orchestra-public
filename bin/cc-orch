@@ -196,7 +196,7 @@ if [[ $RELOAD -eq 1 ]]; then
         active_rows="$(awk -F'|' '
           /^\|[[:space:]]*lead-/ {
             s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
-            if (s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)([^A-Za-z0-9_-]|$)/) print $0
+            if (s !~ /^(PASS|FAIL|BLOCKED|ACCEPTED|CLOSED|IDLE|UNASSIGNED)([^A-Za-z0-9_-]|$)/) print $0
           }' "$registry")"
         if [[ -n "$active_rows" ]]; then
           if [[ $FORCE_RELOAD -ne 1 ]]; then

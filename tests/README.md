@@ -6,6 +6,7 @@ through Bash (the CI workflow does the same):
 ```bash
 bash tests/test-policy.sh
 bash tests/test-runtime.sh
+bash tests/test-accepted-status.sh
 ```
 
 `./install.sh` makes runtime launchers and hooks executable before use.

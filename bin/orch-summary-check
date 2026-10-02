@@ -16,11 +16,25 @@ fi
 TASK_DIR="$(cd "$TASK_DIR" && pwd)"
 
 errors=0 warnings=0
+status_accepted=0 accepted_ok=0 accepted_exceptions=0
 problem() { # problem error|warning <message>
   if [ "$1" = "error" ] || [ "$STRICT" = "1" ]; then
     echo "ERROR: $2"; errors=$((errors + 1))
   else
     echo "WARN:  $2"; warnings=$((warnings + 1))
+  fi
+}
+
+gate_problem() { # <message> <gate label, or empty for the round cap>
+  if [ "$accepted_ok" = 1 ]; then
+    if [ -n "$2" ] && ! gate_claim "$2" '[A-Za-z]+'; then
+      problem error "STATUS: ACCEPTED requires GATES to state the actual $2 result ($1)"
+    else
+      echo "ACCEPTED EXCEPTION: $1"
+      accepted_exceptions=$((accepted_exceptions + 1))
+    fi
+  else
+    problem error "$1"
   fi
 }
 
@@ -138,6 +152,20 @@ if [ -r "$SUMMARY" ]; then
   grep -q '^LANES:' "$SUMMARY" || problem warning "summary lacks LANES"
 
   if ! summary_nofence="$(strip_fences "$SUMMARY")"; then problem error "summary.md contains NUL bytes"; summary_nofence="$(cat "$SUMMARY")"; fi
+  status_line="$(printf '%s\n' "$summary_nofence" | grep -E '^(\[lead-[A-Za-z0-9_-]+\][[:space:]]*)?STATUS:' | tail -1)"
+  if printf '%s\n' "$status_line" | grep -qE '^(\[lead-[A-Za-z0-9_-]+\][[:space:]]*)?STATUS:[[:space:]]*ACCEPTED([^A-Za-z0-9_-]|$)'; then
+    status_accepted=1
+  fi
+  if [ "$status_accepted" = 1 ]; then
+    acceptance="$(printf '%s\n' "${nofence:-}" | grep -E '^USER ACCEPTED:[[:space:]]+[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[[:space:]]+(—|–|-)[[:space:]]*[^[:space:]]' | tail -1)"
+    if [ -n "$acceptance" ]; then
+      accepted_ok=1
+      accepted_date="$(printf '%s\n' "$acceptance" | awk '{print $3}')"
+      echo "NOTE:  STATUS: ACCEPTED authorised by brief.md USER ACCEPTED ($accepted_date); this is not a PASS"
+    else
+      problem error "STATUS: ACCEPTED requires a column-0 'USER ACCEPTED: <YYYY-MM-DD> — <what and why>' line in brief.md outside fenced blocks"
+    fi
+  fi
   gates="$(printf '%s\n' "$summary_nofence" | grep '^GATES:' | tail -1)"
   if [ -z "$gates" ]; then
     problem error "summary lacks GATES"
@@ -164,15 +192,15 @@ if [ -r "$SUMMARY" ]; then
       # A provider outage may fall back to the zero-context Claude verifier, but it must be
       # visible in the same line; a bare missing/waived executable verdict is never PASS.
       if [ "$backend" = codex ]; then
-        [ "$codex_verify_ok" = 1 ] || problem error "Codex-only executable verification must PASS"
-        [ "$codex_review_ok" = 1 ] || problem error "Codex-only review must be CLEAR/NONBLOCKING"
+        [ "$codex_verify_ok" = 1 ] || gate_problem "Codex-only executable verification must PASS" codex-verify
+        [ "$codex_review_ok" = 1 ] || gate_problem "Codex-only review must be CLEAR/NONBLOCKING" codex-review
         if [ "$risk" = critical ]; then
-          [ "$codex_audit_ok" = 1 ] || problem error "critical Codex-only risk requires codex-auditor PASS"
+          [ "$codex_audit_ok" = 1 ] || gate_problem "critical Codex-only risk requires codex-auditor PASS" codex-auditor
         fi
       elif [ "$codex_verify_ok" = "0" ]; then
         if ! gate_claim codex-verify 'unavailable|INCONCLUSIVE' || \
            [ "$claude_verify_ok" = "0" ]; then
-          problem error "executable verification did not PASS and has no explicit Claude fallback"
+          gate_problem "executable verification did not PASS and has no explicit Claude fallback" codex-verify
         fi
       fi
       if [ "$backend" != codex ] && [ "$codex_review_ok" = "0" ]; then
@@ -182,11 +210,11 @@ if [ -r "$SUMMARY" ]; then
              [ "$claude_verify_ok" = "1" ]; then
           :
         else
-          problem error "adversarial review is not CLEAR/NONBLOCKING (only low risk may waive it)"
+          gate_problem "adversarial review is not CLEAR/NONBLOCKING (only low risk may waive it)" codex-review
         fi
       fi
       if [ "$backend" != codex ] && [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
-        problem error "critical risk requires claude-verifier PASS"
+        gate_problem "critical risk requires claude-verifier PASS" claude-verifier
       fi
 
       # An annotation must start with punctuation, not prose that merely mentions a verdict.
@@ -213,7 +241,7 @@ if [ -r "$SUMMARY" ]; then
         # Collect metadata in one process, then sort by mtime and versioned basename.
         # The second key includes the whole path; NUL delimiters preserve whitespace in names.
         mapfile -d '' -t candidates < <(
-          find "$TASK_DIR" -maxdepth 1 -type f \( -name verdict.md -o -name 'verdict-*.md' -o -name verifier-verdict.md -o -name 'verifier-verdict-*.md' \) \
+          find "$TASK_DIR" -maxdepth 1 -type f \( -name verdict.md -o -name 'verdict-*.md' -o -name verifier-verdict.md -o -name 'verifier-verdict-*.md' -o -name verifier-normal-verdict.md -o -name 'verifier-normal-verdict-*.md' \) \
             -printf '%T@ %p\0' | sort -z -t ' ' -k1,1n -k2V
         )
         count="${#candidates[@]}"
@@ -222,7 +250,7 @@ if [ -r "$SUMMARY" ]; then
           return 0
         fi
         if [ "$count" = 0 ]; then
-          problem warning "GATES claims claude-verifier PASS but no verifier verdict file (verdict.md, verdict-*.md, verifier-verdict.md, verifier-verdict-*.md) exists in $TASK_DIR"
+          problem warning "GATES claims claude-verifier PASS but no verifier verdict file (verdict.md, verdict-*.md, verifier-verdict.md, verifier-verdict-*.md, verifier-normal-verdict.md, verifier-normal-verdict-*.md) exists in $TASK_DIR"
           return 0
         fi
         newest="${candidates[count - 1]#* }"
@@ -284,7 +312,7 @@ if [ -r "$SUMMARY" ]; then
     # trivial and low share the normal cap.
     cap="$NORMAL_GATE_ROUNDS"; [ "$risk" = "critical" ] && cap="$CRITICAL_GATE_ROUNDS"
     if [ "$rounds" -gt "$cap" ] && ! grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved' "$BRIEF"; then
-      problem error "ROUNDS=$rounds exceeds $risk cap=$cap without EXTRA GATE ROUND: approved"
+      gate_problem "ROUNDS=$rounds exceeds $risk cap=$cap without EXTRA GATE ROUND: approved" ""
     fi
   else
     problem warning "summary lacks numeric ROUNDS"
@@ -336,7 +364,13 @@ if [ "$errors" -gt 0 ]; then
   echo "CHECK: FAIL ($errors error(s), $warnings warning(s))"
   exit 1
 fi
-if [ "$warnings" -gt 0 ]; then
+if [ "$accepted_ok" = 1 ]; then
+  if [ "$warnings" -gt 0 ]; then
+    echo "CHECK: WARN ($warnings warning(s); accepted with exceptions: $accepted_exceptions)"
+  else
+    echo "CHECK: PASS (accepted with exceptions: $accepted_exceptions, risk=$risk)"
+  fi
+elif [ "$warnings" -gt 0 ]; then
   echo "CHECK: WARN ($warnings warning(s))"
 else
   echo "CHECK: PASS (risk=$risk)"

@@ -166,14 +166,14 @@ assert_alive R3
 stop_live
 ok "R3 ancestor registry blocks an active lead"
 
-registry "$REG" 'PASS (done)' 'CLOSED - merged' FAIL BLOCKED IDLE UNASSIGNED 'PASS: merged'
+registry "$REG" 'PASS (done)' 'CLOSED - merged' FAIL BLOCKED ACCEPTED 'ACCEPTED (user, 2026-10-02)' IDLE UNASSIGNED 'PASS: merged'
 start_live "$TMP/anc/sub/deeper" "$NAME"
 run_reload --reload "$NAME"
 assert_eq "$RC" 0 "R4 terminal statuses"
 assert_reloaded R4
 ok "R4 annotated and bare terminal statuses allow reload"
 
-for status in 'PASS-ish' PASSED RUNNING ''; do
+for status in 'PASS-ish' 'ACCEPTED-ish' PASSED RUNNING ''; do
   registry "$REG" "$status"
   start_live "$TMP/anc/sub/deeper" "$NAME"
   run_reload --reload "$NAME"
@@ -253,5 +253,16 @@ assert_has "$OUT" 'did not stop after 10s; not sending SIGKILL' "R11 no SIGKILL"
 assert_alive R11
 stop_live
 ok "R11 TERM-ignoring process survives reload timeout"
+
+python3 - "$ROOT/bin/cc-orch" "$ROOT/bin/cc-orch-session" <<'PY'
+import sys
+from pathlib import Path
+
+programs = [Path(path).read_bytes().split(b"awk -F'|' '", 1)[1].split(b"'", 1)[0]
+            for path in sys.argv[1:]]
+assert programs[0] == programs[1], 'reload and switch awk filters differ'
+assert b'ACCEPTED' in programs[0], 'terminal filter lacks ACCEPTED'
+PY
+ok "R12 reload and switch awk filters are byte-identical and include ACCEPTED"
 
 echo "PASS: $pass reload test groups"

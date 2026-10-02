@@ -273,6 +273,15 @@ bullet을 쓰면 안 되고, fence 밖에서 `RISK:`로 시작하는 유일한 �
 Self-check의 `GATES:` 설명에는 명령·파일·숫자를 나타내는 ASCII 영문자나 숫자가
 하나 이상 있어야 한다. 적용 범위와 low→trivial 변경은 [README Gate 정책](README.md#gate-정책)을 참고한다.
 
+`STATUS: ACCEPTED`는 사용자가 실제 gate 결과를 검토하고 수락했다는 뜻이며 PASS가 아니다.
+사용자만 승인할 수 있고, Tier 1이 `brief.md`의 fenced block 밖 0열에
+`USER ACCEPTED: <YYYY-MM-DD> — <what was accepted and why>` 형식으로 수락 내용과 이유를
+기록한다. `GATES:`에는 실제 결과를 명시해야 한다. 이 기록이 있으면 gate 주장 실패와
+승인 없는 round 상한 초과는 `ACCEPTED EXCEPTION:` 행으로 출력한다. 구조 오류, artifact와
+모순되는 PASS 주장, `USER ACCEPTED:` 기록 누락은 `--strict`에서 계속 오류다. 보안 검사는
+기존처럼 자문으로 유지된다. Strict 검사가 성공하면 마지막 행은
+`CHECK: PASS (accepted with exceptions: n, risk=...)`이며 일반 PASS와 구분된다.
+
 trivial이 아닌 작업에서는 `orch-summary-check --strict`가 양성 `GATES:` 주장을
 작업 디렉터리의 artifact와 대조한다.
 
@@ -281,9 +290,16 @@ trivial이 아닌 작업에서는 `orch-summary-check --strict`가 양성 `GATES
   `CODEX-REVIEW: CLEAR` 또는 `CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>`.
 - `codex-auditor PASS` (Codex backend): `codex-audit.md`의 첫 번째 비어 있지 않은 줄이 `CODEX-AUDIT: PASS`.
 - `claude-verifier PASS`: `verdict.md`, `verdict-*.md`, `verifier-verdict.md`,
-  `verifier-verdict-*.md` 중 mtime이 가장 최신인 파일에 `VERDICT: PASS` 또는
+  `verifier-verdict-*.md`, `verifier-normal-verdict.md`, `verifier-normal-verdict-*.md` 중
+  mtime이 가장 최신인 파일에 `VERDICT: PASS` 또는
   `VERIFIER-VERDICT: PASS`가 있어야 한다(Markdown 제목도 허용). 또는 `## Verdict`
   제목 다음의 첫 번째 비어 있지 않은 줄이 `PASS`로 시작해야 한다(Markdown 강조와 `PASS.` 허용).
+
+`verifier-normal`은 dispatch에서 받은 `<task-dir>/verdict.md` 또는 후속 실행의
+`verdict-<n>.md`에 기록한다. 첫 줄은 정확히 `VERDICT: PASS`, `VERDICT: FAIL`,
+`VERDICT: INCONCLUSIVE` 중 하나이며 뒤에 근거를 쓴다. 다른 basename이 주어지면 같은
+디렉터리의 `verdict.md`로 바꾸고, 이미 있으면 n >= 2 중 가장 작은 미사용 번호의
+`verdict-<n>.md`를 쓴다. 실제 경로를 보고하고 `CONCERNS`에 경로 대체를 명시한다.
 
 최상위 파일만 검사하며 `evidence/`, `rounds/`의 보관 파일은 제외한다. 이름 패턴에 맞는 모든
 verifier 파일 중 mtime이 가장 최신인 것을 선택하고, mtime이 같으면 version 정렬상 마지막 이름을 선택한다.
@@ -712,7 +728,7 @@ Reload만으로 roster는 재생성되지 않습니다. Managed session은 `/exi
 실행 중인 세션을 reload할 때는 hook과 같은 순서로 `.orchestra/REGISTRY.md`를 찾는다.
 Git toplevel과 그 상위 디렉터리, 프로세스 cwd와 그 상위 디렉터리, git common directory의
 상위 디렉터리, linked worktree 순서이며 처음 발견한 파일을 사용한다. Active lead 행이 하나라도
-있으면 거부한다. Terminal status는 `PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`, `UNASSIGNED`이며,
+있으면 거부한다. Terminal status는 `PASS`, `FAIL`, `BLOCKED`, `ACCEPTED`, `CLOSED`, `IDLE`, `UNASSIGNED`이며,
 뒤에 `[A-Za-z0-9_-]` 밖의 문자와 주석을 붙일 수 있다(`PASS (done)`, `CLOSED - merged`).
 `PASS-ish`와 빈 status는 active다. Registry가 없거나 읽을 수 없거나 프로세스 cwd를 확인할 수
 없어도 거부한다. Registry가 없으면 검사한 경로를 모두 나열하고, 읽을 수 없으면 해당 파일을,
@@ -905,7 +921,7 @@ local `refs/heads/`로 확인된 경우에만 반영합니다. 파일 checkout, 
 
 `hooks/orch-stop-gate.sh`는 matcher `(route-)?lead-.*`인 **SubagentStop**에 등록합니다.
 `Stop`은 main session용 event입니다. 마지막 assistant transcript 메시지에
-`STATUS: PASS`, `FAIL`, `BLOCKED` 행과 `GATES:` 행이 모두 있을 때만 검사합니다. STATUS
+`STATUS: PASS`, `FAIL`, `BLOCKED`, `ACCEPTED` 행과 `GATES:` 행이 모두 있을 때만 검사합니다. STATUS
 앞의 lead label은 허용하며 일반적인 작업 중간 보고는 checker를 실행하지 않습니다.
 `I will report the STATUS: PASS when done`처럼 앞으로 보고할 내용을 설명하는 문장도
 결과 claim으로 취급하지 않습니다.
@@ -918,15 +934,20 @@ artifact 디렉터리를 검사하지 않습니다. Fallback은 `brief.md`가 �
 하며, 해석한 경로가 payload `cwd`에서 찾은 Git 저장소 root 안에 있어야 합니다. 저장소
 root를 알 수 없거나 symlink 등을 통해 root 밖으로 나가는 경로이면 경고합니다.
 
+확정된 task 디렉터리는 있지만 `summary.md`가 없으면 `summary.md not saved yet; Tier 1
+saves the returned block and runs orch-summary-check --strict <dir>`라는 안내만
+`systemMessage`로 출력합니다. Journal에는 `note`로 기록하고 stderr에는 아무것도 쓰지
+않으며 checker도 실행하지 않습니다.
+
 Checker는 `CC_ORCH_SUMMARY_CHECK`의 실행 파일 경로, hook 자신의 저장소에 있는
 `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`, `PATH` 순서로 찾습니다.
 Override는 운영 점검과 테스트에 사용할 수 있습니다. `--strict <task-dir>`로 실행하고
 해당 task의 `summary.md` STATUS 행도 읽으며 `[lead-x]` 접두사를 허용합니다. Exit 0이면
 transcript와 summary의 상태가 같을 때 조용히 허용하고, 다르거나 기록된 상태를 읽을 수
-없으면 경고합니다. Exit 1에서는 transcript가 `PASS`를 주장할 때만 차단합니다. Summary가
-`BLOCKED`나 `FAIL`인데 transcript가 `PASS`인 경우에도 반드시 차단하며 checker 출력의 처음
+없으면 경고합니다. Exit 1에서는 transcript가 `PASS` 또는 `ACCEPTED`를 주장하면 차단합니다. Summary가
+`BLOCKED`나 `FAIL`인데 transcript가 `PASS` 또는 `ACCEPTED`인 경우에도 반드시 차단하며 checker 출력의 처음
 1,500바이트, 정확한 재실행 명령, off-switch 경로를 제공합니다. Transcript가 `BLOCKED`
-또는 `FAIL`이면 차단하지 않습니다. 실제 gate 실패나 summary 부재는 checker 출력을 담은
+또는 `FAIL`이면 차단하지 않습니다. 실제 gate 실패는 checker 출력을 담은
 경고로 전달하여 정직한 실패 보고와 escalation을 끝낼 수 있게 합니다. Task/checker를 찾지
 못하거나 exit 2 또는 실행 오류가 발생한 경우도 `systemMessage`, stderr, journal에 경고를
 남기고 허용합니다.
@@ -948,7 +969,7 @@ tail -n 30 "$state_dir/safety-hooks.log"
 
 Journal 경로는 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`입니다.
 실제로 평가한 Git 호출과 감지한 gate claim에만 ISO 시각, hook/event, 호출자 정보,
-판정(`allow`, `deny`, `block`, `warn`, `skip`), 한 줄 사유를 기록합니다. Fast path는
+판정(`allow`, `deny`, `block`, `warn`, `note`, `skip`), 한 줄 사유를 기록합니다. Fast path는
 기록하지 않습니다. Bash payload에 독립된 `git` 토큰과 변경 키워드가 모두 있지 않으면
 Python이나 Git을 시작하기 전에 반환합니다. 각 행은 크기를 제한한 단일 append로 씁니다.
 파일이 2 MiB를 넘을 때만

@@ -342,7 +342,7 @@ path.write_text(json.dumps(state))
         self.assertIn("backend    codex", self.run_cmd([*command, "status", "sample"]))
         self.assertIn("ccorch-codex-sample", json.loads((self.base / "tmux-state.json").read_text()))
 
-        for status in ["PASS-ish", ""]:
+        for status in ["PASS-ish", "ACCEPTED-ish", ""]:
             with self.subTest(status=status):
                 (self.cwd / ".orchestra/REGISTRY.md").write_text(f"| lead-alpha | id | task | branch | path | {status} | now |\n")
                 self.run_cmd([*command, "switch", "sample", "--backend", "hybrid", "--no-attach"], expected=2)
@@ -357,6 +357,7 @@ path.write_text(json.dumps(state))
         (self.cwd / ".orchestra/REGISTRY.md").write_text(
             "| lead-alpha | id | task | branch | path | PASS (done) | now |\n"
             "| lead-bravo | id | task | branch | path | CLOSED - merged | now |\n"
+            "| lead-charlie | id | task | branch | path | ACCEPTED | now |\n"
         )
         self.run_cmd([*command, "switch", "sample", "--backend", "hybrid", "--no-attach"])
         self.assertIn("backend    claude", self.run_cmd([*command, "status", "sample"]))
