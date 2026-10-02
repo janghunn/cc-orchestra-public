@@ -271,3 +271,5 @@ same convention `INSTINCTS.md` uses.
   by. The narrow follow-up: tabulate, from the repo's own historical task artifacts, which gate
   caught which defect and which gate missed it, before changing any gate.
 - **Status:** NEW
+
+- 2026-10-02 entries (Jev-video review: orch/44, 45, 47 results and two NEW candidates) are in IMPROVEMENT-CANDIDATES/jev-video-review-2026-10-02.md.
