@@ -114,7 +114,7 @@ for (mode, spec), count in sorted(codex.items(), key=lambda x: x[1], reverse=Tru
     print(f"{mode}\t{spec}\t{count}")
 
 if sys.argv[4] == "1":
-    import re
+    import os, re
     from datetime import datetime
     from decimal import Decimal, ROUND_HALF_UP, localcontext
 
@@ -189,6 +189,7 @@ if sys.argv[4] == "1":
         match = detail_pattern.fullmatch(line)
         if match and start is not None:
             _stamp, mode, spec, _exit, workdir = match.groups()
+            workdir = os.path.realpath(workdir)
             fallback = re.search(r"\(fallback-from:([^)]*)\)", line[match.end(3):match.start(4)])
             call.update(start=start, mode=mode, model=spec.split("@", 1)[0],
                         fast="+fast-mode" in spec, workdir=workdir, root=root_of(workdir),
@@ -201,6 +202,7 @@ if sys.argv[4] == "1":
 
     modes = {"intake", "investigate", "plan-review", "review", "verify", "implement", "resume"}
     events = []
+    seen_events = set()
     for root in sorted(roots):
         for path in (Path(root) / ".orchestra").glob("*/codex-*.jsonl"):
             tag = path.name[len("codex-"):-len(".jsonl")]
@@ -208,8 +210,10 @@ if sys.argv[4] == "1":
             if mode is None:
                 continue
             try:
-                if path.is_file():
-                    events.append((path.stat().st_mtime, str(path), root, mode))
+                event_path = os.path.realpath(path)
+                if event_path not in seen_events and path.is_file():
+                    events.append((path.stat().st_mtime, event_path, root, mode))
+                    seen_events.add(event_path)
             except OSError:
                 continue
 

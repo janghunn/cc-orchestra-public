@@ -237,6 +237,38 @@ assert_row $'gpt-6-luna\t1\t0\t500000\t500000\t1000000\t0.5550\t55.5000'
 assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' sequential
 ok 'fallback tie, ambiguous tie, crossing overlap and sequential attribution'
 
+# A workdir alias must not let overwritten events price both wrapper calls.
+fixture symlink-repo
+REPO_ALIAS="$TMP/symlink-repo-alias"
+ln -s "$REPO" "$REPO_ALIAS"
+call 0 verify gpt-6-astra@high "$REPO"
+call 720 verify gpt-6-luna@high "$REPO_ALIAS"
+event "$REPO/.orchestra/task/codex-verify.jsonl" 1200 1000000 0 0
+run --cost
+assert_success 'real and symlink workdirs'
+assert_row $'gpt-6-luna\t1\t0\t1000000\t0\t0\t0.1000\t10.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'one surviving physical event'
+assert_has "$RUN_OUTPUT" "observed: \$0.1000 ($LABEL)" 'only Luna cost survives'
+assert_has "$RUN_OUTPUT" 'unpriced: 1 call(s) without surviving token data (gpt-6-astra 1)' 'overwritten Astra remains unpriced'
+assert_not_has "$RUN_OUTPUT" $'\ngpt-6-astra\t' 'no Astra token row'
+# Distinct paths beneath the canonical root may also point to the same event.
+ln -s "$REPO/.orchestra/task" "$REPO/.orchestra/task-alias"
+run --cost
+assert_success 'symlinked event directory'
+assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'physical event deduplicated'
+assert_has "$RUN_OUTPUT" "observed: \$0.1000 ($LABEL)" 'event alias adds no cost'
+fixture symlink-only-repo
+REPO_ALIAS="$TMP/symlink-only-workdir"
+ln -s "$REPO" "$REPO_ALIAS"
+call 0 verify gpt-6-luna@high "$REPO_ALIAS"
+event "$REPO_ALIAS/.orchestra/task/codex-verify.jsonl" 60 1000000 0 0
+run --cost
+assert_success 'only symlink workdir logged'
+assert_row $'gpt-6-luna\t1\t0\t1000000\t0\t0\t0.1000\t10.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 1/1 calls priced (100.0%)' 'symlink-only discovery'
+assert_has "$RUN_OUTPUT" "observed: \$0.1000 ($LABEL)" 'symlink-only cost'
+ok 'workdir and event aliases price each physical file once, including symlink-only discovery'
+
 # Additional input boundaries: named lanes, paths with spaces, multiple turns,
 # invalid usage, unknown tags, malformed log details and out-of-window claims.
 fixture 'nested worktree'
