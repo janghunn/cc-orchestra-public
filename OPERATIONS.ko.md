@@ -1131,6 +1131,10 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
 보류한 항목을 기록한다. 입력 blob의 gzip 무결성과 압축 전 SHA-256을 검증하고 새
 blob만 결정적으로 재압축한다. 기존 blob은 다시 쓰지 않는다. 원본 이력은
 `sources/<host>/`에 저장하므로 호스트별 inode/device watermark가 섞이지 않는다.
+원본 검증 전에 원본 vault나 raw 저장소에서 일반 파일 또는 디렉터리가 아닌 항목
+(FIFO, 소켓, 장치 파일, 심볼릭 링크)을 `not-regular`로 거부한다. 거부된 항목이 하나라도
+있으면 원본 검증을 실행하지 않는다.
+blob 포인터가 `blobs/` 밖을 가리키는 원본 이력도 원본 검증 전에 거부한다.
 재사용하는 로컬 blob도 검증하며 손상된 blob은 다시 쓰지 않고 import를 거부한다.
 `--dry-run`을 포함해 쓰기 전에 직접 생성한 링크와 포인터가 병합 결과에서 유효한지
 검증한다. 복사할 thumbnail은 전체 SHA-256이 로컬 allow-list에 있는 경우를 제외하고
@@ -1143,7 +1147,9 @@ artifact 복사를 생략하고, 원본 raw 내용은 raw 저장소에 유지한
 기존 catalog·노트·JSON의 포인터가 고정한 공유 페이지를 바꾸는 import는 거부하며, 로컬 정책이 secret-shaped로 판단한 artifact 경로는 보류한다.
 `--dry-run --json`은
 디렉터리·잠금·파일을 만들지 않고 추가 항목과 충돌을 보고한다. `--top N`은 보고서의
-표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다. 이미 가져온 호스트에 대한
+표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다.
+import와 dry-run 보고서의 `new blobs` 수에는 호스트의 blob 목록을 담은 inventory blob과,
+refresh 시 교체된 이전 버전의 복구 blob도 포함된다. 이미 가져온 호스트에 대한
 일반 import는 원본이 그대로여도 `refresh-required`로 거부한다. 먼저 `--refresh --dry-run`으로
 변경 목록을 확인한다. 변경 없는 refresh는 내용과 commit을 추가하지 않는다.
 호스트를 가져오는 순서가 달라도 vault/raw 바이트는 같다.
@@ -1162,7 +1168,8 @@ refresh는 해당 호스트의 레코드, catalog에 등록된 호스트 namespa
 `raw/sources/<host>/` 이력만 교체할 수 있다. 미등록 기존 파일은 보호하며 공유 페이지는
 상위 집합·기존 포인터 검사를 그대로 적용한다. 목적지의 모든 상위 경로는 실제 디렉터리여야
 하고 blob 경로를 가진 모든 사전은 유효한 digest, 정규 경로, 실제 바이트와 일치하는 길이를
-가져야 한다. import와 refresh는 아카이브 내용을 쓰기 전에 목록을 출력하며 refresh 목록에는
+가져야 한다. manifest의 `entries`뿐 아니라 manifest 전체에서 blob 경로를 가진 모든 사전을
+검증한다. import와 refresh는 아카이브 내용을 쓰기 전에 목록을 출력하며 refresh 목록에는
 추가·변경·거부 항목과 보존할 이전 버전이 포함된다.
 
 기존 레코드 id, 작업 위치, snapshot manifest 포인터, 복사한 artifact 또는 이전 blob이

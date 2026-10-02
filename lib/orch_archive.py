@@ -2738,6 +2738,31 @@ class Importer:
             return
         self.available[digest] = length
 
+    def reject_special_sources(self):
+        # Source verification opens files; a FIFO would block while the raw lock is held.
+        for root in (self.src_vault, self.src_raw):
+            for directory, dirnames, filenames in os.walk(root, followlinks=False):
+                dirnames.sort()
+                for name in sorted(dirnames + filenames):
+                    path = Path(directory) / name
+                    try:
+                        mode = os.lstat(path).st_mode
+                        if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+                            continue
+                    except OSError:
+                        pass
+                    self.reject("not-regular", str(path.relative_to(root)))
+
+    def reject_escaping_histories(self):
+        for path in walk(self.src_raw / "sources"):
+            if path.suffix == ".json" and not path.is_symlink():
+                try:
+                    source = json.loads(path.read_bytes())
+                except (OSError, ValueError, UnicodeError):
+                    continue
+                if not self.canonical_blob_paths(source):
+                    self.reject("source-verify", f"{path.relative_to(self.src_raw)}: blob pointer outside blobs/")
+
     def scan_raw(self):
         blob_root = self.src_raw / "blobs"
         if blob_root.exists():
@@ -2803,12 +2828,16 @@ class Importer:
                     target = self.unchanged_destination(self.raw, rel, data)
                     if target is not None and (not target.exists() or target.read_bytes() != data):
                         self.new_sources.append(path.name)
-        try:
-            problems, _, _, _ = verify_problems(self.src_vault, self.src_raw)
-            for problem in problems:
-                self.reject("source-verify", problem)
-        except self.MALFORMED:
-            self.reject("source-verify", "malformed source catalog or history")
+        self.reject_special_sources()
+        if not self.rejected:
+            self.reject_escaping_histories()
+        if not self.rejected:
+            try:
+                problems, _, _, _ = verify_problems(self.src_vault, self.src_raw)
+                for problem in problems:
+                    self.reject("source-verify", problem)
+            except self.MALFORMED:
+                self.reject("source-verify", "malformed source catalog or history")
 
     def build_records(self):
         for kind in ("tasks", "sessions", "projects"):
@@ -2853,13 +2882,16 @@ class Importer:
                 except self.MALFORMED:
                     self.reject("malformed-record", f"{kind}/{identifier}")
 
-    def manifest_entries(self, pointer):
+    def manifest(self, pointer):
         # Availability checks accept a verified incoming or local manifest blob.
         root = self.src_raw if pointer["sha256"] in self.blobs else self.raw
         data = gzip.decompress((root / pointer["blob"]).read_bytes())
         if sha(data) != pointer["sha256"] or len(data) != pointer["length"]:
             raise ValueError("manifest changed during import")
-        return json.loads(data)["entries"]
+        return json.loads(data)
+
+    def manifest_entries(self, pointer):
+        return self.manifest(pointer)["entries"]
 
     def blob_pointer_problem(self, pointer):
         digest = pointer.get("sha256")
@@ -2873,6 +2905,16 @@ class Importer:
         if pointer.get("length") != self.available[digest]:
             return "blob-length"
         return None
+
+    def canonical_blob_paths(self, value):
+        if isinstance(value, dict):
+            if "blob" in value and (not isinstance(value["blob"], str) or
+                                    not re.fullmatch(r"blobs/[0-9a-f]{2}/[0-9a-f]{64}\.gz", value["blob"])):
+                return False
+            return all(self.canonical_blob_paths(child) for child in value.values())
+        if isinstance(value, list):
+            return all(self.canonical_blob_paths(child) for child in value)
+        return True
 
     def check_blob_pointers(self, value):
         if isinstance(value, dict):
@@ -2901,7 +2943,9 @@ class Importer:
             manifests.extend(pointer for project in self.incoming["projects"].values()
                              for pointer in project.get("manifests", []))
             for pointer in manifests:
-                self.check_blob_pointers(self.manifest_entries(pointer))
+                manifest = self.manifest(pointer)
+                manifest["entries"]
+                self.check_blob_pointers(manifest)
         except (OSError, EOFError, zlib.error, *self.MALFORMED):
             self.reject("source-verify", "invalid manifest")
 

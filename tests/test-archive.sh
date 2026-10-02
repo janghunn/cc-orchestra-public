@@ -2347,6 +2347,134 @@ for location in ('record', 'task-manifest', 'project-manifest', 'history'):
     rejected('reject', source, 'blob-name')
 ok(True, 'F6: every blob dictionary is validated even without sha256 in records, manifests and histories')
 
+# F7: bound every hostile-source import and prove rejection releases the raw lock.
+def bounded_rejected(dest, source, reason, host='bee', *options, limit=60, code=4):
+    before = state(dest, git=True)
+    try:
+        result = subprocess.run(
+            [str(command), 'import', '--host', host, '--source-vault', str(home / source / 'vault'),
+             '--source-raw', str(home / source / 'raw'), '--json', '--top', '1000', *options],
+            env=environment(dest), text=True, capture_output=True, timeout=limit)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f'F7: import of {source} {options} hung beyond {limit}s') from error
+    assert result.returncode == code, (source, options, result.returncode, code, result.stdout, result.stderr)
+    if code == 4:
+        data = report(result.stdout)
+        assert reason in {item['reason'] for item in data['rejected']['items']}, data
+    else:
+        assert reason in result.stderr, result.stderr
+    assert state(dest, git=True) == before, (source, reason)
+    with (home / dest / 'raw/.lock').open('r+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+
+import socket
+
+# Device files require privileges, so only FIFOs, sockets and symlinks are created here.
+for kind in ('fifo', 'socket', 'symlink'):
+    for location in ('generated-artifact', 'generated-note', 'sources', 'nested-sources'):
+        source = clone('bee', f'special-{kind}-{location}')
+        if location.startswith('generated-'):
+            generated = catalog(source)['generated']
+            rel = (next(rel for rel in generated if
+                        re.fullmatch(r'artifacts/tasks/demo--01-shared/[0-9a-f]{12}/files/brief\.md', rel))
+                   if location == 'generated-artifact' else 'tasks/demo--01-shared.md')
+            assert rel in generated
+            path = home / source / 'vault' / rel
+            target = home / source / 'vault/_meta/catalog.json'
+            path.unlink()
+        else:
+            path = home / source / 'raw/sources' / ('x.json' if location == 'sources' else 'nested/y.json')
+            target = next((home / source / 'raw/sources').glob('*.json'))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sock = None
+        try:
+            if kind == 'fifo':
+                os.mkfifo(path)
+            elif kind == 'socket':
+                sock = socket.socket(socket.AF_UNIX)
+                previous_cwd = Path.cwd()
+                try:
+                    os.chdir(path.parent)
+                    sock.bind(path.name)
+                except OSError as error:
+                    note = f'F7 sockets unavailable: {error}'
+                    skipped.append(note)
+                    print(f'skip - {note}', flush=True)
+                    break
+                finally:
+                    os.chdir(previous_cwd)
+            else:
+                path.symlink_to(target)
+            bounded_rejected('reject', source, 'not-regular')
+            if kind == 'fifo':
+                bounded_rejected('reject', source, 'not-regular', 'bee', '--dry-run')
+        finally:
+            if sock is not None:
+                sock.close()
+            path.unlink(missing_ok=True)
+ok(True, 'F7: special source artifacts, notes and direct/nested histories reject promptly without writes or held locks')
+
+clone('original', 'after-fifo')
+imported('after-fifo')
+ok(verified('after-fifo'), 'F7: a normal import and verification succeed after FIFO rejections')
+
+source = clone('bee', 'history-escape')
+outside_fifo = home / 'outside-fifo'
+os.mkfifo(outside_fifo)
+try:
+    path, history = next((path, history) for path in (home / source / 'raw/sources').glob('*.json')
+                         if (history := json.loads(path.read_bytes()))['generations'][0]['chunks'])
+    history['generations'][0]['chunks'][0]['blob'] = os.path.relpath(outside_fifo, home / source / 'raw')
+    put(path, archive.json_bytes(history))
+    bounded_rejected('reject', source, 'blob-name')
+finally:
+    outside_fifo.unlink()
+ok(True, 'F7: source-history chunks escaping both source trees reject before opening an outside FIFO')
+
+for location in ('hidden', 'nested'):
+    source = clone('bee', location + '-history-escape')
+    outside_fifo = home / 'outside-fifo'
+    os.mkfifo(outside_fifo)
+    try:
+        history = next(history for path in (home / source / 'raw/sources').glob('*.json')
+                       if (history := json.loads(path.read_bytes()))['generations'][0]['chunks'])
+        history['generations'][0]['chunks'][0]['blob'] = os.path.relpath(outside_fifo, home / source / 'raw')
+        rel = '.hidden.json' if location == 'hidden' else 'nested/z.json'
+        put(home / source / 'raw/sources' / rel, archive.json_bytes(history))
+        bounded_rejected('reject', source, 'source-verify' if location == 'hidden' else 'source-history')
+    finally:
+        outside_fifo.unlink()
+ok(True, 'F7: hidden and nested histories reject escaping blob pointers before opening an outside FIFO')
+
+source = clone('bee', 'catalog-fifo')
+path = home / source / 'vault/_meta/catalog.json'
+path.unlink()
+os.mkfifo(path)
+try:
+    bounded_rejected('reject', source, 'source catalog is not a regular file', code=2)
+finally:
+    path.unlink()
+ok(True, 'F7: a FIFO catalog preserves the exit-2 refusal without writes or a held lock')
+
+# F8: manifests carry blob pointers outside entries as well.
+for variant in ('no-sha', 'missing', 'project-no-sha'):
+    source = clone('bee', 'manifest-header-' + variant)
+    value = catalog(source)
+    pointer = (value['projects']['demo']['manifests'][0] if variant == 'project-no-sha' else
+               next(iter(value['tasks']['demo--01-shared']['snapshots'].values()))['manifest'])
+    manifest = json.loads(gzip.decompress((home / source / 'raw' / pointer['blob']).read_bytes()))
+    digest = archive.sha(b'missing F8 blob\n')
+    manifest['header'] = {'blob': f'blobs/{digest[:2]}/{digest}.gz', 'length': 1}
+    if variant == 'missing':
+        manifest['header']['sha256'] = digest
+    replace_manifest(source, pointer, manifest)
+    save_catalog(source, value)
+    if variant.endswith('no-sha'):
+        assert verified(source)
+    rejected('reject', source, 'blob-missing' if variant == 'missing' else 'blob-name')
+ok(True, 'F8: every blob dictionary in task and project manifest headers is validated')
+
 # R1/R2: a later source apply adds work while retaining all earlier raw data.
 clone('bee', 'bee2')
 work.rename(home / 'saved-A-work')

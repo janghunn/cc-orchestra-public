@@ -1085,6 +1085,10 @@ Each imported project, task and session keeps `source_id`, its id on the source 
 items. Incoming blobs are checked for gzip integrity and uncompressed SHA-256, then new
 blobs are recompressed deterministically; existing blobs are never rewritten. Source
 histories live under `sources/<host>/`, keeping machine-specific watermarks separate.
+Before source verification, import rejects any entry in the source vault or raw store that
+is not a regular file or directory (FIFO, socket, device or symlink) with `not-regular`.
+Source verification is skipped once any entry has been rejected.
+Source histories whose blob pointers leave `blobs/` are also refused before source verification.
 Import also verifies every local blob it reuses and refuses damaged blobs without rewriting
 them. Before writing, including during `--dry-run`, it validates its own rendered links and
 pointers against the merged output. Copied thumbnails are scanned for secret-shaped byte
@@ -1098,6 +1102,8 @@ omitted from copied artifacts, while original raw content remains in the raw sto
 Import refuses shared-page changes pinned by retained catalog, note or JSON pointers, and withholds artifact paths that the local policy flags as secret-shaped.
 `--dry-run --json` reports additions and collisions without creating directories, a lock or
 any files. `--top N` limits report samples; `--no-commit` suppresses the vault commit.
+The `new blobs` count in import and dry-run reports includes the host's blob-inventory blob
+and, on refresh, recovery blobs of replaced versions.
 Plain import of an already imported host is always refused with `refresh-required`, even
 for unchanged inputs; use `--refresh --dry-run` to review the update first. An unchanged
 refresh writes no changed content and makes no commit. Host import order does
@@ -1116,7 +1122,8 @@ Refresh may replace only that host's records, catalogued files in its namespace 
 `raw/sources/<host>/` histories. Uncatalogued existing files remain protected. Shared pages
 still obey superset and retained-pointer checks. Destination ancestors must be real
 directories, and every dictionary carrying a blob path must have a valid digest, canonical
-name, available bytes and matching length. Both import and refresh print their listing
+name, available bytes and matching length. This validates blob dictionaries anywhere in a
+manifest, not only in its `entries`. Both import and refresh print their listing
 before writing archive content; refresh lists added, changed, refused and preserved items.
 
 Refresh refuses shrinkage (`shrunk`): earlier record ids, task locations and snapshot
