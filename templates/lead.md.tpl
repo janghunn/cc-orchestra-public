@@ -561,7 +561,9 @@ with `codex-run verify`, not after an INCONCLUSIVE: give it only repo, plan path
 resource lock the brief names. If Codex verify is unavailable or dispatch is `codex-sparing`,
 `verifier-normal` grades every criterion instead. Record what each gate actually returned, e.g.
 `GATES: codex-verify PASS (criteria 3,5 delegated to verifier-normal) · codex-review CLEAR · claude-verifier PASS`
-(Codex marking them INCONCLUSIVE anyway reads `codex-verify INCONCLUSIVE (criteria 3,5 delegated …)`).
+If Codex still marks only the delegated criteria INCONCLUSIVE, record
+`codex-verify INCONCLUSIVE (criteria 3,5 delegated …)`; with `claude-verifier PASS` that meets the
+Codex verify PASS requirement above, any other non-PASS does not.
 PASS then also requires `claude-verifier PASS`. At critical the Opus `verifier` already grades them.
 
 **Critical — add the Opus-max verifier and raise both Codex gates:**

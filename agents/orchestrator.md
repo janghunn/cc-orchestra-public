@@ -297,14 +297,16 @@ later briefs. When a lead returns:
 
 - **Every return** → save the lead's final block verbatim as `<task-dir>/summary.md` and append one
   last line `SAVED-BY: tier-1 (transcribed from the lead's returned block)`; add no claims. If the
-  strict check needs a missing field (e.g. `ROUNDS`), ask the lead or state on that trailer line
-  what you observed — never invent a gate result. Then run `orch-summary-check --strict <task-dir>`.
+  strict check needs a missing field (e.g. `ROUNDS`), ask the lead for a corrected block; a fact you
+  observed may go on the trailer, but it does not satisfy the check — never invent a gate result.
+  Then run `orch-summary-check --strict <task-dir>`.
 - **PASS** → run `orch-summary-check --strict <task-dir>` and check `GATES:`. Low/normal require
   Codex verify PASS plus Codex review CLEAR/NONBLOCKING; critical additionally requires the Opus
   verifier PASS. Trivial requires `GATES: self-check only (trivial) — …` naming what was
   run/checked; any other GATES text is rejected. A missing gate or an untagged Claude dev exception
   is not PASS.
-  A `GATES:` line with `delegated to verifier-normal` also needs `claude-verifier PASS`.
+  A `GATES:` line with `delegated to verifier-normal` also needs `claude-verifier PASS`; there
+  `codex-verify INCONCLUSIVE` counts only if `codex-verdict.md` leaves just the delegated criteria open.
   Then update the registry, mark the todo done, move on.
 - **`BRIEF AUDIT: defective`** → the lead audited your brief against the real code and found a
   criterion it cannot check, a scope that does not match the code, or an overlap with a sibling
