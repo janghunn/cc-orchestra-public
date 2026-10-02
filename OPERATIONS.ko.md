@@ -1006,6 +1006,7 @@ checkout이 삭제된 작업도 유지한다.
 ```bash
 orch-archive                       # 읽기 전용 계획; 파일 생성 없음
 orch-archive plan --json --top 20
+orch-archive plan --json --measure-thumbnails   # thumbnail을 메모리에서 인코딩해 측정; 파일은 쓰지 않음
 orch-archive apply                 # 로컬 저장 및 vault 변경 commit
 orch-archive apply --no-commit
 orch-archive verify
@@ -1034,8 +1035,42 @@ checkpoint 파일은 복사하거나 내용 해시를 계산하지 않는다. `C
 `.pt .pth .ckpt .safetensors .onnx .engine .trt .h5 .npz .npy`이며 대소문자를 구분하지 않는다
 (빈 값이면 이 분류를 끈다). 작업 노트에는 경로·크기·UTC mtime만 기록하며 보고서에는
 개수·용량·상위 작업을 표시한다. checkpoint는 payload 한도 합계에서 제외한다.
-PNG 처리는 기존 한도를 유지한다. 첫 실제 apply는 별도 PNG-to-JPEG thumbnail 후속 작업이
-끝날 때까지 기다려야 한다. 이 릴리스에는 thumbnail 기능을 구현하지 않았다.
+
+PNG 파일은 원본이 아니라 작은 JPEG thumbnail로 보관한다. `IMAGE_EXTENSIONS` 기본값은
+`.png`이다(`.png`만 지원하며, 비우면 이미지 처리를 끄고 PNG는 위의 payload 한도를 따른다).
+원본 PNG 바이트는 vault와 raw 저장소 어디에도 복사하지 않는다. 이미지마다 baseline JPEG
+thumbnail 하나만 `artifacts/tasks/<task>/thumbs/`(루트는
+`artifacts/roots/<project>/<hash>/thumbs/`)에 저장하며, 원본 내용 해시를 키로 쓰므로 내용이 같은
+이미지는 파일 하나를 공유한다. alpha는 흰색 위에 합성하고 EXIF, ICC, text 메타데이터는
+버린다. 인코더는 실행 시점에 탐지한다. importable하면 Pillow(필요할 때만 import), 없으면
+`ffmpeg`, 둘 다 없으면 인코더 없음이다. `THUMB_ENCODER=auto|pillow|ffmpeg|none`으로 강제할
+수 있다. 인코더가 없으면 해당 이미지는 metadata만 기록하고(`no-encoder`) 보고서에
+`no image encoder`를 한 번 표시한다. 기본값: 긴 변 `THUMB_MAX_EDGE=512` px,
+`THUMB_QUALITY=70`, thumbnail당 `THUMB_MAX_BYTES=65536`, `THUMB_MAX_PIXELS=100000000`
+(초과하면 디코딩하지 않고 metadata만 기록, `over-pixel-cap`), 작업 노트의 Obsidian embed
+`THUMB_EMBED_MAX=8`개, 작업당 thumbnail은 `THUMB_MAX_PER_TASK=48`개(0이면 생성하지 않음).
+바이트 한도를 넘으면 품질을 낮추고 그다음 크기를 줄여 다시 시도하며
+모두 실패하면 metadata만 기록한다(`thumbnail-over-cap`). `.png` 파일은 먼저 구조 검사(시그니처,
+IHDR, chunk CRC, IEND까지의 chunk)를 거친다. 통과하지 못한 파일(`not-png`, `bad-header`,
+`bad-chunk-crc`, `truncated`)은 원본 오류(`invalid-image`, 종료 코드 **4**)로 기록하고 실행은
+계속한다. 구조는 정상이지만 디코딩할 수 없는 픽셀 데이터도 마찬가지다(`decode-failed`, metadata만
+기록). 작업 노트와 catalog에는 표본으로 선택한 이미지마다 상대 경로, 크기, UTC mtime, 원본 SHA-256, 픽셀
+크기, thumbnail 경로·바이트 수·픽셀 크기, 인코더 id와 버전, 사용한 파라미터를 기록한다. SHA-256과
+전체 chunk CRC 검사는 `PAYLOAD_FILE_MAX_BYTES` 이내의 원본에만 수행하며, 더 큰 원본은 seek만
+하는 chunk 순회로 검증하고 해시를 남기지 않는다. 각 작업은 정렬한 PNG 목록에서 균등 간격으로
+최대 `THUMB_MAX_PER_TASK`(48)개를 선택해 thumbnail을 만든다(표본이 두 개 이상이면 처음과
+마지막을 포함하며, 한 개이면 첫 이미지만 선택). 나머지는 metadata만 기록하며(`not-sampled`),
+노트에는 폴더별 요약을, raw 저장소의 manifest에는 파일별 정보를 남긴다. 모든 PNG를 검증하며,
+선택한 파일이 잘못되었어도 다른 이미지로 표본을 채우지 않는다. PNG가 n개이면 예산은 원본 크기가
+아니라 `min(n, THUMB_MAX_PER_TASK) × THUMB_MAX_BYTES`를 예약한다. 표본 선택과 예산 예약은
+각 작업 위치와 루트 스캔에 따로 적용하며, 한 번에 이미지 하나만 메모리에 디코딩한다.
+
+thumbnail의 멱등성은 한 머신 안에서만 보장한다. 원본(해시·크기·mtime), 인코더 id/버전,
+파라미터 중 하나가 바뀔 때만 다시 인코딩한다. JPEG 출력은 인코더와 Pillow 버전마다 다르므로
+도구가 바뀌면 다시 인코딩해 vault의 해당 thumbnail을 덮어쓴다(이력은 git에 남는다). `plan`은
+인코딩하지 않고 이런 이미지를 `pending`으로 보고하며, `plan --measure-thumbnails`는 메모리에서
+인코딩하고(파일은 쓰지 않음) 출력 보고서에만 `images_measurement`(인코딩/재사용 개수, 인코딩
+시간, 전체 시간, 최대 RSS)를 추가한다. 저장 파일에는 넣지 않는다.
 
 읽을 수 없거나 사라진 원본은 실행을 중단하지 않고 건너뛴다. `source_errors`는 정확한
 개수와 보호된 경로·사유·errno의 제한된 목록을 보고한다(`--top`으로 목록 크기 설정).
@@ -1066,12 +1101,26 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
   최종 리뷰 지적 사항).
 - secret-shaped 파일명의 payload 한도 수정은 마지막 gate 이후 반영되었으며
   gate 검증을 받지 않았다(`lib/orch_archive.py`, `Archive.scan_files`).
+- indexed PNG의 PLTE 필수 검사는 마지막 gate 이후 반영되었으며 gate 검증을 받지 않았다
+  (`lib/orch_archive.py`, `png_info`).
 - `.orchestra/wt`와 `.orchestra/archive` 컨테이너는 전체를 건너뛰고 합계 용량을 보고한다.
   내부의 중첩된 `.orchestra` 루트만 보관하므로 `archive/<x>/handoff/` 같은 개별 파일은
   복사하지 않는다.
 - Codex-only 설치(`install_codex_only`)는 `orch-archive` 링크를 만들지 않는다.
 - Obsidian 렌더링(graph 색상과 Bases dashboard)은 시각적으로 확인하지 않았다.
-- PNG-to-JPEG thumbnail은 별도 후속 작업이며 첫 실제 apply는 해당 작업을 기다려야 한다.
+- 한 번 기록한 thumbnail은 다른 artifact처럼 vault의 git 이력에 남는다. 인코더나 파라미터를
+  바꾸면 새 버전이 추가되며 이전 버전은 정리하지 않는다.
+- 파일별 `sampled: false` 플래그는 변경 불가능한 snapshot manifest에 기록된다. 나중에
+  `THUMB_MAX_PER_TASK`를 바꾸면 catalog, 노트와 폴더별 요약은 갱신되지만, 해당 snapshot에
+  이미 작성된 manifest의 플래그는 바뀌지 않는다.
+- `--measure-thumbnails` 없는 `plan`은 픽셀 데이터 손상을 감지할 수 없다(`pending`으로 보고).
+  `apply`와 측정 plan만 디코딩한다. `PAYLOAD_FILE_MAX_BYTES`를 넘는 원본은 인코딩 전에
+  chunk CRC 검사와 해시가 없다.
+- tRNS 키가 있는 16비트 RGB PNG는 Pillow가 8비트로 디코딩하므로 키의 상위 바이트로 일치를
+  판정한다. 키와 하위 바이트만 다른 샘플도 흰색이 될 수 있다. 16비트 gray 키는 정확히 일치시킨다.
+- PNG만 지원한다. `.bmp`, `.tif` 등 다른 래스터 형식은 payload 한도를 따른다.
+- Pillow 9.0.1 호환은 (신규 전용 호출을 쓰지 않는) 구조로 확보했으며 실행해 보지는 않았다.
+  thumbnail의 Obsidian embed 렌더링도 시각적으로 확인하지 않았다.
 
 ## 설정 튜닝
 

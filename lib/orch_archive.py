@@ -1,4 +1,4 @@
-"""Deterministic, copy-only local archive. Python standard library only."""
+"""Deterministic, copy-only local archive. Python standard library only; Pillow (optional) is imported lazily as an image encoder."""
 import sys
 sys.dont_write_bytecode = True
 
@@ -17,11 +17,14 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
+import time
 import zlib
 
 REPO = Path(__file__).resolve().parent.parent
@@ -33,16 +36,26 @@ scan_record = _secrets.scan_record
 EXCLUDED = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 PATH_KEYS = {"VAULT_DIR", "RAW_DIR", "ALLOWLIST_FILE", "CLAUDE_PROJECTS_DIR", "CODEX_HOME_DIR"}
 LIST_KEYS = {"STATE_DIRS", "EXTRA_BASES"}
-EXT_KEYS = {"VAULT_TEXT_EXTENSIONS", "TEXT_EXTENSIONS", "APPEND_EXTENSIONS", "CHECKPOINT_EXTENSIONS"}
+EXT_KEYS = {"VAULT_TEXT_EXTENSIONS", "TEXT_EXTENSIONS", "APPEND_EXTENSIONS", "CHECKPOINT_EXTENSIONS", "IMAGE_EXTENSIONS"}
+CHOICE_KEYS = {"THUMB_ENCODER": {"auto", "pillow", "ffmpeg", "none"}}
 INT_KEYS = {"INCLUDE_CLAUDE_TRANSCRIPTS", "INCLUDE_CODEX_ROLLOUTS", "INCLUDE_PAYLOAD",
             "PAYLOAD_FILE_MAX_BYTES", "PAYLOAD_TASK_MAX_BYTES", "VAULT_TEXT_MAX_BYTES",
-            "SIZE_REPORT_BYTES", "NESTED_ROOT_MAX_DEPTH", "GZIP_LEVEL", "COMMIT"}
+            "SIZE_REPORT_BYTES", "NESTED_ROOT_MAX_DEPTH", "GZIP_LEVEL", "COMMIT",
+            "THUMB_MAX_EDGE", "THUMB_QUALITY", "THUMB_MAX_BYTES", "THUMB_MAX_PIXELS", "THUMB_EMBED_MAX",
+            "THUMB_MAX_PER_TASK"}
 OVERRIDES = {"VAULT_DIR": "VAULT", "RAW_DIR": "RAW", "ALLOWLIST_FILE": "ALLOWLIST",
              "STATE_DIRS": "STATE_DIRS", "CLAUDE_PROJECTS_DIR": "CLAUDE_PROJECTS",
              "CODEX_HOME_DIR": "CODEX_HOME", "EXTRA_BASES": "EXTRA_BASES"}
 UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
 SNAPSHOT_DIR = r"artifacts/(?:tasks/[^/]+/[0-9a-f]{12}|roots/[^/]+/[0-9a-f]{12})"
 COPIED_ARTIFACT_PATH = SNAPSHOT_DIR + r"/files/.+"
+# Thumbnails are content-keyed per task or root, never per snapshot.
+THUMBNAIL_PATH = r"artifacts/(?:tasks/[^/]+|roots/[^/]+/[0-9a-f]{12})/thumbs/[0-9a-f]{24}\.jpg"
+# Bump when the encoding recipe changes; it is part of the recorded parameters and forces a re-encode.
+THUMB_RECIPE = 2
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_COLOR_DEPTHS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
+FFMPEG_TIMEOUT = 120
 _WRITE_BASES = set()
 
 
@@ -88,7 +101,7 @@ def load_policy():
             if "=" not in line:
                 raise ArchiveError(f"policy: invalid line {n}")
             key, value = (s.strip() for s in line.split("=", 1))
-            if key not in PATH_KEYS | LIST_KEYS | EXT_KEYS | INT_KEYS:
+            if key not in PATH_KEYS | LIST_KEYS | EXT_KEYS | INT_KEYS | set(CHOICE_KEYS):
                 raise ArchiveError(f"policy: unknown key {key}")
             if value.startswith('"'):
                 if not value.endswith('"'):
@@ -107,6 +120,10 @@ def load_policy():
     for key in EXT_KEYS:
         values[key] = set(values[key].split())
     values["CHECKPOINT_EXTENSIONS"] = {ext.lower() for ext in values["CHECKPOINT_EXTENSIONS"]}
+    values["IMAGE_EXTENSIONS"] = {ext.lower() for ext in values["IMAGE_EXTENSIONS"]}
+    for key, choices in CHOICE_KEYS.items():
+        if values[key] not in choices:
+            raise ArchiveError("policy: THUMB_ENCODER must be auto, pillow, ffmpeg or none")
     for key in INT_KEYS:
         try:
             values[key] = int(values[key])
@@ -119,6 +136,16 @@ def load_policy():
     for key in {"INCLUDE_CLAUDE_TRANSCRIPTS", "INCLUDE_CODEX_ROLLOUTS", "INCLUDE_PAYLOAD", "COMMIT"}:
         if values[key] not in (0, 1):
             raise ArchiveError(f"policy: {key} must be 0 or 1")
+    # The structural check (signature, IHDR, chunk walk) is PNG-specific.
+    if values["IMAGE_EXTENSIONS"] - {".png"}:
+        raise ArchiveError("policy: IMAGE_EXTENSIONS supports only .png")
+    for other in ("TEXT_EXTENSIONS", "APPEND_EXTENSIONS", "CHECKPOINT_EXTENSIONS"):
+        if values["IMAGE_EXTENSIONS"] & {ext.lower() for ext in values[other]}:
+            raise ArchiveError(f"policy: IMAGE_EXTENSIONS overlaps {other}")
+    if values["THUMB_MAX_EDGE"] < 1 or values["THUMB_MAX_BYTES"] < 1 or values["THUMB_MAX_PIXELS"] < 1:
+        raise ArchiveError("policy: THUMB_MAX_EDGE, THUMB_MAX_BYTES and THUMB_MAX_PIXELS must be at least 1")
+    if not 1 <= values["THUMB_QUALITY"] <= 95:
+        raise ArchiveError("policy: THUMB_QUALITY must be 1..95")
     if under(values["VAULT_DIR"], values["RAW_DIR"]) or under(values["RAW_DIR"], values["VAULT_DIR"]):
         raise ArchiveError("policy: vault and raw directories overlap")
     return values
@@ -384,6 +411,13 @@ class SourceErrors:
             self.failed[key] = {"path": self.guard.value(key, "report", "source-error", "path"),
                                 "reason": "vanished" if error.errno == errno.ENOENT else "unreadable",
                                 "errno": error.errno}
+        return self.failed[key]
+
+    def invalid(self, path, detail):
+        key = str(path)
+        if key not in self.failed:
+            self.failed[key] = {"path": self.guard.value(key, "report", "source-error", "path"),
+                                "reason": "invalid-image", "detail": detail, "errno": None}
         return self.failed[key]
 
     def report(self, top):
@@ -1045,9 +1079,332 @@ def registry_rows(text, path):
     return rows
 
 
+class ImageDecodeError(Exception):
+    """The encoder could not decode a structurally valid PNG."""
+
+
+def png_info(path, full=False):
+    """Encoder-independent PNG check: (None, info) when valid, else (detail, None).
+
+    The walk validates the signature, the IHDR fields and CRC, and the chunk structure through IEND.
+    With full=True every chunk is read in bounded pieces, its CRC is checked, and one SHA-256 of the
+    whole file comes back in the same single read. With full=False (a source above the payload limit)
+    the walk only seeks, so a huge PNG is never fully read; per-chunk CRCs beyond IHDR and the hash
+    are then not available. OSError propagates to the caller.
+    """
+    digest = hashlib.sha256() if full else None
+    with open(path, "rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+
+        def take(count):
+            data = stream.read(count)
+            if digest is not None:
+                digest.update(data)
+            return data
+
+        if take(8) != PNG_SIGNATURE:
+            return "not-png", None
+        header = take(8)
+        if len(header) < 8 or header[4:] != b"IHDR" or struct.unpack(">I", header[:4])[0] != 13:
+            return "bad-header", None
+        body = take(17)
+        if len(body) < 17 or zlib.crc32(b"IHDR" + body[:13]) & 0xFFFFFFFF != struct.unpack(">I", body[13:])[0]:
+            return "bad-header", None
+        width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", body[:13])
+        if (not 0 < width <= 2**31 - 1 or not 0 < height <= 2**31 - 1 or depth not in PNG_COLOR_DEPTHS.get(color, ())
+                or compression or filtering or interlace not in (0, 1)):
+            return "bad-header", None
+        position, seen_data, seen_palette = 33, False, False
+        while True:
+            header = take(8)
+            if len(header) < 8:
+                return "truncated", None
+            length, kind = struct.unpack(">I", header[:4])[0], header[4:]
+            if length > 2**31 - 1 or position + 12 + length > size:
+                return "truncated", None
+            # Only one IHDR is allowed, IEND is empty, and IDAT data must precede IEND.
+            if kind == b"IHDR" or (kind == b"IEND" and (length or not seen_data)):
+                return "bad-header", None
+            if color == 3 and kind in (b"IDAT", b"IEND") and not seen_palette:
+                return "bad-header", None
+            seen_data = seen_data or kind == b"IDAT"
+            seen_palette = seen_palette or kind == b"PLTE"
+            if full:
+                crc, remaining = zlib.crc32(kind), length
+                while remaining:
+                    part = take(min(1024 * 1024, remaining))
+                    if not part:
+                        return "truncated", None
+                    crc = zlib.crc32(part, crc)
+                    remaining -= len(part)
+                tail = take(4)
+                if len(tail) < 4:
+                    return "truncated", None
+                if crc & 0xFFFFFFFF != struct.unpack(">I", tail)[0]:
+                    return "bad-chunk-crc", None
+            else:
+                stream.seek(length + 4, os.SEEK_CUR)
+            position += 12 + length
+            if kind == b"IEND":
+                break
+        while full and take(1024 * 1024):
+            pass
+    info = {"width": width, "height": height, "bit_depth": depth, "color_type": color}
+    if digest is not None:
+        info["sha256"] = digest.hexdigest()
+    return None, info
+
+
+def jpeg_dimensions(data):
+    """(width, height) from the first SOF marker; ffmpeg may round an odd edge, so record the real size."""
+    position = 2
+    while position + 9 <= len(data):
+        if data[position] != 0xFF:
+            position += 1
+        elif data[position + 1] in (0xC0, 0xC1, 0xC2):
+            height, width = struct.unpack(">HH", data[position + 5:position + 9])
+            return width, height
+        elif data[position + 1] == 0xFF:
+            position += 1
+        elif data[position + 1] == 0x01 or 0xD0 <= data[position + 1] <= 0xD9:
+            position += 2
+        else:
+            position += 2 + struct.unpack(">H", data[position + 2:position + 4])[0]
+    return None
+
+
+def png_depth(path):
+    """Bit depth from the IHDR (the file already passed png_info)."""
+    with open(path, "rb") as stream:
+        header = stream.read(26)
+    return header[24] if len(header) == 26 else 0
+
+
+def sample_mask(image, key):
+    """"L" image, 255 where a 16-bit gray sample equals `key`, else 0; byte slicing keeps it at C speed."""
+    data = image.tobytes()
+    if image.mode == "I":
+        stride, low, high = 4, *((0, 1) if sys.byteorder == "little" else (3, 2))
+    else:
+        stride, low, high = 2, *((1, 0) if image.mode == "I;16B" else (0, 1))
+    parts = []
+    for offset, wanted in ((low, key & 255), (high, key >> 8)):
+        table = bytes(255 if value == wanted else 0 for value in range(256))
+        parts.append(int.from_bytes(data[offset::stride].translate(table), "big"))
+    length = len(data) // stride
+    del data
+    from PIL import Image
+    return Image.frombytes("L", image.size, (parts[0] & parts[1]).to_bytes(length, "big"))
+
+
+def thumbnail_size(width, height, edge):
+    """Longest edge at most `edge`; never upscales."""
+    longest = max(width, height)
+    if longest <= edge:
+        return width, height
+    return max(1, round(width * edge / longest)), max(1, round(height * edge / longest))
+
+
+def thumbnail_sample_indices(count, limit):
+    """Evenly spaced positions in the sorted image list, fixed before validation."""
+    if count <= limit:
+        return list(range(count))
+    if limit == 0:
+        return []
+    if limit == 1:
+        return [0]
+    return [round(i * (count - 1) / (limit - 1)) for i in range(limit)]
+
+
+def thumbnail_ladder(edge, quality):
+    """Byte-cap fallback attempts in order: first, lower quality, then smaller sizes."""
+    attempts = []
+    for attempt in ((edge, quality), (edge, min(quality, 50)), (max(1, edge // 2), min(quality, 50)),
+                    (max(1, edge // 2), min(quality, 30)), (max(1, edge // 4), min(quality, 30))):
+        if attempt not in attempts:
+            attempts.append(attempt)
+    return attempts
+
+
+class ImageEncoder:
+    """Lazily resolved JPEG encoder: Pillow, then ffmpeg, then none. Nothing is imported or spawned until needed."""
+    def __init__(self, policy):
+        self.requested, self.max_pixels = policy["THUMB_ENCODER"], policy["THUMB_MAX_PIXELS"]
+        self.resolved, self.name, self.version, self.ffmpeg = False, None, None, None
+
+    def resolve(self):
+        if not self.resolved:
+            self.resolved = True
+            order = {"auto": ("pillow", "ffmpeg"), "pillow": ("pillow",), "ffmpeg": ("ffmpeg",), "none": ()}[self.requested]
+            for candidate in order:
+                if getattr(self, "_probe_" + candidate)():
+                    self.name = candidate
+                    break
+        return self.identity
+
+    @property
+    def identity(self):
+        return {"id": self.name, "version": self.version} if self.name else None
+
+    def _probe_pillow(self):
+        try:
+            if importlib.util.find_spec("PIL") is None:
+                return False
+            import PIL
+            import PIL.Image
+            self.version = str(PIL.__version__)
+            return True
+        except Exception:
+            return False
+
+    def _probe_ffmpeg(self):
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            return False
+        try:
+            result = subprocess.run([executable, "-version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, timeout=10, text=True)
+            first = result.stdout.splitlines()[0].split() if result.returncode == 0 and result.stdout else []
+        except (OSError, subprocess.TimeoutExpired, UnicodeError):
+            return False
+        if not first:
+            return False
+        self.ffmpeg, self.version = executable, first[2] if len(first) > 2 else "unknown"
+        return True
+
+    def encode(self, path, width, height, attempts, max_bytes):
+        """First attempt whose JPEG fits max_bytes as (data, edge, quality, (w, h)); None when none fits.
+
+        Raises ImageDecodeError when the decoder rejects the file."""
+        if self.name == "pillow":
+            return self._pillow(path, width, height, attempts, max_bytes)
+        return self._ffmpeg(path, width, height, attempts, max_bytes)
+
+    def _pillow(self, path, width, height, attempts, max_bytes):
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = self.max_pixels
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        try:
+            # load() reads every pixel and closes the file; only this one decoded image (plus one
+            # converted copy while converting) is alive at a time.
+            source = Image.open(path)
+            source.load()
+            mode = source.mode
+            if mode.startswith("I;16") or mode == "I":
+                # 16-bit samples are scaled down to 8 bits; a tRNS key becomes an alpha mask (no numpy).
+                wide = source if mode == "I" else source.convert("I")
+                base = wide.point(lambda value: value * (1 / 256)).convert("L")
+                del wide
+                if isinstance(source.info.get("transparency"), int):
+                    from PIL import ImageChops
+                    mask = sample_mask(source, source.info["transparency"])
+                    base = base.convert("RGBA")
+                    base.putalpha(ImageChops.invert(mask))
+            elif mode == "RGB" and isinstance(source.info.get("transparency"), tuple) and png_depth(path) == 16:
+                # Pillow keeps the 16-bit key but decodes to 8 bits: match the key's high bytes (an approximation).
+                from PIL import ImageChops
+                bands = [band.point(lambda value, key=key >> 8: 255 if value == key else 0)
+                         for band, key in zip(source.split(), source.info["transparency"])]
+                base = source.convert("RGBA")
+                base.putalpha(ImageChops.invert(ImageChops.darker(ImageChops.darker(bands[0], bands[1]), bands[2])))
+                del bands
+            elif mode in ("RGBA", "LA", "PA") or "transparency" in source.info:
+                base = source.convert("RGBA")
+            elif mode in ("L", "RGB"):
+                base = source
+            elif mode == "1":
+                base = source.convert("L")
+            else:
+                base = source.convert("RGB")
+            del source
+            for edge, quality in attempts:
+                size = thumbnail_size(base.width, base.height, edge)
+                resized = base if size == base.size else base.resize(size, resample)
+                if base.mode == "RGBA":
+                    out = Image.new("RGB", size, (255, 255, 255))
+                    out.paste(resized, mask=resized.getchannel("A"))
+                else:
+                    out = Image.new(base.mode, size)
+                    out.paste(resized)
+                options = {"subsampling": 2} if out.mode == "RGB" else {}
+                buffer = io.BytesIO()
+                out.save(buffer, format="JPEG", quality=quality, optimize=False, progressive=False, **options)
+                data = buffer.getvalue()
+                del out, resized, buffer
+                if len(data) <= max_bytes:
+                    return data, edge, quality, size
+            return None
+        except Exception as error:
+            raise ImageDecodeError(type(error).__name__) from None
+
+    def _ffmpeg(self, path, width, height, attempts, max_bytes):
+        for edge, quality in attempts:
+            tw, th = thumbnail_size(width, height, edge)
+            # Quality 95 -> -q:v 2 and quality 1 -> -q:v 31, linear in between (mjpeg's qscale range).
+            qscale = min(31, max(2, round(31 - (quality - 1) * 29 / 94)))
+            graph = (f"[0:v]scale={tw}:{th}:flags=lanczos,format=rgba[f];color=c=white:s={tw}x{th},format=rgba[b];"
+                     "[b][f]overlay=shortest=1,format=yuvj420p[o]")
+            command = [self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1",
+                       "-protocol_whitelist", "pipe", "-i", "pipe:0", "-filter_complex", graph, "-map", "[o]",
+                       "-frames:v", "1", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact",
+                       "-c:v", "mjpeg", "-q:v", str(qscale), "-f", "image2pipe", "-"]
+            try:
+                # The source arrives on stdin, so no file name is ever interpreted as an image2 pattern.
+                with open(path, "rb") as source:
+                    result = subprocess.run(command, stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            timeout=FFMPEG_TIMEOUT)
+            except (OSError, subprocess.TimeoutExpired):
+                raise ImageDecodeError("ffmpeg") from None
+            # ffmpeg exits 0 with a partial image after "IEND without all image" (also with -xerror and
+            # -err_detect explode on 4.4.2), so anything printed at -loglevel error is a decode failure.
+            if result.returncode != 0 or result.stderr.strip() or not result.stdout.startswith(b"\xff\xd8"):
+                raise ImageDecodeError("ffmpeg")
+            size = jpeg_dimensions(result.stdout)
+            if size is None:
+                raise ImageDecodeError("ffmpeg")
+            if len(result.stdout) <= max_bytes:
+                return result.stdout, edge, quality, size
+        return None
+
+
+class Thumbnail:
+    """A JPEG vault artifact: length/hash only in plan, a private raw-dir temp file (apply), or an existing vault file.
+
+    The JPEG bytes are never kept in memory (`data` stays None); a temp file is owned solely by this run."""
+    data = None
+
+    def __init__(self, digest, length, vault_path=None, temp=None):
+        self.sha256, self.length, self.vault_path, self.temp = digest, length, vault_path, temp
+
+    def __len__(self):
+        return self.length
+
+    def materialize(self):
+        data = (self.temp or self.vault_path).read_bytes()
+        if len(data) != self.length or sha(data) != self.sha256:
+            raise ArchiveError("thumbnail hash mismatch", 1)
+        return data
+
+    def close(self):
+        """Delete the apply temp file; safe to call repeatedly."""
+        temp, self.temp = self.temp, None
+        if temp is not None:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except OSError:
+            pass
+
+
 class Archive:
-    def __init__(self, policy, discovery, guard, apply=False, top=20):
+    def __init__(self, policy, discovery, guard, apply=False, top=20, measure=False):
         self.p, self.d, self.guard, self.apply = policy, discovery, guard, apply
+        self.measure = measure
         self.errors = guard.source_errors
         self.raw = RawStore(policy, apply, guard)
         self.files = {}
@@ -1068,6 +1425,12 @@ class Archive:
         self.large = []
         self.payload = {"files": 0, "bytes": 0, "tasks": {}, "items": []}
         self.checkpoints = {"files": 0, "bytes": 0, "tasks": {}}
+        # files/source_bytes cover every image-extension file read; thumbnails/pending/invalid and the
+        # metadata_only reasons partition them per image. encoded/reused/encode_seconds are run-only.
+        self.images = {"files": 0, "source_bytes": 0, "thumbnails": 0, "pending": 0, "invalid": 0,
+                       "metadata_only": collections.Counter(), "encoded": 0, "reused": 0, "encode_seconds": 0.0}
+        self.thumb_files, self.thumb_cache = {}, {}
+        self.encoder, self.encoder_wanted = ImageEncoder(policy), False
         self.thread_owners = collections.defaultdict(set)
         self.root_reports = []
         for task in self.catalog["tasks"].values():
@@ -1091,20 +1454,30 @@ class Archive:
                                               raw_dir=self.raw.root if self.apply else None)
         return self.capture_cache[key]
 
-    def scan_files(self, base, owner, prefix, paths=None):
+    def scan_files(self, base, owner, prefix, paths=None, thumbnails=None):
         # A stat-only first pass measures the task payload budget. The second walk
         # is globally sorted and emits one guarded entry at a time into JSON.
-        # Neither pass retains Paths/dicts for the potentially millions of links.
+        # Retain only image relpaths to choose a fixed sample before reading any images.
         paths = sorted(paths) if paths is not None else None
         payload_total = 0
+        image_paths = []
         for path in paths if paths is not None else walk(base, skip_nested=True, errors=self.errors):
             try:
                 st = path.lstat()
-                if stat.S_ISREG(st.st_mode) and path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] | self.p["CHECKPOINT_EXTENSIONS"] and path.name != ".codex-session":
+                if stat.S_ISREG(st.st_mode) and path.suffix.lower() in self.p["IMAGE_EXTENSIONS"]:
+                    image_paths.append(str(path.relative_to(base)))
+                elif stat.S_ISREG(st.st_mode) and path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] | self.p["CHECKPOINT_EXTENSIONS"] and path.name != ".codex-session":
                     payload_total += st.st_size
             except OSError as error:
                 self.errors.record(path, error)
+        image_paths.sort()
+        selected = {image_paths[i] for i in thumbnail_sample_indices(len(image_paths), self.p["THUMB_MAX_PER_TASK"])}
+        # Reserve the full thumbnail cap for the sample only, even for tiny or invalid PNGs.
+        payload_total += min(len(image_paths), self.p["THUMB_MAX_PER_TASK"]) * self.p["THUMB_MAX_BYTES"]
+        del image_paths
         texts, artifacts, archived, checkpoints = {}, {}, [], []
+        rows, fresh, known = [], {}, thumbnails or {}
+        image_folders = {}
         counts, total, file_count = collections.Counter(), 0, 0
         identity, body = hashlib.sha256(), io.BytesIO()
         for path in paths if paths is not None else walk(base, self.skipped, skip_nested=True, errors=self.errors):
@@ -1117,6 +1490,8 @@ class Archive:
                     entry.update(kind="symlink", target=os.readlink(path))
                 elif not stat.S_ISREG(st.st_mode):
                     entry["kind"] = "special"
+                elif path.suffix.lower() in self.p["IMAGE_EXTENSIONS"]:
+                    entry["kind"] = "image-candidate"
                 elif path.suffix.lower() in self.p["CHECKPOINT_EXTENSIONS"]:
                     entry.update(kind="checkpoint", reason="checkpoint-not-copied")
                     checkpoints.append({"relpath": self.guard.value(rel, owner, rel, "path"),
@@ -1130,6 +1505,20 @@ class Archive:
                 failure = self.errors.record(path, error)
                 entry.update(kind=failure["reason"], errno=error.errno, size=0)
             safe_rel = self.guard.value(rel, owner, rel, "path")
+            if entry["kind"] == "image-candidate":
+                # Images never reach capture(), self.captured or the raw store; only a thumbnail is vault-bound.
+                folder = str(Path(rel).parent)
+                folder_row = image_folders.setdefault(folder, {"folder": folder, "pngs": 0, "source_bytes": 0, "thumbnails": 0})
+                folder_row["pngs"] += 1
+                folder_row["source_bytes"] += entry["size"]
+                try:
+                    row = self.scan_image(path, rel, entry, safe_rel, st, owner, prefix, payload_total, known, fresh, rel in selected)
+                    if row:
+                        rows.append(row)
+                        folder_row["thumbnails"] += row["disposition"] == "thumbnail"
+                except OSError as error:
+                    failure = self.errors.record(path, error)
+                    entry.update(kind=failure["reason"], errno=error.errno)
             if entry["kind"] == "candidate":
                 payload = path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] and path.name != ".codex-session"
                 over = payload and (not self.p["INCLUDE_PAYLOAD"] or
@@ -1205,9 +1594,128 @@ class Archive:
         snapshot = identity.hexdigest()[:12]
         for rel, data in artifacts.items():
             self.files[f"{prefix}/{snapshot}/files/{rel}"] = data
+        folders = [dict(row, folder=self.guard.value(folder, owner, folder, "path"))
+                   for folder, row in image_folders.items()]
         summary = {"files": file_count, "bytes": total, "counts": dict(counts),
-                   "body": body.getvalue(), "archived": archived, "checkpoints": checkpoints}
+                   "body": body.getvalue(), "archived": archived, "checkpoints": checkpoints,
+                   "images": sorted(rows, key=lambda row: row["relpath"]), "thumbnails": fresh,
+                   "image_folders": sorted(folders, key=lambda row: row["folder"])}
         return snapshot, summary, texts
+
+    def vault_thumbnail_ok(self, record, vault_path):
+        """An existing vault thumbnail is reusable only if it is a regular file with the recorded hash."""
+        try:
+            path = self.p["VAULT_DIR"] / vault_path
+            st = path.lstat()
+            return (record["path"] == vault_path and re.fullmatch(THUMBNAIL_PATH, vault_path) is not None
+                    and under(path, self.p["VAULT_DIR"]) and stat.S_ISREG(st.st_mode)
+                    and st.st_size == record["bytes"] and sha(path.read_bytes()) == record["sha256"])
+        except (OSError, KeyError, TypeError):
+            return False
+
+    def scan_image(self, path, rel, entry, safe_rel, st, owner, prefix, payload_total, known, fresh, sampled):
+        """Validate one image; only valid sampled images get a catalog row or reach an encoder."""
+        p, size = self.p, entry["size"]
+        detail, info = png_info(path, not p["PAYLOAD_FILE_MAX_BYTES"] or size <= p["PAYLOAD_FILE_MAX_BYTES"])
+        self.images["files"] += 1
+        self.images["source_bytes"] += size
+        if detail:
+            self.errors.invalid(path, detail)
+            entry.update(kind="invalid-image", reason=detail)
+            self.images["invalid"] += 1
+            return None
+        width, height, digest = info["width"], info["height"], info.get("sha256")
+        entry.update(kind="image", width=width, height=height)
+        if digest:
+            entry["sha256"] = digest
+        if not sampled:
+            entry["sampled"] = False
+            self.images["metadata_only"]["not-sampled"] += 1
+            return None
+        row = {"relpath": safe_rel, "size": size, "mtime": utc(st.st_mtime), "width": width, "height": height}
+        if digest:
+            row["source_sha256"] = digest
+        reason = record = thumb = key = vault_path = None
+        reused = False
+        if width * height > p["THUMB_MAX_PIXELS"]:
+            reason = "over-pixel-cap"
+        elif not p["INCLUDE_PAYLOAD"]:
+            reason = "payload-disabled"
+        elif p["PAYLOAD_TASK_MAX_BYTES"] and payload_total > p["PAYLOAD_TASK_MAX_BYTES"]:
+            reason = "payload-over-budget"
+        else:
+            self.encoder_wanted = True
+            identity = self.encoder.resolve()
+            if identity is None:
+                reason = "no-encoder"
+            else:
+                key = sha((("sha256:" + digest) if digest else f"stat:{rel}\0{size}\0{st.st_mtime_ns}").encode())[:24]
+                vault_path = f"{prefix}/thumbs/{key}.jpg"
+                params = {"max_edge": p["THUMB_MAX_EDGE"], "quality": p["THUMB_QUALITY"],
+                          "max_bytes": p["THUMB_MAX_BYTES"], "recipe": THUMB_RECIPE}
+                source = {"sha256": digest, "size": size, "mtime_ns": st.st_mtime_ns}
+                cached, old = self.thumb_cache.get(vault_path), known.get(key)
+                if cached and cached["encoder"] == identity and cached["params"] == params:
+                    record, reused = cached, True
+                elif (old and old.get("source") == source and old.get("encoder") == identity
+                      and old.get("params") == params and self.vault_thumbnail_ok(old, vault_path)):
+                    record, reused = old, True
+                    thumb = Thumbnail(old["sha256"], old["bytes"], vault_path=p["VAULT_DIR"] / vault_path)
+                elif self.apply or self.measure:
+                    started = time.monotonic()
+                    try:
+                        result = self.encoder.encode(path, width, height,
+                                                     thumbnail_ladder(p["THUMB_MAX_EDGE"], p["THUMB_QUALITY"]), p["THUMB_MAX_BYTES"])
+                    except ImageDecodeError:
+                        self.errors.invalid(path, "decode-failed")
+                        reason = "decode-failed"
+                    else:
+                        self.images["encode_seconds"] += time.monotonic() - started
+                        self.images["encoded"] += 1
+                        if result is None:
+                            reason = "thumbnail-over-cap"
+                        else:
+                            data, edge, quality, (tw, th) = result
+                            record = {"path": vault_path, "sha256": sha(data), "bytes": len(data), "width": tw, "height": th,
+                                      "encoder": identity, "params": params, "used": {"max_edge": edge, "quality": quality},
+                                      "source": source}
+                            thumb = Thumbnail(record["sha256"], len(data))
+                            if self.apply:
+                                # Spool to a private raw-dir temp file so encoded JPEGs never accumulate in memory.
+                                rel_temp = f".thumb-{key}-{os.getpid()}-{os.urandom(4).hex()}.jpg"
+                                _write_atomic(self.raw.root, rel_temp, data)
+                                thumb.temp = self.raw.root / rel_temp
+                            del data
+                else:
+                    reason = "pending"
+        if record is not None:
+            # The source must not have changed while it was validated and encoded.
+            try:
+                after = os.lstat(path)
+                changed = (after.st_size, after.st_mtime_ns, after.st_ino) != (st.st_size, st.st_mtime_ns, st.st_ino)
+            except OSError:
+                changed = True
+            if changed:
+                self.errors.invalid(path, "changed-during-scan")
+                if thumb is not None:
+                    thumb.close()
+                record = thumb = None
+                reason = "changed-during-scan"
+        if record is not None:
+            if thumb is not None:
+                self.files[vault_path] = thumb
+            self.images["reused"] += reused
+            self.thumb_cache[vault_path] = fresh[key] = record
+            self.thumb_files[vault_path] = record["bytes"]
+            self.images["thumbnails"] += 1
+            row.update(disposition="thumbnail", thumbnail=key)
+        elif reason == "pending":
+            self.images["pending"] += 1
+            row["disposition"] = "pending"
+        else:
+            self.images["metadata_only"][reason] += 1
+            row.update(disposition="metadata-only", reason=reason)
+        return self.guard.tree(row, owner, "images")
 
     @staticmethod
     def manifest(header, summary):
@@ -1239,7 +1747,17 @@ class Archive:
                     root_files.append(path)
             # A root's artifacts use the same dispositions, but no extra snapshot directory.
             root_prefix = f"artifacts/roots/{project}/{sha(str(root).encode())[:12]}"
-            rid, rentries, root_texts = self.scan_files(root, project, root_prefix, root_files)
+            rid, rentries, root_texts = self.scan_files(root, project, root_prefix, root_files, project_record.get("thumbnails", {}).get(safe_root))
+            if rentries["thumbnails"]:
+                # Thumbnail keys are content hashes, so records are namespaced per root (each root has its own files).
+                project_record.setdefault("thumbnails", {}).setdefault(safe_root, {}).update(rentries["thumbnails"])
+            for key in ("images", "image_folders"):
+                if rentries[key]:
+                    project_record.setdefault(key, {})[safe_root] = rentries[key]
+                elif safe_root in project_record.get(key, {}):
+                    del project_record[key][safe_root]
+                    if not project_record[key]:
+                        del project_record[key]
             for rel in list(self.files):
                 if rel.startswith(root_prefix + "/" + rid + "/"):
                     self.files[root_prefix + "/" + rel.split("/" + rid + "/", 1)[1]] = self.files.pop(rel)
@@ -1253,7 +1771,9 @@ class Archive:
                 task = self.catalog["tasks"].setdefault(task_id, {"id": task_id, "project": project,
                     "task_dir": self.guard.value(path.name, task_id, "task_dir", "path"), "locations": {}, "snapshots": {}, "raw": []})
                 prefix = f"artifacts/tasks/{task_id}"
-                snapshot_id, task_entries, texts = self.scan_files(path, task_id, prefix)
+                snapshot_id, task_entries, texts = self.scan_files(path, task_id, prefix, thumbnails=task.get("thumbnails"))
+                if task_entries["thumbnails"]:
+                    task.setdefault("thumbnails", {}).update(task_entries["thumbnails"])
                 fields, threads = extract(texts, str(path), task_entries["archived"])
                 fields["models"] = sorted({self.guard.identifier(model, task_id) for model in fields["models"]})
                 matched = []
@@ -1278,6 +1798,13 @@ class Archive:
                     "registry_rows": safe_rows, "files": task_entries["files"], "bytes": task_entries["bytes"],
                     "counts": task_entries["counts"], "locations": [], "checkpoints": task_entries["checkpoints"]})
                 snap = task["snapshots"][snapshot_id]
+                if task_entries["images"]:
+                    snap["images"] = task_entries["images"]
+                else:
+                    # This snapshot was scanned now; a zero-sized sample must clear its old image rows.
+                    snap.pop("images", None)
+                if task_entries["image_folders"]:
+                    snap["image_folders"] = task_entries["image_folders"]
                 if safe_location not in snap["locations"]:
                     snap["locations"].append(safe_location)
                 # The first manifest for a content identity remains immutable.
@@ -1602,6 +2129,31 @@ class Archive:
             if checkpoints:
                 body += "\n" + sid + "\n\n" + fenced("relpath | size | mtime (UTC)\n" + "\n".join(
                     f"{row['relpath']} | {row['size']} | {row['mtime']}" for row in checkpoints)) + "\n"
+        image_rows = [(sid, row) for sid in sorted(current) for row in task["snapshots"][sid].get("images", [])]
+        image_folders = [(sid, row) for sid in sorted(current) for row in task["snapshots"][sid].get("image_folders", [])]
+        if image_rows or image_folders:
+            body += "\n## Images (JPEG thumbnails; original PNGs are not copied)\n\n"
+            embeds, listing = [], []
+            for sid, row in sorted(image_rows, key=lambda item: (item[0], item[1]["relpath"])):
+                item = dict(row, snapshot=sid)
+                record = task.get("thumbnails", {}).get(row.get("thumbnail"))
+                if record:
+                    item.update(thumbnail_path=record["path"], thumbnail_bytes=record["bytes"], thumbnail_sha256=record["sha256"],
+                                thumbnail_width=record["width"], thumbnail_height=record["height"],
+                                encoder=record["encoder"], params=record["params"], used=record["used"])
+                    if record["path"] not in embeds:
+                        embeds.append(record["path"])
+                listing.append(item)
+            for embed in embeds[:self.p["THUMB_EMBED_MAX"]]:
+                body += f"![[{embed}]]\n"
+            thumbnails = sum(row["thumbnails"] for _, row in image_folders)
+            pngs = sum(row["pngs"] for _, row in image_folders)
+            body += (f"\nSampled: {thumbnails} thumbnails of {pngs} PNG files (THUMB_MAX_PER_TASK={self.p['THUMB_MAX_PER_TASK']}); "
+                     "other PNGs are listed per folder below and per file in the snapshot manifest.\n")
+            body += "\n" + fenced("snapshot | folder | pngs | source_bytes | thumbnails\n" + "\n".join(
+                f"{sid} | {row['folder']} | {row['pngs']} | {row['source_bytes']} | {row['thumbnails']}"
+                for sid, row in sorted(image_folders, key=lambda item: (item[0], item[1]["folder"])))) + "\n"
+            body += "\n" + fenced(json.dumps(listing, ensure_ascii=False, sort_keys=True, indent=2)) + "\n"
         body += "\n## Per-snapshot values\n"
         for sid, snap in sorted(task["snapshots"].items()):
             values = dict(snapshot=sid, current=sid in current, locations=snap["locations"], fields=snap["fields"],
@@ -1640,11 +2192,25 @@ class Archive:
             "payload_over_budget": {"files": self.payload["files"], "bytes": self.payload["bytes"],
                 "items": self.guard.tree(self.payload["items"][:top], "report", "payload"),
                 "top_tasks": sorted(self.payload["tasks"].items(), key=lambda row: (-row[1], row[0]))[:top]},
+            "images": self.image_report(),
             "withheld_count": len(self.guard.items), "withheld": sorted(self.guard.items.values(), key=lambda row: (row["id"], row["kind"], row["owner"], row["context"]))[:top],
             "skipped_counts": dict(sorted(skipped_counts.items())),
             "skipped": sorted(safe_skipped, key=lambda row: (row["reason"], row["path"]))[:top],
             "large_items": sorted(safe_large, key=lambda row: (-row["bytes"], row["path"]))}
         return report
+
+    def image_report(self):
+        """Deterministic image summary: no timings or encode/reuse counts, so a re-apply stays byte-identical."""
+        identity = self.encoder.identity
+        images = {"extensions": sorted(self.p["IMAGE_EXTENSIONS"]), "encoder": identity, "resolved": self.encoder.resolved,
+                  "max_per_task": self.p["THUMB_MAX_PER_TASK"],
+                  "requested": self.p["THUMB_ENCODER"], "files": self.images["files"], "source_bytes": self.images["source_bytes"],
+                  "thumbnails": self.images["thumbnails"], "thumbnail_files": len(self.thumb_files),
+                  "thumbnail_bytes": sum(self.thumb_files.values()), "pending": self.images["pending"],
+                  "invalid": self.images["invalid"], "metadata_only": dict(sorted(self.images["metadata_only"].items()))}
+        if self.encoder_wanted and self.encoder.resolved and identity is None:
+            images["notice"] = "no image encoder"
+        return images
 
     def finalize(self, top, check_secrets=True):
         report = self.report(top)
@@ -1665,7 +2231,7 @@ class Archive:
         # Include catalog/report/withheld bytes too. Iterate until the report's own
         # decimal byte-count width stabilizes; no wall-clock values are introduced.
         while True:
-            breakdown = {kind: 0 for kind in ("artifacts", "notes", "catalog", "other")}
+            breakdown = {kind: 0 for kind in ("artifacts", "thumbnails", "notes", "catalog", "other")}
             for path in self.catalog["generated"]:
                 data = self.files.get(path)
                 size = len(data) if data is not None else (self.p["VAULT_DIR"] / path).stat().st_size if (self.p["VAULT_DIR"] / path).is_file() else 0
@@ -1673,6 +2239,8 @@ class Archive:
                     kind = "catalog"
                 elif re.fullmatch(COPIED_ARTIFACT_PATH, path):
                     kind = "artifacts"
+                elif re.fullmatch(THUMBNAIL_PATH, path):
+                    kind = "thumbnails"
                 elif path.endswith(".md"):
                     kind = "notes"
                 else:
@@ -1688,7 +2256,7 @@ class Archive:
         # Validate all vault-bound bytes before the first vault write.
         if check_secrets:
             for path, data in sorted(self.files.items()):
-                if not isinstance(data, Artifact):
+                if not isinstance(data, (Artifact, Thumbnail)):
                     self.guard.check(data, path)
         return report
 
@@ -1848,6 +2416,17 @@ def verify(policy):
         if not under(path, vault):
             problems.append("catalog: generated path escapes vault")
             continue
+        if re.fullmatch(THUMBNAIL_PATH, rel):
+            # JPEG bytes, not text; the catalog's thumbnail records pin the hash through check_pointer.
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("not a regular file")
+                with path.open("rb") as stream:
+                    if stream.read(2) != b"\xff\xd8":
+                        raise ValueError("not a JPEG")
+            except (OSError, ValueError):
+                problems.append(f"{rel}: thumbnail missing or invalid")
+            continue
         try:
             text = path.read_text()
             if rel.endswith(".md") and not rel.startswith("artifacts/"):
@@ -1938,11 +2517,14 @@ def main(argv=None):
         if command in ("plan", "apply"):
             child.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
             child.add_argument("--top", type=int, default=argparse.SUPPRESS)
+        if command == "plan":
+            child.add_argument("--measure-thumbnails", action="store_true")
         if command == "apply":
             child.add_argument("--no-commit", action="store_true")
         if command == "show":
             child.add_argument("id")
     args = parser.parse_args(argv)
+    spool = None
     try:
         policy = load_policy()
         if args.command == "verify":
@@ -1955,10 +2537,22 @@ def main(argv=None):
         discovery = Discovery(policy, guard).run()
         apply = args.command == "apply"
         if not apply:
-            archive = Archive(policy, discovery, guard, top=args.top).build()
-            output_report(archive.finalize(args.top, check_secrets=False), args.json)
+            measure = getattr(args, "measure_thumbnails", False)
+            wall = time.monotonic()
+            archive = Archive(policy, discovery, guard, top=args.top, measure=measure).build()
+            report = archive.finalize(args.top, check_secrets=False)
+            if measure:
+                # Printed only, never stored: timings and peak memory would break re-apply idempotence.
+                report["images_measurement"] = {
+                    "encoded": archive.images["encoded"], "reused": archive.images["reused"],
+                    "encode_seconds": round(archive.images["encode_seconds"], 3),
+                    "wall_seconds": round(time.monotonic() - wall, 3),
+                    "peak_rss_kib": {"self": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                                     "children": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}}
+            output_report(report, args.json)
             return 4 if guard.source_errors.failed else 0
         vault, raw = policy["VAULT_DIR"], policy["RAW_DIR"]
+        spool = raw
         global _WRITE_BASES
         _WRITE_BASES = {vault.resolve(), raw.resolve()}
         if vault.exists() and any(vault.iterdir()) and not (vault / "_meta/catalog.json").is_file():
@@ -1985,6 +2579,11 @@ def main(argv=None):
             report = archive.finalize(args.top)
             written = removed = 0
             for rel, data in sorted(archive.files.items()):
+                if isinstance(data, Thumbnail):
+                    # Binary JPEG: hash-verified by materialize(), not a text line scan.
+                    written += _write_atomic(vault, rel, data.materialize())
+                    data.close()
+                    continue
                 # Full-text fail-closed check immediately precedes each vault write.
                 artifact = isinstance(data, Artifact)
                 if artifact:
@@ -2015,6 +2614,7 @@ def main(argv=None):
             private_files(vault)
             output_report(report, args.json)
             print(f"vault: {written} files written, {removed} removed; raw: {archive.raw.new_blobs} new blobs; commit: {commit}")
+            print(f"images: {archive.images['encoded']} encoded, {archive.images['reused']} reused")
         return 4 if guard.source_errors.failed else 0
     except ArchiveError as error:
         print(str(error), file=sys.stderr)
@@ -2023,6 +2623,11 @@ def main(argv=None):
         # No exception message may echo a source-derived secret or git environment value.
         print(f"archive: {type(error).__name__}", file=sys.stderr)
         return 2
+    finally:
+        # No apply, failed or not, may leave one of this run's thumbnail spool files behind.
+        if spool is not None and spool.is_dir():
+            for leftover in spool.glob(f".thumb-*-{os.getpid()}-*.jpg"):
+                leftover.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

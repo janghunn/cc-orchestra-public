@@ -957,6 +957,7 @@ and the cumulative catalog retains tasks whose source checkout was deleted.
 ```bash
 orch-archive                       # read-only plan; creates nothing
 orch-archive plan --json --top 20
+orch-archive plan --json --measure-thumbnails   # also encodes thumbnails in memory; writes nothing
 orch-archive apply                 # writes locally and commits changes in the vault
 orch-archive apply --no-commit
 orch-archive verify
@@ -984,9 +985,46 @@ are restored from verified raw blobs at write time, so plans retain lengths and 
 Checkpoint files are never copied or content-hashed. `CHECKPOINT_EXTENSIONS` defaults to
 `.pt .pth .ckpt .safetensors .onnx .engine .trt .h5 .npz .npy` (case-insensitive; empty disables).
 Their paths, sizes and UTC mtimes appear in task notes; the report lists checkpoint counts,
-bytes and largest tasks. Checkpoints do not consume the payload budget. PNG handling keeps
-the limits above; the first real apply should wait for the separate PNG-to-JPEG thumbnail
-follow-up task. Thumbnails are not implemented in this release.
+bytes and largest tasks. Checkpoints do not consume the payload budget.
+
+PNG files are archived as small JPEG thumbnails, never as originals. `IMAGE_EXTENSIONS`
+defaults to `.png` (only `.png` is supported; empty disables the image path, and PNGs then
+follow the payload limits above). The original PNG bytes are never copied into the vault or
+the raw store: each image yields at most one baseline JPEG thumbnail under
+`artifacts/tasks/<task>/thumbs/` (roots: `artifacts/roots/<project>/<hash>/thumbs/`), keyed by
+the source content so identical images share one file. Alpha is composited onto white and
+EXIF, ICC and text metadata are dropped. The encoder is detected at run time: Pillow if
+importable (imported lazily), else `ffmpeg`, else none; `THUMB_ENCODER=auto|pillow|ffmpeg|none`
+forces a choice. With no encoder the image is recorded as metadata only (`no-encoder`) and the
+report prints `no image encoder` once. Defaults: `THUMB_MAX_EDGE=512` px longest edge,
+`THUMB_QUALITY=70`, `THUMB_MAX_BYTES=65536` per thumbnail, `THUMB_MAX_PIXELS=100000000`
+(larger sources are metadata only, `over-pixel-cap`, and are never decoded) and
+`THUMB_EMBED_MAX=8` Obsidian embeds in the task note, with `THUMB_MAX_PER_TASK=48` thumbnails
+per task (0 disables thumbnails). A thumbnail above the byte cap is retried
+with lower quality, then smaller sizes; if none fits it is metadata only (`thumbnail-over-cap`).
+Every file named `.png` first gets a structural check (signature, IHDR, chunk CRCs, chunks
+through IEND). A file that fails it (`not-png`, `bad-header`, `bad-chunk-crc`, `truncated`) is
+a source error (`invalid-image`, exit **4**) and the run continues; so is pixel data that
+looks valid but cannot be decoded (`decode-failed`, metadata only). The task note and catalog
+record, per sampled image, the relative path, size, UTC mtime, source SHA-256, pixel dimensions, thumbnail
+path, size and dimensions, encoder id and version, and the parameters used. The SHA-256 (and the
+full chunk-CRC read) is computed only for sources within `PAYLOAD_FILE_MAX_BYTES`; larger
+sources are validated by a seek-only chunk walk and keep no hash. Each task gets at most
+`THUMB_MAX_PER_TASK` (48) thumbnails chosen at evenly spaced positions of its sorted PNG list
+(first and last included when the sample has at least two images; a sample of one selects the first).
+The rest are metadata only (`not-sampled`), summarized per folder in the note and listed per file
+in the raw-store manifest. All PNGs still undergo validation; invalid sampled files leave empty
+slots, and the sample is not refilled. The budget reserves `min(n, THUMB_MAX_PER_TASK) × THUMB_MAX_BYTES`
+for `n` PNGs, never their source bytes. Selection and reservation apply separately to each task
+location and root scan. Only one decoded image is held in memory at a time.
+
+Thumbnails are idempotent per machine, not across machines: an image is re-encoded only when its
+source (hash, size, mtime), the encoder id/version or the parameters change; JPEG output differs
+between encoders and Pillow versions, so a different tool re-encodes and overwrites that
+thumbnail in the vault (git keeps the history). `plan` encodes nothing and reports such images
+as `pending`; `plan --measure-thumbnails` encodes them in memory (nothing is written) and adds
+`images_measurement` (encoded/reused counts, encode seconds, wall seconds, peak RSS) to the
+printed report only, never to a stored file.
 
 Unreadable or vanished sources are skipped without aborting the run. `source_errors` reports
 the exact count and a bounded list of guarded paths, reasons and errno values (`--top` controls
@@ -1017,12 +1055,27 @@ verified; Bases needs Obsidian >= 1.9.0.
   final review finding).
 - The payload-limit fix for secret-shaped filenames landed after the last gate and is not
   gated (`lib/orch_archive.py`, `Archive.scan_files`).
+- The PLTE-required check for indexed PNGs landed after the last gate and is not gated
+  (`lib/orch_archive.py`, `png_info`).
 - `.orchestra/wt` and `.orchestra/archive` containers are skipped as a whole with their byte
   totals reported. Only nested `.orchestra` roots inside them are archived; loose files such
   as `archive/<x>/handoff/` are not copied.
 - Codex-only installs (`install_codex_only`) do not link `orch-archive`.
 - Obsidian rendering (graph colors and Bases dashboards) has not been checked visually.
-- PNG-to-JPEG thumbnails are a separate follow-up; the first real apply should wait for it.
+- Thumbnails, once written, stay in the vault's git history like other artifacts; changing the
+  encoder or parameters adds new versions, and old versions are not pruned.
+- The per-file `sampled: false` flag lives in the immutable snapshot manifest. Changing
+  `THUMB_MAX_PER_TASK` later updates the catalog, note and folder summary, but not the flags
+  in manifests already written for that snapshot.
+- `plan` without `--measure-thumbnails` cannot detect pixel-data corruption (reported as
+  `pending`); only `apply` or the measuring plan decodes. Sources above `PAYLOAD_FILE_MAX_BYTES`
+  get no chunk-CRC check and no hash before encoding.
+- A 16-bit RGB PNG with a tRNS key is matched on the key's high bytes (Pillow decodes it to 8 bits),
+  so samples differing from the key only in the low byte may also turn white; 16-bit gray keys
+  are matched exactly.
+- Only PNG is supported; `.bmp`, `.tif` and other raster formats follow the payload limits.
+- Pillow 9.0.1 compatibility is by construction (no newer-only calls) and has not been run;
+  Obsidian embed rendering of the thumbnails has not been checked visually.
 
 ## Tuning
 

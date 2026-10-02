@@ -2,7 +2,10 @@
 set -euo pipefail
 REPO_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 ARCHIVE_TEST_HOME="$(mktemp -d)"
-trap 'rm -rf -- "$ARCHIVE_TEST_HOME"' EXIT
+IMAGE_TEST_HOME="$(mktemp -d)"
+# A temporary HOME hides a per-user Pillow install; keep the real user site visible to the image tests.
+IMAGE_USER_BASE="$(python3 -c 'import site; print(site.getuserbase())')"
+trap 'rm -rf -- "$ARCHIVE_TEST_HOME" "$IMAGE_TEST_HOME"' EXIT
 export HOME="$ARCHIVE_TEST_HOME" PYTHONDONTWRITEBYTECODE=1
 export ORCH_ARCHIVE_VAULT="$HOME/vault" ORCH_ARCHIVE_RAW="$HOME/raw"
 export ORCH_ARCHIVE_ALLOWLIST="$HOME/allowlist.txt"
@@ -119,7 +122,7 @@ task(p1, '02-other', 'STATUS: PASS\n')
 checkpoint_task = task(p1, '10-checkpoints', 'STATUS: PASS\n')
 put(checkpoint_task / 'model.PT', b'C' * 64)
 put(checkpoint_task / 'samples.npy', b'N')
-put(checkpoint_task / 'small.png', b'P')
+put(checkpoint_task / 'small.bin', b'P')
 running = task(p1, '06-running', extra='Build on orch/01-base\nConstraints as in orch/02-other\nT18 is a test reference.\n')
 task(p1 / '.orchestra/wt/checkout', '07-old', 'STATUS: CLOSED\n')
 task(p3, '01-codex-task')
@@ -144,11 +147,11 @@ for artifact_base in (t1, p1 / '.orchestra'):
     put(artifact_base / 'MANIFEST.json', 'Source MANIFEST.json is verbatim text.\n')
     put(artifact_base / 'raw.json', 'Source raw.json is verbatim text.\n')
 put(t1 / f'{token}.md', 'A safe body with a secret-shaped filename.\n')
-put(t1 / 'payload.png', b'P' * 64)
+put(t1 / 'payload.bin', b'P' * 64)
 secret_payload = t1 / f'{token}.bin'
 secret_payload_bytes = b'Unique oversized payload with a secret-shaped filename.'
 put(secret_payload, secret_payload_bytes)
-put(t1 / 'tiny.png', b'P')
+put(t1 / 'tiny.bin', b'P')
 put(t1 / 'partial.log', b'complete\nunterminated')
 outside = home / 'outside.txt'
 put(outside, 'outside target must never be followed\n')
@@ -251,7 +254,7 @@ checkpoint_entries = json.loads(gzip.decompress((raw / checkpoint_snapshot['mani
 checkpoint_body = (vault / 'tasks/demo--10-checkpoints.md').read_text().split('## Checkpoint files (not copied)', 1)[1].split('## Per-snapshot values', 1)[0]
 assert all(e['kind'] == 'checkpoint' and e['reason'] == 'checkpoint-not-copied' and 'sha256' not in e and 'raw' not in e
            for e in checkpoint_entries if e['relpath'] in ('model.PT', 'samples.npy'))
-assert next(e for e in checkpoint_entries if e['relpath'] == 'small.png')['kind'] == 'raw'
+assert next(e for e in checkpoint_entries if e['relpath'] == 'small.bin')['kind'] == 'raw'
 assert all(f"{e['relpath']} | {e['size']} | {archive.utc(e['mtime'])}" in checkpoint_body
            for e in checkpoint_entries if e['kind'] == 'checkpoint')
 empty_checkpoint_policy = dict(archive.load_policy(), CHECKPOINT_EXTENSIONS=set())
@@ -748,4 +751,953 @@ compile_env = dict(os.environ, PYTHONPYCACHEPREFIX=str(home / 'compile-cache'))
 subprocess.run(['python3', '-m', 'py_compile', str(command), str(repo / 'lib/orch_archive.py')], env=compile_env, check=True)
 ok(cache_before == cache_after, 'shell/Python syntax checks and no repository bytecode writes')
 print(f'PASS: {groups} archive test groups')
+PY
+
+# Thumbnail tests: their own temporary home, vaults and policy; tests needing Pillow or ffmpeg print
+# "skip - ... (SKIPPED: ...)" without counting as a pass, and the final line lists every skip by name.
+env HOME="$IMAGE_TEST_HOME" CODEX_HOME="$IMAGE_TEST_HOME/codex" PYTHONUSERBASE="$IMAGE_USER_BASE" \
+    ORCH_ARCHIVE_VAULT="$IMAGE_TEST_HOME/unused-vault" ORCH_ARCHIVE_RAW="$IMAGE_TEST_HOME/unused-raw" python3 - <<'PY'
+import sys
+sys.dont_write_bytecode = True
+import gzip
+import hashlib
+import importlib.util
+import contextlib
+import gc
+import io
+import json
+import os
+from pathlib import Path
+import random
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import zlib
+
+repo = Path(os.environ['ARCHIVE_REPO_DIR'])
+home = Path(os.environ['HOME'])
+command = repo / 'bin/orch-archive'
+sys.path.insert(0, str(repo / 'lib'))
+import orch_archive as archive
+groups, skipped = 0, []
+HAVE_PIL = importlib.util.find_spec('PIL') is not None
+HAVE_FFMPEG = shutil.which('ffmpeg') is not None
+HAVE_ANY = HAVE_PIL or HAVE_FFMPEG
+TID = 'proj--01-task'
+
+def ok(condition, description):
+    global groups
+    groups += 1
+    if not condition:
+        print(f'fail {groups} - {description}', flush=True)
+        raise AssertionError(description)
+    print(f'ok {groups} - {description}', flush=True)
+
+def skip(description, why):
+    skipped.append(description)
+    print(f'skip - {description} (SKIPPED: {why})', flush=True)
+
+def put(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data if isinstance(data, bytes) else data.encode())
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+# --- stdlib PNG writer and JPEG reader -------------------------------------------------------------
+SIGNATURE = b'\x89PNG\r\n\x1a\n'
+
+def chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+def png(width, height, color, depth, rows, plte=None, trns=None, extra=b'', idat=None):
+    out = SIGNATURE + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, depth, color, 0, 0, 0)) + extra
+    if plte:
+        out += chunk(b'PLTE', plte)
+    if trns:
+        out += chunk(b'tRNS', trns)
+    if idat is None:
+        idat = zlib.compress(b''.join(b'\x00' + row for row in rows), 6)
+    return out + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
+
+def rgb_png():
+    rng = random.Random(42)
+    rows = [bytes((x // 3 * 2 + y + rng.randrange(6)) % 256 for x in range(700 * 3)) for y in range(300)]
+    return png(700, 300, 2, 8, rows, extra=chunk(b'tEXt', b'Comment\x00thumbnail-metadata-marker'))
+
+def rgba_png():
+    clear, red = bytes((0, 0, 0, 0)), bytes((200, 30, 30, 255))
+    return png(300, 200, 6, 8, [clear * 150 + red * 150] * 200)
+
+def paletted_png():
+    palette = bytes((0, 0, 0, 220, 20, 20, 20, 200, 20, 20, 20, 200))
+    return png(120, 80, 3, 8, [bytes([0] * 60 + [1] * 60)] * 80, plte=palette, trns=b'\x00')
+
+def gray16_png():
+    return png(100, 60, 0, 16, [b''.join(struct.pack('>H', x * 655) for x in range(100))] * 60)
+
+def bomb_png():
+    return png(20000, 20000, 2, 8, None, idat=zlib.compress(b'\x00\x01\x02'))
+
+def solid_png(width, height):
+    return png(width, height, 2, 8, [bytes((x * 7 + 40) % 256 for x in range(width * 3))] * height)
+
+def trns_gray16_png():
+    # Samples equal to the tRNS key (0) are transparent; 100 is a different, almost black sample.
+    row = struct.pack('>H', 0) * 20 + struct.pack('>H', 100) * 5 + struct.pack('>H', 40000) * 15
+    return png(40, 20, 0, 16, [row] * 20, trns=struct.pack('>H', 0))
+
+def trns_rgb16_png():
+    key = struct.pack('>HHH', 1000, 2000, 3000)
+    return png(40, 20, 2, 16, [key * 20 + struct.pack('>HHH', 60000, 10000, 10000) * 20] * 20, trns=key)
+
+def jpeg_size(data):
+    assert data[:2] == b'\xff\xd8', 'not a JPEG'
+    i = 2
+    while i + 4 <= len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker in (0xC0, 0xC2):
+            height, width = struct.unpack('>HH', data[i + 5:i + 9])
+            return width, height
+        if marker == 0xFF:
+            i += 1
+        elif marker == 0x01 or 0xD0 <= marker <= 0xD9:
+            i += 2
+        else:
+            i += 2 + struct.unpack('>H', data[i + 2:i + 4])[0]
+    raise AssertionError('no SOF marker')
+
+def pixel(data, xy):
+    from PIL import Image
+    with Image.open(io.BytesIO(data)) as image:
+        return image.convert('RGB').getpixel(xy)
+
+FILES = {'rgb.png': rgb_png(), 'nested/alpha.png': rgba_png(), 'paletted.png': paletted_png(), 'gray16.png': gray16_png()}
+
+# --- scenarios ----------------------------------------------------------------------------------------
+checked_applies = 0
+
+class Scn:
+    def __init__(self, name, files=None, conf='', state=False):
+        self.root = home / name
+        self.state = self.root / 'state' if state else None
+        self.base = self.root / 'proj'
+        self.task = self.base / '.orchestra/01-task'
+        self.vault, self.raw, self.conf = self.root / 'vault', self.root / 'raw', self.root / 'archive.conf'
+        put(self.task / 'brief.md', '# Image task\nRISK: normal\n')
+        put(self.task / 'plan.md', '# Plan\n')
+        for rel, data in (files or {}).items():
+            put(self.task / rel, data)
+        self.set_conf(conf)
+
+    def set_conf(self, text):
+        put(self.conf, 'PAYLOAD_FILE_MAX_BYTES=16777216\nPAYLOAD_TASK_MAX_BYTES=268435456\n' + text)
+
+    def env(self, **extra):
+        env = dict(os.environ, ORCH_ARCHIVE_VAULT=str(self.vault), ORCH_ARCHIVE_RAW=str(self.raw),
+                   ORCH_ARCHIVE_ALLOWLIST=str(self.root / 'allow.txt'), ORCH_ARCHIVE_STATE_DIRS=str(self.state) if self.state else '',
+                   ORCH_ARCHIVE_CLAUDE_PROJECTS=str(self.root / 'claude'), ORCH_ARCHIVE_CODEX_HOME=str(self.root / 'codex'),
+                   CODEX_HOME=str(self.root / 'codex'), ORCH_ARCHIVE_EXTRA_BASES=str(self.base),
+                   ORCH_ARCHIVE_POLICY=str(self.conf))
+        env.update(extra)
+        return env
+
+    def sources(self):
+        return {str(p): (sha(p.read_bytes()), p.lstat().st_mtime_ns) for p in sorted(self.base.rglob('*')) if p.is_file()}
+
+    def run(self, *args, code=0, env=None, stderr=False):
+        global checked_applies
+        before = self.sources()
+        result = subprocess.run([str(command), *args], env=env or self.env(), text=True, capture_output=True)
+        if result.returncode != code:
+            print(result.stdout)
+            print(result.stderr)
+            raise AssertionError(f'{args}: expected {code}, got {result.returncode}')
+        if self.sources() != before:
+            raise AssertionError(f'{args}: a source file changed')
+        checked_applies += 1
+        return (result.stdout, result.stderr) if stderr else result.stdout
+
+    def report(self, *args, code=0, env=None):
+        out = self.run(*args, code=code, env=env)
+        value, _ = json.JSONDecoder().raw_decode(out[out.index('{'):])
+        return value
+
+    def catalog(self):
+        return json.loads((self.vault / '_meta/catalog.json').read_text())
+
+    def task_record(self):
+        return self.catalog()['tasks'][TID]
+
+    def thumbs(self):
+        return sorted((self.vault / f'artifacts/tasks/{TID}/thumbs').glob('*.jpg')) if (self.vault / 'artifacts').exists() else []
+
+    def commits(self):
+        return int(subprocess.check_output(['git', '-C', str(self.vault), 'rev-list', '--count', 'HEAD'], env=archive.git_env(), text=True))
+
+    def hashes(self, base, git=False):
+        return {str(p.relative_to(base)): sha(p.read_bytes()) for p in sorted(base.rglob('*'))
+                if p.is_file() and not p.is_symlink() and (git or '.git' not in p.relative_to(base).parts)}
+
+    def snapshot_rows(self):
+        return [row for snap in self.task_record()['snapshots'].values() for row in snap.get('images', [])]
+
+    def inprocess(self, apply=False, **overrides):
+        """Build an Archive in this process with the scenario's environment (plan mode that may encode, or apply mode)."""
+        saved = {k: os.environ.get(k) for k in self.env()}
+        os.environ.update(self.env())
+        try:
+            policy = dict(archive.load_policy(), **overrides)
+            guard = archive.Guard(policy)
+            if apply:
+                archive._WRITE_BASES = {self.vault.resolve(), self.raw.resolve()}
+            return archive.Archive(policy, archive.Discovery(policy, guard).run(), guard, apply=apply, measure=not apply)
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+def files_matching(bases, needles):
+    """Every file under the bases whose raw, gunzipped or zlib-inflated bytes contain a needle."""
+    found = []
+    for base in bases:
+        for path in sorted(base.rglob('*')):
+            if not path.is_file() or path.is_symlink():
+                continue
+            blobs = [path.read_bytes()]
+            for inflate in (gzip.decompress, zlib.decompress):
+                try:
+                    blobs.append(inflate(blobs[0]))
+                except Exception:
+                    pass
+            if any(needle in blob for blob in blobs for needle in needles):
+                found.append(path)
+    return found
+
+def idat_payload(data):
+    pos = 8
+    while pos < len(data):
+        length, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        if kind == b'IDAT':
+            return data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+
+# (a) any encoder: PNG -> JPEG within caps; PNG bytes nowhere in vault/raw ---------------------------------
+if HAVE_ANY:
+    main = Scn('main', FILES)
+    out = main.report('apply', '--json')
+    record = main.task_record()
+    thumbs = main.thumbs()
+    sizes = [jpeg_size(path.read_bytes()) for path in thumbs]
+    pngs = [(main.task / rel).read_bytes() for rel in FILES]
+    needles = pngs + [idat_payload(data) for data in pngs]
+    leaks = files_matching([main.vault, main.raw], needles)
+    ok(len(thumbs) == 4 and all(max(w, h) <= 512 for w, h in sizes) and all(p.stat().st_size <= 65536 for p in thumbs)
+       and any(w == 512 and h in (218, 219) for w, h in sizes) and out['images']['thumbnails'] == 4
+       and out['images']['encoder']['id'] in ('pillow', 'ffmpeg') and out['images']['files'] == 4
+       and out['images']['source_bytes'] == sum(map(len, pngs)) and not out['images']['metadata_only']
+       and not leaks and not any((main.raw / f'blobs/{sha(data)[:2]}/{sha(data)}.gz').exists() for data in pngs)
+       and not any((main.raw / f'sources/{sha(str((main.task / rel).resolve()).encode())[:24]}.json').exists() for rel in FILES)
+       and b'thumbnail-metadata-marker' not in b''.join(p.read_bytes() for p in thumbs)
+       and 'verify: OK' in main.run('verify'),
+       'PNGs become JPEG thumbnails within the edge and byte caps; PNG bytes never reach the vault or raw store')
+else:
+    skip('PNG to JPEG thumbnails and no PNG bytes in vault/raw', 'neither Pillow nor ffmpeg is available')
+    main = None
+
+# (b) Pillow: idempotent re-apply, no decode on reuse, parameter change, encoder switch ---------------------
+if HAVE_PIL:
+    pil = Scn('pillow', FILES, 'THUMB_ENCODER=pillow\n')
+    first = pil.report('apply', '--json')
+    vault_before, raw_before, commits = pil.hashes(pil.vault), pil.hashes(pil.raw), pil.commits()
+    mtimes = {str(p): p.stat().st_mtime_ns for p in sorted(pil.vault.rglob('*')) if p.is_file() and '.git' not in p.parts}
+    second_out = pil.run('apply')
+    ok(pil.hashes(pil.vault) == vault_before and pil.hashes(pil.raw) == raw_before and pil.commits() == commits
+       and '0 files written' in second_out and 'commit: none' in second_out and 'images: 0 encoded, 4 reused' in second_out
+       and 'images: 4 encoded, 0 reused' in pil.run('apply', '--no-commit', env=pil.env(ORCH_ARCHIVE_VAULT=str(pil.root / 'fresh-vault'),
+           ORCH_ARCHIVE_RAW=str(pil.root / 'fresh-raw'))) and mtimes == {str(p): p.stat().st_mtime_ns
+           for p in sorted(pil.vault.rglob('*')) if p.is_file() and '.git' not in p.parts},
+       'Pillow re-apply is byte-identical with no new commit and reuses all thumbnails; a fresh vault encodes them')
+    real_encode = archive.ImageEncoder.encode
+    calls = []
+    def forbidden(self, *args, **kwargs):
+        calls.append(args)
+        raise AssertionError('decoded an unchanged image')
+    archive.ImageEncoder.encode = forbidden
+    try:
+        probe = pil.inprocess()
+        probe.build()
+    finally:
+        archive.ImageEncoder.encode = real_encode
+    ok(not calls and probe.images['reused'] == 4 and probe.images['encoded'] == 0 and probe.images['thumbnails'] == 4,
+       'unchanged sources, encoder and parameters are reused without decoding (encode() is never called)')
+    healed = pil.thumbs()[0]
+    healed_bytes = healed.read_bytes()
+    damaged = bytearray(healed_bytes)
+    damaged[len(damaged) // 2] ^= 0x01
+    healed.write_bytes(bytes(damaged))
+    healed_out = pil.run('apply')
+    ok(healed.read_bytes() == healed_bytes and 'images: 1 encoded, 3 reused' in healed_out and pil.commits() == commits
+       and 'verify: OK' in pil.run('verify'),
+       'a damaged thumbnail in the vault is never reused: apply re-encodes exactly that one and restores the committed bytes')
+    before_thumbs = {p.name: sha(p.read_bytes()) for p in pil.thumbs()}
+    pil.set_conf('THUMB_ENCODER=pillow\nTHUMB_QUALITY=60\n')
+    pending = pil.report('plan', '--json')
+    reencode = pil.run('apply')
+    after_thumbs = {p.name: sha(p.read_bytes()) for p in pil.thumbs()}
+    new_records = pil.task_record()['thumbnails'].values()
+    ok(pending['images']['pending'] == 4 and pending['images']['thumbnails'] == 0 and 'images: 4 encoded, 0 reused' in reencode
+       and pil.commits() == commits + 1 and set(after_thumbs) == set(before_thumbs)
+       and all(after_thumbs[name] != before_thumbs[name] for name in after_thumbs)
+       and all(r['params']['quality'] == 60 and r['used']['quality'] == 60 for r in new_records) and 'verify: OK' in pil.run('verify'),
+       'a changed THUMB_QUALITY is pending in plan, re-encodes in apply, overwrites each thumbnail in place and commits')
+    pil.set_conf('THUMB_ENCODER=pillow\nTHUMB_QUALITY=60\nTHUMB_EMBED_MAX=2\n')
+    embed_out = pil.run('apply')
+    note = (pil.vault / f'tasks/{TID}.md').read_text()
+    embeds = re.findall(r'^!\[\[([^]\n]+)\]\]$', note, re.M)
+    ok('images: 0 encoded, 4 reused' in embed_out and len(embeds) == 2 and len(set(embeds)) == 2
+       and all((pil.vault / target).is_file() for target in embeds) and len(note.split('## Images', 1)[1].split('## Per-snapshot', 1)[0].split('"thumbnail_path"')) == 5
+       and 'verify: OK' in pil.run('verify'),
+       'THUMB_EMBED_MAX=2 embeds exactly two thumbnails, every embed resolves, all four stay listed, and verify passes')
+    if HAVE_FFMPEG:
+        pil.set_conf('THUMB_ENCODER=ffmpeg\nTHUMB_QUALITY=60\nTHUMB_EMBED_MAX=2\n')
+        switch_out = pil.run('apply')
+        ok('images: 4 encoded, 0 reused' in switch_out and all(r['encoder']['id'] == 'ffmpeg' and r['encoder']['version']
+               for r in pil.task_record()['thumbnails'].values()) and 'verify: OK' in pil.run('verify'),
+           'switching THUMB_ENCODER from pillow to ffmpeg re-encodes and records the new encoder id and version')
+    else:
+        skip('switching THUMB_ENCODER pillow -> ffmpeg re-encodes', 'ffmpeg is not available')
+else:
+    for name in ('Pillow re-apply idempotence', 'no decode on reuse', 'parameter change re-encodes and embed limit',
+                 'encoder switch pillow -> ffmpeg'):
+        skip(name, 'Pillow is not available')
+
+# (b2) byte-cap fallback ladder ---------------------------------------------------------------------------
+if HAVE_PIL:
+    probe_quality = Scn('cap-probe', {'rgb.png': FILES['rgb.png']}, 'THUMB_ENCODER=pillow\n')
+    probe_quality.report('apply', '--json')
+    q70_bytes = probe_quality.thumbs()[0].stat().st_size
+    cap = Scn('cap', {'rgb.png': FILES['rgb.png']}, f'THUMB_ENCODER=pillow\nTHUMB_QUALITY=95\nTHUMB_MAX_BYTES={q70_bytes}\n')
+    cap.report('apply', '--json')
+    used = next(iter(cap.task_record()['thumbnails'].values()))
+    impossible = Scn('cap-impossible', {'rgb.png': FILES['rgb.png']}, 'THUMB_ENCODER=pillow\nTHUMB_MAX_BYTES=100\n')
+    impossible_report = impossible.report('apply', '--json')
+    ok(used['used'] == {'max_edge': 512, 'quality': 50} and used['bytes'] <= q70_bytes and used['params']['quality'] == 95
+       and cap.thumbs()[0].stat().st_size == used['bytes'],
+       'a thumbnail over THUMB_MAX_BYTES falls back to lower quality and records the parameters actually used')
+    ok(impossible_report['images']['metadata_only'] == {'thumbnail-over-cap': 1} and not impossible.thumbs()
+       and impossible.snapshot_rows()[0]['reason'] == 'thumbnail-over-cap' and 'verify: OK' in impossible.run('verify'),
+       'when no fallback fits THUMB_MAX_BYTES the image is metadata-only with reason thumbnail-over-cap')
+else:
+    skip('byte-cap fallback ladder', 'Pillow is not available')
+
+# (c) alpha, paletted and 16-bit PNGs ---------------------------------------------------------------------
+def pixel_checks(scn):
+    thumbs = {rec['source']['sha256']: (scn.vault / rec['path']).read_bytes() for rec in scn.task_record()['thumbnails'].values()}
+    alpha, paletted, gray = (thumbs[sha(FILES[name])] for name in ('nested/alpha.png', 'paletted.png', 'gray16.png'))
+    transparent, opaque = pixel(alpha, (10, 100)), pixel(alpha, (250, 100))
+    pal_clear, pal_red = pixel(paletted, (10, 40)), pixel(paletted, (110, 40))
+    gray_dark, gray_bright = pixel(gray, (3, 30)), pixel(gray, (96, 30))
+    return (min(transparent) >= 240 and opaque[0] > 150 and opaque[1] < 100
+            and min(pal_clear) >= 240 and pal_red[0] > 150 and pal_red[1] < 100
+            and max(gray_dark) < 60 and min(gray_bright) > 190)
+
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: alpha composites onto white; paletted+tRNS and 16-bit grayscale PNGs get thumbnails; re-apply is a no-op'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    scn = Scn('mode-' + encoder, FILES, f'THUMB_ENCODER={encoder}\n')
+    scn.report('apply', '--json')
+    records = list(scn.task_record()['thumbnails'].values())
+    again = scn.run('apply')
+    # Pixel values need Pillow to decode the JPEG; without it only the structure is checked.
+    decoded = pixel_checks(scn) if HAVE_PIL else True
+    ok(len(records) == 4 and all(r['encoder']['id'] == encoder for r in records) and decoded
+       and '0 files written' in again and 'commit: none' in again and 'images: 0 encoded, 4 reused' in again
+       and all(jpeg_size((scn.vault / r['path']).read_bytes()) == (r['width'], r['height']) for r in records),
+       description + ('' if HAVE_PIL else ' (structure only; Pillow is needed to decode pixels)'))
+
+# (d) invalid PNGs are source errors, the run continues ----------------------------------------------------
+truncated_png = rgb_png()[:len(rgb_png()) // 3]
+bad = Scn('invalid', {'truncated.png': truncated_png, 'notpng.png': 'this is plain text, not a PNG\n',
+                      'short.png': SIGNATURE + b'xx', 'note.md': '# a note\n'})
+bad_plan = bad.report('plan', '--json', code=4)
+bad_report = bad.report('apply', '--json', code=4)
+items = {Path(i['path']).name: i for i in bad_report['source_errors']['items']}
+manifest_blob = bad.task_record()['snapshots']
+entries = json.loads(gzip.decompress((bad.raw / next(iter(manifest_blob.values()))['manifest']['blob']).read_bytes()))['entries']
+kinds = {e['relpath']: (e['kind'], e.get('reason')) for e in entries}
+ok(bad_report['source_errors']['count'] == 3 and bad_plan['source_errors']['count'] == 3
+   and items['truncated.png']['reason'] == 'invalid-image' and items['truncated.png']['detail'] == 'truncated'
+   and items['notpng.png']['detail'] == 'not-png' and items['short.png']['detail'] == 'bad-header'
+   and kinds['truncated.png'] == ('invalid-image', 'truncated') and kinds['notpng.png'] == ('invalid-image', 'not-png')
+   and bad_report['images']['invalid'] == 3 and not bad.thumbs() and (bad.vault / f'tasks/{TID}.md').is_file()
+   and any(p.read_bytes() == b'# a note\n' for p in (bad.vault / 'artifacts').rglob('note.md'))
+   and 'verify: OK' in bad.run('verify'),
+   'truncated, signature-only and non-PNG files named .png are invalid-image source errors (exit 4); the rest still archives')
+
+crc_png = bytearray(rgb_png())
+crc_png[len(crc_png) // 2] ^= 0xFF
+header_png = bytearray(gray16_png())
+header_png[8 + 8 + 8] = 7  # bit depth 7 is not a legal PNG depth (IHDR CRC is rewritten below)
+header_png[29:33] = struct.pack('>I', zlib.crc32(bytes(header_png[12:29])) & 0xFFFFFFFF)
+strict = Scn('strict', {'badcrc.png': bytes(crc_png), 'baddepth.png': bytes(header_png),
+                        'big-trailer.png': FILES['paletted.png'] + b'trailing bytes after IEND'})
+strict_report = strict.report('apply', '--json', code=4)
+strict_items = {Path(i['path']).name: i['detail'] for i in strict_report['source_errors']['items']}
+trailer_row = next(r for r in strict.snapshot_rows() if r['relpath'] == 'big-trailer.png')
+ok(strict_items == {'badcrc.png': 'bad-chunk-crc', 'baddepth.png': 'bad-header'}
+   and trailer_row['source_sha256'] == sha(FILES['paletted.png'] + b'trailing bytes after IEND'),
+   'structural check rejects bad chunk CRCs and illegal IHDR fields; trailing bytes are still hashed')
+
+if HAVE_PIL:
+    garbage = png(64, 64, 2, 8, None, idat=b'\x00this is not a zlib stream')
+    undecodable = Scn('undecodable', {'garbage.png': garbage, 'good.png': FILES['gray16.png']}, 'THUMB_ENCODER=pillow\n')
+    undecodable_report = undecodable.report('apply', '--json', code=4)
+    rows = {r['relpath']: r for r in undecodable.snapshot_rows()}
+    ok(rows['garbage.png']['disposition'] == 'metadata-only' and rows['garbage.png']['reason'] == 'decode-failed'
+       and rows['good.png']['disposition'] == 'thumbnail' and undecodable_report['source_errors']['items'][0]['detail'] == 'decode-failed'
+       and len(undecodable.thumbs()) == 1,
+       'structurally valid but undecodable pixel data is metadata-only decode-failed (exit 4) and does not stop other images')
+else:
+    skip('undecodable pixel data is decode-failed', 'Pillow is not available')
+
+# round 3: chunk-order rules and partial decodes -----------------------------------------------------------
+def ihdr(width, height):
+    return chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+
+idat_rows = zlib.compress(b''.join(b'\x00' + bytes(15 * 3) for _ in range(10)))
+duplicate_ihdr = SIGNATURE + ihdr(1, 1) + ihdr(15, 10) + chunk(b'IDAT', idat_rows) + chunk(b'IEND', b'')
+no_idat = SIGNATURE + ihdr(15, 10) + chunk(b'IEND', b'')
+iend_payload = SIGNATURE + ihdr(15, 10) + chunk(b'IDAT', idat_rows) + chunk(b'IEND', b'x')
+order = Scn('chunk-order', {'dup.png': duplicate_ihdr, 'noidat.png': no_idat, 'iend.png': iend_payload}, 'THUMB_MAX_PIXELS=100\n')
+real_encode = archive.ImageEncoder.encode
+order_calls = []
+def order_encode(self, *args, **kwargs):
+    order_calls.append(args)
+    return real_encode(self, *args, **kwargs)
+archive.ImageEncoder.encode = order_encode
+try:
+    order_probe = order.inprocess()
+    order_probe.build()
+finally:
+    archive.ImageEncoder.encode = real_encode
+order_report = order.report('apply', '--json', code=4)
+order_details = {Path(i['path']).name: i['detail'] for i in order_report['source_errors']['items']}
+ok(order_details == {'dup.png': 'bad-header', 'noidat.png': 'bad-header', 'iend.png': 'bad-header'} and not order_calls
+   and order_report['images']['invalid'] == 3 and not order.thumbs() and order_probe.images['invalid'] == 3,
+   'a second IHDR, an IEND without IDAT data or a non-empty IEND is invalid-image/bad-header (exit 4) and never reaches the encoder')
+
+# Indexed PNGs require a palette before their image data; keep all other chunks and CRCs intact.
+palette_source = FILES['paletted.png']
+palette_parts, position = [SIGNATURE], len(SIGNATURE)
+while position < len(palette_source):
+    length = struct.unpack('>I', palette_source[position:position + 4])[0]
+    end = position + 12 + length
+    if palette_source[position + 4:position + 8] != b'PLTE':
+        palette_parts.append(palette_source[position:end])
+    position = end
+missing_palette = Scn('missing-palette', {'indexed.png': b''.join(palette_parts)})
+real_encode = archive.ImageEncoder.encode
+def reject_palette_encode(self, *args, **kwargs):
+    raise AssertionError('an indexed PNG without PLTE reached the encoder')
+archive.ImageEncoder.encode = reject_palette_encode
+try:
+    for limit in (16777216, 1):
+        palette_probe = missing_palette.inprocess(PAYLOAD_FILE_MAX_BYTES=limit)
+        palette_probe.build()
+        assert palette_probe.images['invalid'] == 1 and not palette_probe.encoder.resolved
+finally:
+    archive.ImageEncoder.encode = real_encode
+palette_report = missing_palette.report('apply', '--json', code=4)
+palette_errors = palette_report['source_errors']['items']
+palette_snap = next(iter(missing_palette.task_record()['snapshots'].values()))
+palette_entries = json.loads(gzip.decompress((missing_palette.raw / palette_snap['manifest']['blob']).read_bytes()))['entries']
+palette_entry = next(entry for entry in palette_entries if entry['relpath'] == 'indexed.png')
+ok(palette_report['source_errors']['count'] == 1 and palette_report['images']['invalid'] == 1
+   and palette_errors[0]['reason'] == 'invalid-image' and palette_errors[0]['detail'] == 'bad-header'
+   and palette_entry['kind'] == 'invalid-image' and palette_entry['reason'] == 'bad-header'
+   and not missing_palette.thumbs() and not palette_report['images']['resolved']
+   and 'verify: OK' in missing_palette.run('verify'),
+   'an indexed PNG with PLTE removed and valid CRCs is invalid-image/bad-header (apply exit 4), never reaching an encoder in full or seek-only validation')
+
+noise = random.Random(1)
+cut_zlib = zlib.compress(b''.join(b'\x00' + bytes(noise.randrange(256) for _ in range(300 * 3)) for _ in range(200)))
+partial = png(300, 200, 2, 8, None, idat=cut_zlib[:len(cut_zlib) // 2])
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: a PNG whose zlib stream is cut short (valid chunk CRCs) is decode-failed, not a partial thumbnail'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    cut = Scn('cut-' + encoder, {'cut.png': partial, 'good.png': FILES['gray16.png']}, f'THUMB_ENCODER={encoder}\n')
+    cut_report = cut.report('apply', '--json', code=4)
+    cut_rows = {r['relpath']: r for r in cut.snapshot_rows()}
+    ok(cut_rows['cut.png']['disposition'] == 'metadata-only' and cut_rows['cut.png']['reason'] == 'decode-failed'
+       and cut_rows['good.png']['disposition'] == 'thumbnail' and len(cut.thumbs()) == 1
+       and [i['detail'] for i in cut_report['source_errors']['items']] == ['decode-failed'], description)
+
+# (e) pixel cap -------------------------------------------------------------------------------------------
+bomb = Scn('bomb', {'bomb.png': bomb_png(), 'small.png': FILES['gray16.png']}, 'THUMB_MAX_PIXELS=100000000\n')
+real_encode = archive.ImageEncoder.encode
+bomb_calls = []
+def bomb_encode(self, *args, **kwargs):
+    bomb_calls.append(args)
+    return real_encode(self, *args, **kwargs)
+archive.ImageEncoder.encode = bomb_encode
+try:
+    bomb_probe = bomb.inprocess()
+    bomb_probe.build()
+finally:
+    archive.ImageEncoder.encode = real_encode
+bomb_report = bomb.report('apply', '--json')
+bomb_row = next(r for r in bomb.snapshot_rows() if r['relpath'] == 'bomb.png')
+ok(bomb_row['disposition'] == 'metadata-only' and bomb_row['reason'] == 'over-pixel-cap' and (bomb_row['width'], bomb_row['height']) == (20000, 20000)
+   and bomb_report['images']['metadata_only'] == ({'over-pixel-cap': 1} if HAVE_ANY else {'no-encoder': 1, 'over-pixel-cap': 1}) and len(bomb.thumbs()) == (1 if HAVE_ANY else 0)
+   and all(args[1:3] != (20000, 20000) for args in bomb_calls) and 'verify: OK' in bomb.run('verify'),
+   'a 20000x20000 header-only PNG is metadata-only over-pixel-cap with its dimensions and is never handed to the encoder')
+lowered = Scn('lowered', {'small.png': FILES['paletted.png']}, 'THUMB_MAX_PIXELS=5000\n')
+lowered_report = lowered.report('apply', '--json')
+ok(lowered_report['images']['metadata_only'] == {'over-pixel-cap': 1} and not lowered.thumbs() and not lowered_report['images']['resolved'],
+   'lowering THUMB_MAX_PIXELS turns a small PNG metadata-only without resolving or importing any encoder')
+
+# (f) no encoder ------------------------------------------------------------------------------------------
+none = Scn('none', FILES, 'THUMB_ENCODER=none\n')
+none_out = none.run('apply')
+none_report = none.report('plan', '--json')
+none_rows = {r['relpath']: r for r in none.snapshot_rows()}
+ok(none_out.count('no image encoder') == 1 and none_report['images']['notice'] == 'no image encoder'
+   and not none.thumbs() and set(none_rows) == set(FILES) and all(r['disposition'] == 'metadata-only' and r['reason'] == 'no-encoder'
+       and r['source_sha256'] == sha(FILES[k]) and r['size'] == len(FILES[k]) and r['mtime'].endswith('Z') and r['width'] and r['height']
+       for k, r in none_rows.items()) and none_report['images']['metadata_only'] == {'no-encoder': 4} and 'verify: OK' in none.run('verify'),
+   'THUMB_ENCODER=none records metadata (path, size, mtime, dimensions, sha256) and reports "no image encoder" exactly once')
+
+blocked = home / 'blocked-pillow'
+put(blocked / 'sitecustomize.py', 'import sys\nsys.modules["PIL"] = None\n')
+tools = home / 'bare-bin'
+tools.mkdir()
+for name in ('python3', 'git'):
+    (tools / name).symlink_to(shutil.which(name))
+bare = Scn('bare', FILES)
+bare_env = bare.env(PATH=str(tools), PYTHONPATH=str(blocked))
+probe = subprocess.run(['python3', '-c', 'import PIL'], env=bare_env, capture_output=True)
+bare_out = bare.run('apply', env=bare_env)
+ok(probe.returncode != 0 and shutil.which('ffmpeg', path=str(tools)) is None and bare_out.count('no image encoder') == 1
+   and not bare.thumbs() and all(r['reason'] == 'no-encoder' for r in bare.snapshot_rows()) and 'verify: OK' in bare.run('verify'),
+   'THUMB_ENCODER=auto with Pillow blocked and no ffmpeg on PATH degrades to metadata-only with the single notice')
+
+# (g) verify catches damaged thumbnails -------------------------------------------------------------------
+if main is not None:
+    target = main.thumbs()[0]
+    original = target.read_bytes()
+    flipped = bytearray(original)
+    flipped[len(flipped) // 2] ^= 0x01
+    target.write_bytes(bytes(flipped))
+    flipped_out = main.run('verify', code=1)
+    target.write_bytes(b'not a jpeg at all')
+    garbage_out = main.run('verify', code=1)
+    target.write_bytes(original)
+    target.unlink()
+    missing_out = main.run('verify', code=1)
+    inside = main.vault / 'inside-copy.jpg'
+    inside.write_bytes(original)
+    target.symlink_to(inside)
+    symlink_out = main.run('verify', code=1)
+    target.unlink()
+    inside.unlink()
+    target.write_bytes(original)
+    target.chmod(0o600)
+    ok('invalid' in flipped_out and 'thumbnail missing or invalid' in garbage_out and 'invalid' in missing_out
+       and 'thumbnail missing or invalid' in symlink_out and 'verify: OK' in main.run('verify'),
+       'verify exits 1 for a corrupted, non-JPEG, missing or symlinked thumbnail and passes again once it is restored')
+else:
+    skip('verify catches damaged thumbnails', 'neither Pillow nor ffmpeg is available')
+
+# version-1 catalogs without any image keys keep working --------------------------------------------------
+if HAVE_PIL:
+    legacy = Scn('legacy', FILES, 'THUMB_ENCODER=pillow\n')
+    legacy.run('apply')
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items() if k not in ('images', 'thumbnails')}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+    put(legacy.vault / '_meta/catalog.json', archive.json_bytes(strip(legacy.catalog()), compact=True))
+    legacy_verify = legacy.run('verify')
+    legacy_apply = legacy.run('apply')
+    ok('verify: OK' in legacy_verify and 'images: 4 encoded' in legacy_apply and 'verify: OK' in legacy.run('verify')
+       and len(legacy.task_record()['thumbnails']) == 4,
+       'a version-1 catalog without images/thumbnails keys still verifies and re-applies, restoring the records')
+else:
+    skip('version-1 catalog compatibility', 'Pillow is not available')
+
+# changed during scan -------------------------------------------------------------------------------------
+if HAVE_PIL:
+    racing = Scn('racing', {'rgb.png': FILES['rgb.png']}, 'THUMB_ENCODER=pillow\n')
+    real_encode = archive.ImageEncoder.encode
+    def touch_after(self, path, *args, **kwargs):
+        result = real_encode(self, path, *args, **kwargs)
+        stat_before = os.stat(path)
+        os.utime(path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns + 1_000_000_000))
+        return result
+    archive.ImageEncoder.encode = touch_after
+    try:
+        racing_probe = racing.inprocess()
+        racing_probe.build()
+    finally:
+        archive.ImageEncoder.encode = real_encode
+    racing_row = racing_probe.images
+    ok(racing_row['thumbnails'] == 0 and racing_row['metadata_only'] == {'changed-during-scan': 1}
+       and not any(isinstance(v, archive.Thumbnail) for v in racing_probe.files.values())
+       and any(item['detail'] == 'changed-during-scan' for item in racing_probe.errors.report(5)['items']),
+       'a source modified while it is encoded is discarded as changed-during-scan with a source error and no thumbnail')
+else:
+    skip('changed-during-scan handling', 'Pillow is not available')
+
+# IMAGE_EXTENSIONS empty -> ordinary payload handling ------------------------------------------------------
+disabled = Scn('disabled', {'fake.png': b'P' * 10, 'real.png': FILES['gray16.png']}, 'IMAGE_EXTENSIONS=\n')
+disabled_report = disabled.report('apply', '--json')
+disabled_entries = json.loads(gzip.decompress((disabled.raw / next(iter(disabled.task_record()['snapshots'].values()))['manifest']['blob']).read_bytes()))['entries']
+ok({e['relpath']: e['kind'] for e in disabled_entries if e['relpath'].endswith('.png')} == {'fake.png': 'raw', 'real.png': 'raw'}
+   and disabled_report['images']['files'] == 0 and not disabled.thumbs() and 'verify: OK' in disabled.run('verify'),
+   'an empty IMAGE_EXTENSIONS disables the image path: PNGs follow ordinary payload handling')
+
+# budgets, unknown hashes, shared thumbnails and root-level images ----------------------------------------
+if HAVE_ANY:
+    within = Scn('budget-within', {'rgb.png': FILES['rgb.png']}, 'PAYLOAD_TASK_MAX_BYTES=100000\n')
+    within_report = within.report('apply', '--json')
+    over = Scn('budget-over', {'rgb.png': FILES['rgb.png']}, 'PAYLOAD_TASK_MAX_BYTES=1000\n')
+    over_report = over.report('apply', '--json')
+    off = Scn('budget-off', {'rgb.png': FILES['rgb.png']}, 'INCLUDE_PAYLOAD=0\n')
+    off_report = off.report('apply', '--json')
+    ok(len(rgb_png()) > 100000 and within_report['images']['thumbnails'] == 1 and not within_report['images']['metadata_only']
+       and over_report['images']['metadata_only'] == {'payload-over-budget': 1} and not over.thumbs()
+       and off_report['images']['metadata_only'] == {'payload-disabled': 1} and not off.thumbs()
+       and within_report['payload_over_budget']['files'] == 0,
+       'the task budget counts each image as at most one thumbnail (not its source bytes); over-budget and disabled payload are metadata-only')
+
+    big = Scn('big-source', {'rgb.png': FILES['rgb.png']}, 'PAYLOAD_FILE_MAX_BYTES=100\n')
+    big_first = big.report('apply', '--json')
+    big_row = big.snapshot_rows()[0]
+    big_again = big.run('apply')
+    ok(big_first['images']['thumbnails'] == 1 and 'source_sha256' not in big_row and big_row['size'] == len(FILES['rgb.png'])
+       and 'images: 0 encoded, 1 reused' in big_again and '0 files written' in big_again and 'commit: none' in big_again
+       and 'verify: OK' in big.run('verify'),
+       'a source above PAYLOAD_FILE_MAX_BYTES is not hashed or fully read for validation, still gets a thumbnail, and re-apply reuses it')
+
+    shared = Scn('shared', {'a.png': FILES['paletted.png'], 'b/copy.png': FILES['paletted.png']})
+    shared.root.joinpath('proj/.orchestra/root-chart.png').write_bytes(FILES['gray16.png'])
+    shared_out = shared.run('apply')
+    project = shared.catalog()['projects']['proj']
+    root_thumbs = sorted(shared.vault.glob('artifacts/roots/proj/*/thumbs/*.jpg'))
+    ok('images: 2 encoded, 1 reused' in shared_out and len(shared.thumbs()) == 1
+       and len({r['thumbnail'] for r in shared.snapshot_rows()}) == 1 and len(shared.snapshot_rows()) == 2
+       and len(root_thumbs) == 1 and len(project['thumbnails']) == 1 and next(iter(project['images'].values()))[0]['relpath'] == 'root-chart.png'
+       and 'verify: OK' in shared.run('verify'),
+       'identical images in one task share one content-keyed thumbnail; a root-level image gets its own root thumbnail')
+else:
+    skip('budget, large-source, shared and root-level image handling', 'neither Pillow nor ffmpeg is available')
+
+# apply spools encoded JPEGs to private raw-dir temp files; none is kept in memory or left behind ---------
+if HAVE_ANY:
+    spool = Scn('spool', FILES)
+    spooled = spool.inprocess(apply=True)
+    spooled.build()
+    objects = [v for v in spooled.files.values() if isinstance(v, archive.Thumbnail)]
+    names = sorted(p.name for p in spool.raw.glob('.thumb-*'))
+    no_bytes = all(t.data is None and not any(isinstance(v, (bytes, bytearray)) and len(v) > 200 for v in vars(t).values()) for t in objects)
+    on_disk = all(t.temp is not None and t.temp.parent == spool.raw and t.temp.stat().st_size == len(t)
+                  and sha(t.materialize()) == t.sha256 and stat.S_IMODE(t.temp.stat().st_mode) == 0o600 for t in objects)
+    named = all(re.fullmatch(r'\.thumb-[0-9a-f]{24}-\d+-[0-9a-f]{8}\.jpg', n) for n in names)
+    objects[0].close()
+    one_closed = len(list(spool.raw.glob('.thumb-*'))) == 3
+    del objects
+    spooled.files.clear()
+    del spooled
+    gc.collect()
+    ok(len(names) == 4 and named and no_bytes and on_disk and one_closed and not list(spool.raw.glob('.thumb-*')),
+       'apply-mode Thumbnail objects hold no JPEG bytes (data is None), spool to 0600 .thumb-* files in raw, and delete them on close/__del__')
+
+    clean = Scn('spool-clean', FILES)
+    clean.run('apply')
+    broken = Scn('spool-exit4', dict(FILES, **{'truncated.png': truncated_png}))
+    broken.run('apply', code=4)
+    ok(not list(clean.raw.glob('.thumb-*')) and len(clean.thumbs()) == 4 and not list(broken.raw.glob('.thumb-*')) and len(broken.thumbs()) == 4,
+       'no .thumb-* spool file remains in raw after a successful apply or one that exits 4')
+
+    failing = Scn('spool-fail', FILES)
+    seen = []
+    real_finalize = archive.Archive.finalize
+    def failing_finalize(self, *args, **kwargs):
+        seen.append(len(list(failing.raw.glob('.thumb-*'))))
+        raise archive.ArchiveError('simulated failure', 1)
+    archive.Archive.finalize = failing_finalize
+    saved_env, saved_umask = dict(os.environ), os.umask(0o022)
+    os.environ.update(failing.env())
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = archive.main(['apply'])
+    finally:
+        archive.Archive.finalize = real_finalize
+        os.environ.clear()
+        os.environ.update(saved_env)
+        os.umask(saved_umask)
+    ok(code == 1 and seen == [4] and not list(failing.raw.glob('.thumb-*')),
+       'an apply that fails after encoding (4 spool files present) still leaves no .thumb-* file in raw')
+
+    if HAVE_PIL:
+        racing_apply = Scn('racing-apply', {'rgb.png': FILES['rgb.png']}, 'THUMB_ENCODER=pillow\n')
+        real_encode = archive.ImageEncoder.encode
+        def touch_after_apply(self, path, *args, **kwargs):
+            result = real_encode(self, path, *args, **kwargs)
+            before = os.stat(path)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+            return result
+        archive.ImageEncoder.encode = touch_after_apply
+        try:
+            discarded = racing_apply.inprocess(apply=True)
+            discarded.build()
+        finally:
+            archive.ImageEncoder.encode = real_encode
+        ok(discarded.images['metadata_only'] == {'changed-during-scan': 1} and not list(racing_apply.raw.glob('.thumb-*')) and not any(isinstance(v, archive.Thumbnail) for v in discarded.files.values()),
+           'a thumbnail discarded as changed-during-scan has its spool file deleted immediately')
+    else:
+        skip('discarded thumbnail spool cleanup', 'Pillow is not available')
+else:
+    skip('thumbnail spool files', 'neither Pillow nor ffmpeg is available')
+
+# round 2: per-root thumbnail records, tiny budgets, one-pixel sizes, 16-bit transparency -----------------
+if HAVE_ANY:
+    shared_png = FILES['paletted.png']
+    twin = Scn('twin-roots', state=True)
+    for checkout in ('a', 'b'):
+        put(twin.state / f'worktrees/proj/{checkout}/.orchestra/chart.png', shared_png)
+    twin_first = twin.run('apply')
+    twin_thumbs = sorted(twin.vault.glob('artifacts/roots/proj/*/thumbs/*.jpg'))
+    twin_projects = twin.catalog()['projects']['proj']
+    twin_again = twin.run('apply')
+    root_damage = []
+    for victim in twin_thumbs:
+        original = victim.read_bytes()
+        victim.write_bytes(original[:len(original) // 2] + bytes([original[len(original) // 2] ^ 1]) + original[len(original) // 2 + 1:])
+        root_damage.append('invalid' in twin.run('verify', code=1))
+        victim.write_bytes(original)
+    ok(len(twin_thumbs) == 2 and 'images: 2 encoded, 0 reused' in twin_first and len(twin_projects['thumbnails']) == 2
+       and 'images: 0 encoded, 2 reused' in twin_again and '0 files written' in twin_again and 'commit: none' in twin_again
+       and root_damage == [True, True] and 'verify: OK' in twin.run('verify'),
+       'identical PNGs in two roots of one project keep separate records: re-apply is a no-op and corrupting either root thumbnail fails verify')
+
+    tiny = Scn('tiny-budget', {'dot.png': solid_png(1, 1)}, 'PAYLOAD_TASK_MAX_BYTES=100\n')
+    tiny_report = tiny.report('apply', '--json')
+    ok(len(solid_png(1, 1)) < 100 and tiny_report['images']['metadata_only'] == {'payload-over-budget': 1} and not tiny.thumbs()
+       and tiny.snapshot_rows()[0]['reason'] == 'payload-over-budget',
+       'each image reserves the full THUMB_MAX_BYTES, so a tiny PNG cannot slip a larger JPEG past a small task budget')
+
+SIZES = {'col.png': (1, 20), 'row.png': (20, 1), 'dot.png': (1, 1), 'odd.png': (3, 5)}
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: 1x20, 20x1, 1x1 and odd-sized PNGs, and THUMB_MAX_EDGE=1, all produce thumbnails (exit 0)'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    thin = Scn('thin-' + encoder, {name: solid_png(*size) for name, size in SIZES.items()}, f'THUMB_ENCODER={encoder}\n')
+    thin_report = thin.report('apply', '--json')
+    thin_sizes = sorted(jpeg_size((thin.vault / r['path']).read_bytes()) for r in thin.task_record()['thumbnails'].values())
+    edge = Scn('edge1-' + encoder, {'wide.png': FILES['rgb.png'], 'col.png': solid_png(1, 20)}, f'THUMB_ENCODER={encoder}\nTHUMB_MAX_EDGE=1\n')
+    edge_report = edge.report('apply', '--json')
+    edge_sizes = [jpeg_size((edge.vault / r['path']).read_bytes()) for r in edge.task_record()['thumbnails'].values()]
+    ok(thin_report['images']['thumbnails'] == 4 and thin_sizes == sorted(SIZES.values())
+       and edge_report['images']['thumbnails'] == 2 and edge_sizes == [(1, 1), (1, 1)] and not edge_report['source_errors']['count'],
+       description)
+
+TRNS = {'gray16-trns.png': trns_gray16_png(), 'rgb16-trns.png': trns_rgb16_png()}
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: 16-bit gray and 16-bit RGB tRNS keys become white, other samples stay'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    if not HAVE_PIL:
+        # Without Pillow the JPEG pixels cannot be decoded here; only the structure is checked.
+        scn = Scn('trns-' + encoder, TRNS, f'THUMB_ENCODER={encoder}\n')
+        scn.report('apply', '--json')
+        ok(len(scn.thumbs()) == 2, description + ' (structure only; Pillow is needed to decode pixels)')
+        continue
+    scn = Scn('trns-' + encoder, TRNS, f'THUMB_ENCODER={encoder}\n')
+    scn.report('apply', '--json')
+    by_source = {r['source']['sha256']: (scn.vault / r['path']).read_bytes() for r in scn.task_record()['thumbnails'].values()}
+    gray, rgb = by_source[sha(TRNS['gray16-trns.png'])], by_source[sha(TRNS['rgb16-trns.png'])]
+    key_gray, near_key, light_gray = pixel(gray, (3, 10)), pixel(gray, (21, 10)), pixel(gray, (35, 10))
+    key_rgb, opaque_rgb = pixel(rgb, (3, 10)), pixel(rgb, (35, 10))
+    ok(min(key_gray) >= 240 and max(near_key) < 80 and 100 < light_gray[0] < 220
+       and min(key_rgb) >= 240 and opaque_rgb[0] > 150 and opaque_rgb[1] < 100,
+       description)
+
+# policy validation ---------------------------------------------------------------------------------------
+# Per-task sample: selection is fixed before validation, with compact folder summaries -------------------
+indices = archive.thumbnail_sample_indices
+hundred = indices(100, 48)
+ok(len(hundred) == len(set(hundred)) == 48 and hundred == sorted(hundred) and hundred[0] == 0 and hundred[-1] == 99
+   and indices(5, 48) == [0, 1, 2, 3, 4] and indices(100, 1) == [0] and indices(100, 0) == []
+   and indices(100, 2) == [0, 99] and indices(0, 48) == [],
+   'thumbnail sample indices cover all images below the limit, evenly spaced endpoints, and limits 0/1/2')
+
+SAMPLE_FILES = {f'{"a" if i < 4 else "b"}/{i}.png': solid_png(8 + i, 6) for i in reversed(range(7))}
+SAMPLE_PATHS = sorted(SAMPLE_FILES)
+SAMPLED = [SAMPLE_PATHS[i] for i in (0, 3, 6)]
+
+def sample_folders(thumbnails):
+    return [{'folder': folder, 'pngs': count,
+             'source_bytes': sum(len(data) for rel, data in SAMPLE_FILES.items() if rel.startswith(folder + '/')),
+             'thumbnails': thumbs}
+            for folder, count, thumbs in (('a', 4, 2 if thumbnails else 0), ('b', 3, 1 if thumbnails else 0))]
+
+if HAVE_ANY:
+    sampled = Scn('sampled', SAMPLE_FILES, 'THUMB_MAX_PER_TASK=3\nTHUMB_EMBED_MAX=2\n')
+    sampled_report = sampled.report('apply', '--json')
+    sampled_task = sampled.task_record()
+    sid, snap = next(iter(sampled_task['snapshots'].items()))
+    manifest = json.loads(gzip.decompress((sampled.raw / snap['manifest']['blob']).read_bytes()))
+    png_entries = {entry['relpath']: entry for entry in manifest['entries'] if entry['kind'] == 'image'}
+    image_section = (sampled.vault / f'tasks/{TID}.md').read_text().split('## Images', 1)[1].split('## Per-snapshot', 1)[0]
+    blocks = re.findall(r'```text\n(.*?)\n```', image_section, re.S)
+    listing = json.loads(blocks[1])
+    expected_folders = sample_folders(True)
+    expected_table = 'snapshot | folder | pngs | source_bytes | thumbnails\n' + '\n'.join(
+        f"{sid} | {row['folder']} | {row['pngs']} | {row['source_bytes']} | {row['thumbnails']}" for row in expected_folders)
+    before = sampled.hashes(sampled.vault), sampled.hashes(sampled.raw), sampled.commits()
+    again = sampled.run('apply')
+    ok(sampled_report['images']['thumbnails'] == 3 and sampled_report['images']['max_per_task'] == 3
+       and sampled_report['images']['metadata_only'] == {'not-sampled': 4} and len(sampled.thumbs()) == 3
+       and [row['relpath'] for row in snap['images']] == SAMPLED and [row['relpath'] for row in listing] == SAMPLED
+       and set(png_entries) == set(SAMPLE_PATHS) and all(
+           entry['sha256'] == sha(SAMPLE_FILES[rel]) and entry['width'] == 8 + int(Path(rel).stem) and entry['height'] == 6
+           and (('sampled' not in entry) if rel in SAMPLED else entry.get('sampled') is False)
+           for rel, entry in png_entries.items())
+       and snap['image_folders'] == expected_folders and blocks[0] == expected_table
+       and image_section.count('![[artifacts/') == 2
+       and 'Sampled: 3 thumbnails of 7 PNG files (THUMB_MAX_PER_TASK=3);' in image_section
+       and before == (sampled.hashes(sampled.vault), sampled.hashes(sampled.raw), sampled.commits())
+       and '0 files written' in again and 'commit: none' in again and 'images: 0 encoded, 3 reused' in again
+       and 'verify: OK' in sampled.run('verify'),
+       '7 PNGs sample sorted positions 0/3/6: only 3 catalog/note rows, 7 manifest entries, exact folder totals, bounded embeds and no-op re-apply')
+
+    many = Scn('sample-budget', {f'{i:03}.png': solid_png(i + 1, 1) for i in range(200)},
+               'THUMB_MAX_PER_TASK=2\nTHUMB_MAX_BYTES=65536\nPAYLOAD_TASK_MAX_BYTES=262144\n')
+    many_report = many.report('apply', '--json')
+    ok(many_report['images']['thumbnails'] == 2 and len(many.thumbs()) == 2
+       and many_report['images']['metadata_only'] == {'not-sampled': 198}
+       and [row['relpath'] for row in many.snapshot_rows()] == ['000.png', '199.png']
+       and many_report['payload_over_budget']['files'] == 0 and 'verify: OK' in many.run('verify'),
+       '200 tiny PNGs reserve only min(n, K) times the thumbnail cap: K=2 fits a 256 KiB task budget')
+
+    sampled.set_conf('THUMB_MAX_PER_TASK=0\n')
+    zero_report = sampled.report('apply', '--json')
+    zero_note = (sampled.vault / f'tasks/{TID}.md').read_text()
+    ok(zero_report['images']['metadata_only'] == {'not-sampled': 7} and zero_report['images']['thumbnails'] == 0
+       and not zero_report['images']['resolved'] and not sampled.snapshot_rows()
+       and next(iter(sampled.task_record()['snapshots'].values()))['image_folders'] == sample_folders(False)
+       and '![[artifacts/' not in zero_note and 'Sampled: 0 thumbnails of 7 PNG files (THUMB_MAX_PER_TASK=0);' in zero_note
+       and 'verify: OK' in sampled.run('verify'),
+       'changing the sample limit to zero clears current image rows and embeds, retaining folder summaries and existing artifacts')
+else:
+    skip('sample selection, manifest metadata, folder table, re-apply, sampled budget and zero-limit transition',
+         'neither Pillow nor ffmpeg is available')
+
+sample_none = Scn('sample-none', SAMPLE_FILES, 'THUMB_MAX_PER_TASK=3\nTHUMB_ENCODER=none\n')
+none_sample_report = sample_none.report('apply', '--json')
+none_sample_note = (sample_none.vault / f'tasks/{TID}.md').read_text()
+ok(none_sample_report['images']['metadata_only'] == {'no-encoder': 3, 'not-sampled': 4}
+   and not sample_none.thumbs() and [row['relpath'] for row in sample_none.snapshot_rows()] == SAMPLED
+   and all(row['reason'] == 'no-encoder' for row in sample_none.snapshot_rows())
+   and next(iter(sample_none.task_record()['snapshots'].values()))['image_folders'] == sample_folders(False)
+   and 'Sampled: 0 thumbnails of 7 PNG files (THUMB_MAX_PER_TASK=3);' in none_sample_note
+   and '![[artifacts/' not in none_sample_note and 'verify: OK' in sample_none.run('verify'),
+   'without an encoder only sampled PNGs get no-encoder rows; the rest are not-sampled and folder thumbnail counts are zero')
+
+sample_invalid = Scn('sample-invalid', {'a.png': b'not png', 'b.png': truncated_png,
+                                      'c.png': solid_png(2, 2), 'd.png': solid_png(3, 2), 'e.png': solid_png(4, 2)},
+                     'THUMB_MAX_PER_TASK=2\nTHUMB_ENCODER=none\n')
+invalid_report = sample_invalid.report('apply', '--json', code=4)
+invalid_snap = next(iter(sample_invalid.task_record()['snapshots'].values()))
+ok(invalid_report['images']['invalid'] == invalid_report['source_errors']['count'] == 2
+   and invalid_report['images']['metadata_only'] == {'no-encoder': 1, 'not-sampled': 2}
+   and [row['relpath'] for row in invalid_snap['images']] == ['e.png']
+   and invalid_snap['image_folders'][0]['folder'] == '.' and invalid_snap['image_folders'][0]['pngs'] == 5
+   and invalid_snap['image_folders'][0]['source_bytes'] == sum((sample_invalid.task / f'{name}.png').stat().st_size for name in 'abcde'),
+   'invalid PNGs inside and outside the fixed sample still exit 4 and count in folder totals; invalid slots are not refilled')
+
+zero = Scn('sample-zero', SAMPLE_FILES, 'THUMB_MAX_PER_TASK=0\n')
+root_pngs = {zero.base / '.orchestra' / f'{i}.png': solid_png(5 + i, 2) for i in range(3)}
+for path, data in root_pngs.items():
+    put(path, data)
+zero_first = zero.report('apply', '--json')
+zero_project = zero.catalog()['projects']['proj']
+zero_snap = next(iter(zero.task_record()['snapshots'].values()))
+zero_entries = json.loads(gzip.decompress((zero.raw / zero_snap['manifest']['blob']).read_bytes()))['entries']
+ok(zero_first['images']['metadata_only'] == {'not-sampled': 10} and not zero_first['images']['resolved']
+   and not zero.snapshot_rows() and zero_snap['image_folders'] == sample_folders(False)
+   and all(entry['sampled'] is False for entry in zero_entries if entry['kind'] == 'image')
+   and next(iter(zero_project['image_folders'].values())) == [
+       {'folder': '.', 'pngs': 3, 'source_bytes': sum(map(len, root_pngs.values())), 'thumbnails': 0}]
+   and 'images' not in zero_project and 'verify: OK' in zero.run('verify'),
+   'a zero limit validates every task/root PNG without resolving an encoder and still stores folder summaries and manifest metadata')
+
+zero.set_conf('THUMB_MAX_PER_TASK=1\nTHUMB_ENCODER=none\n')
+one_report = zero.report('apply', '--json')
+one_project = zero.catalog()['projects']['proj']
+assert one_report['images']['metadata_only'] == {'no-encoder': 2, 'not-sampled': 8}
+assert [row['relpath'] for row in zero.snapshot_rows()] == [SAMPLE_PATHS[0]]
+assert [row['relpath'] for row in next(iter(one_project['images'].values()))] == ['0.png']
+for path in root_pngs:
+    path.unlink()
+zero.run('apply')
+ok('image_folders' not in zero.catalog()['projects']['proj'] and 'images' not in zero.catalog()['projects']['proj'],
+   'each task/root scan gets its own sample; root folder and image summaries are removed when root PNGs disappear')
+
+policy_checks = [('IMAGE_EXTENSIONS=.bmp\n', 'IMAGE_EXTENSIONS supports only .png'), ('THUMB_ENCODER=magic\n', 'THUMB_ENCODER must be auto, pillow, ffmpeg or none'),
+                 ('THUMB_QUALITY=0\n', 'THUMB_QUALITY must be 1..95'), ('THUMB_QUALITY=96\n', 'THUMB_QUALITY must be 1..95'),
+                 ('THUMB_MAX_EDGE=0\n', 'at least 1'), ('THUMB_MAX_BYTES=0\n', 'at least 1'), ('THUMB_MAX_PIXELS=0\n', 'at least 1'),
+                 ('THUMB_EMBED_MAX=-1\n', 'THUMB_EMBED_MAX must be nonnegative'), ('THUMB_MAX_PER_TASK=-1\n', 'THUMB_MAX_PER_TASK must be nonnegative'),
+                 ('THUMB_MAX_PER_TASK=abc\n', 'THUMB_MAX_PER_TASK must be an integer'), ('TEXT_EXTENSIONS=.md .png\n', 'IMAGE_EXTENSIONS overlaps TEXT_EXTENSIONS'),
+                 ('CHECKPOINT_EXTENSIONS=.PNG\n', 'IMAGE_EXTENSIONS overlaps CHECKPOINT_EXTENSIONS')]
+validation = Scn('policy')
+messages = []
+for text, expected in policy_checks:
+    validation.set_conf(text)
+    _, err = validation.run('plan', code=2, stderr=True)
+    messages.append(expected in err)
+ok(all(messages), 'invalid image policy values exit 2 with a specific message: ' + ', '.join(t.strip() for t, _ in policy_checks[:3]) + ' ...')
+
+# plan writes nothing -------------------------------------------------------------------------------------
+if HAVE_ANY:
+    dry = Scn('dry', FILES)
+    def tree(base):
+        return sorted((str(p.relative_to(base)), p.lstat().st_size, p.lstat().st_mtime_ns) for p in base.rglob('*'))
+    before = tree(dry.root)
+    plan_plain = dry.report('plan', '--json')
+    plan_measure = dry.report('plan', '--json', '--measure-thumbnails')
+    ok(tree(dry.root) == before and not dry.vault.exists() and not dry.raw.exists()
+       and plan_plain['images']['pending'] == 4 and plan_plain['images']['thumbnails'] == 0 and 'images_measurement' not in plan_plain
+       and plan_measure['images']['thumbnails'] == 4 and plan_measure['images']['pending'] == 0
+       and plan_measure['images_measurement']['encoded'] == 4 and plan_measure['images_measurement']['reused'] == 0
+       and plan_measure['images']['thumbnail_bytes'] > 0 and set(plan_measure['images_measurement']['peak_rss_kib']) == {'self', 'children'},
+       'plan writes nothing; without --measure-thumbnails images are pending, with it they are encoded in memory and measured')
+    applied = Scn('dry-applied', FILES)
+    applied.run('apply')
+    reuse_plan = applied.report('plan', '--json', '--measure-thumbnails')
+    ok(reuse_plan['images_measurement']['encoded'] == 0 and reuse_plan['images_measurement']['reused'] == 4
+       and applied.report('plan', '--json')['images']['pending'] == 0,
+       'plan reuses thumbnails already in the vault (no decode, nothing pending)')
+else:
+    skip('plan writes nothing / measurement', 'neither Pillow nor ffmpeg is available')
+
+ok(checked_applies >= 20, f'source files were byte- and mtime-identical after each of {checked_applies} archive runs')
+print(f'PASS: {groups} image test groups; SKIPPED: {len(skipped)}' + (' (' + '; '.join(skipped) + ')' if skipped else ''))
 PY
