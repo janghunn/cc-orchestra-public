@@ -204,4 +204,128 @@ after="$(HOME="$CHECK_HOME" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$TMP/checks
 [[ "$after" == *'ok       orch-compact-context.sh in settings.json'* ]] || fail 'check misses installed compaction hook'
 ok '--check reports the installed compaction hook in an isolated HOME'
 
+cat > "$TMP/hook-repair.py" <<'PY'
+import ast
+import json
+from pathlib import Path
+import shlex
+import sys
+
+path, root, case, action = sys.argv[1:]
+installer = (Path(root) / 'install.sh').read_text()
+body = installer.split('install_safety_hooks() {', 1)[1].split('\n}\n', 1)[0] + '\n'
+source = body.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+definitions = next(ast.literal_eval(node.value) for node in ast.parse(source).body
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == 'SAFETY_HOOKS'
+                           for target in node.targets))
+assert definitions and any(item[2] == 'orch-compact-context.sh' for item in definitions)
+by_name = {basename: (event, matcher, timeout) for event, matcher, basename, timeout in definitions}
+
+
+def stale(basename, label):
+    return {'type': 'prompt', 'command': "bash '/old/checkout/hooks/" + basename + "'",
+            'timeout': 99, 'label': label}
+
+
+def recognised(hook, basename):
+    if not isinstance(hook, dict) or not isinstance(hook.get('command'), str):
+        return False
+    try:
+        lex = shlex.shlex(hook['command'], posix=True, punctuation_chars=True)
+        lex.commenters = ''
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return False
+    return any(token == 'hooks/' + basename or token.endswith('/hooks/' + basename) for token in tokens)
+
+
+settings = {'hooks': {}}
+preserved = {}
+if case == 'wrong-matcher':
+    for event, matcher, basename, timeout in definitions:
+        entry = {'hooks': [stale(basename, 'keep')]}
+        if basename != 'orch-compact-context.sh':
+            entry['matcher'] = matcher + '-wrong'
+        else:
+            entry['hooks'][0]['command'] += '||true'
+        if event == 'SubagentStop':
+            user_hook = {'type': 'command', 'command': 'echo colocated-stop'}
+            entry['hooks'].append(user_hook)
+            preserved[event] = [{'matcher': entry['matcher'], 'hooks': [user_hook]}]
+        settings['hooks'][event] = [entry]
+else:
+    assert case == 'duplicates', case
+    for event, matcher, basename, timeout in definitions:
+        first = {'matcher': matcher, 'hooks': [stale(basename, 'keep')]}
+        if basename == 'orch-worktree-guard.sh':
+            settings['hooks'][event] = [
+                {'matcher': 'Write', 'hooks': [stale(basename, 'drop')]}, first]
+            settings['hooks'][event][0]['hooks'][0]['command'] += '||true'
+        elif basename == 'orch-stop-gate.sh':
+            settings['hooks'][event] = [first, {'matcher': matcher, 'hooks': [stale(basename, 'drop')]}]
+        else:
+            first['hooks'].append(stale(basename, 'drop'))
+            settings['hooks'][event] = [first]
+    guard_matcher = by_name['orch-worktree-guard.sh'][1]
+    preserved = {
+        'PreToolUse': [
+            {'matcher': 'Read', 'hooks': [{'type': 'command', 'command': 'echo keep-me', 'timeout': 17}]},
+            {'matcher': guard_matcher, 'hooks': [{'type': 'command', 'command': 'bash /home/user/my-hooks/orch-worktree-guard.sh'}]},
+            {'matcher': 'Edit', 'hooks': [{'type': 'command', 'command': "bash '/x/hooks/orch-worktree-guard.sh.bak'"}]},
+            {'matcher': 'Glob', 'hooks': [{'type': 'command', 'command': "bash '/u/hooks/orch-worktree-guard.sh backup'"}]},
+            {'matcher': 'Grep', 'hooks': [{'type': 'command', 'command': "bash '/u/hooks/orch-worktree-guard.sh;backup'"}]},
+            {'matcher': 'LS', 'hooks': [{'type': 'command', 'command': 'bash /u/hooks/orch-worktree-guard.sh#backup'}]},
+        ],
+        'SubagentStop': [
+            {'matcher': '.*', 'hooks': [{'type': 'command', 'command': 'bash /x/hooks/my-orch-stop-gate.sh'}]},
+        ],
+    }
+    for event, entries in preserved.items():
+        settings['hooks'][event].extend(entries)
+    settings['hooks']['UserPromptSubmit'] = [{'hooks': [{'type': 'command', 'command': 'echo user-prompt'}]}]
+    settings['env'] = {'UNCHANGED': 'literal $value with spaces'}
+    settings['permissions'] = {'allow': ['Read'], 'deny': ['Bash(rm:*)']}
+
+if action == 'prepare':
+    with open(path, 'w') as output:
+        json.dump(settings, output, indent=2)
+        output.write('\n')
+else:
+    assert action == 'check', action
+    with open(path) as source:
+        current = json.load(source)
+    for event, matcher, basename, timeout in definitions:
+        found = [(entry, hook) for entry in current['hooks'][event] for hook in entry['hooks']
+                 if recognised(hook, basename)]
+        assert len(found) == 1, (basename, found)
+        entry, hook = found[0]
+        assert entry['matcher'] == matcher, entry
+        assert hook == {'type': 'command', 'command': 'bash ' + shlex.quote(root + '/hooks/' + basename) + ' || true',
+                        'timeout': timeout, 'label': 'keep'}, hook
+        unrelated = [item for item in current['hooks'][event]
+                     if not any(recognised(hook, basename) for hook in item['hooks'])]
+        assert unrelated == preserved.get(event, []), (event, unrelated)
+    if case == 'duplicates':
+        assert current['hooks']['UserPromptSubmit'] == settings['hooks']['UserPromptSubmit']
+        for key in ('env', 'permissions'):
+            assert current[key] == settings[key], key
+PY
+
+for repair_case in wrong-matcher duplicates; do
+  python3 "$TMP/hook-repair.py" "$CC_ORCH_SETTINGS" "$ROOT" "$repair_case" prepare
+  install_hooks
+  python3 "$TMP/hook-repair.py" "$CC_ORCH_SETTINGS" "$ROOT" "$repair_case" check
+  if [[ "$repair_case" == wrong-matcher ]]; then
+    ok 'wrong matcher is repaired from the installer definitions, including the compaction hook'
+  else
+    ok 'duplicate registrations collapse to one; unrelated and similar-path hooks and settings are unchanged'
+  fi
+  cp "$CC_ORCH_SETTINGS" "$TMP/repaired-$repair_case.json"
+  install_hooks
+  cmp "$CC_ORCH_SETTINGS" "$TMP/repaired-$repair_case.json" || fail "repaired $repair_case settings change on re-run"
+done
+ok 're-running the installer on a repaired file is byte-identical'
+
 echo "PASS: $pass hook-wiring cases"
