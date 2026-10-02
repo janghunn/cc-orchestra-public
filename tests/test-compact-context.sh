@@ -5,8 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 python3 - "$ROOT" "$TMP" <<'PY'
+import contextlib
 import datetime
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -22,12 +24,21 @@ hook = root / 'hooks/orch-compact-context.sh'
 state = tmp / 'state'
 state.mkdir()
 passed = 0
+skipped = []
 
 
 def ok(label):
     global passed
     passed += 1
     print(f'ok {passed} - {label}', flush=True)
+
+
+def skip(reason, stream=None):
+    if stream is None:
+        stream = sys.stdout
+    print(f'SKIPPED: {reason}', file=stream, flush=True)
+    if stream is sys.stdout:
+        skipped.append(reason)
 
 
 def command(args, **kwargs):
@@ -179,7 +190,7 @@ directives(base, base_directives)
 path.chmod(0)
 try:
     if os.geteuid() == 0:
-        print('SKIP: unreadable DIRECTIVES.md assertion: root bypasses chmod 000', flush=True)
+        skip('unreadable DIRECTIVES.md assertion: root bypasses chmod 000')
     else:
         assert '(unreadable)' in context(run(base))
         ok('unreadable directives leave valid registry context')
@@ -284,22 +295,99 @@ text = context(large_result.stdout)
 assert large_open[1] in text and large_terminal[-1][1] in text and large_terminal[0][1] not in text
 ok(f'10,000 terminal rows retain the open and newest IDs within 5 seconds ({elapsed:.3f}s)')
 
-try:
-    socket_input, socket_writer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-except (PermissionError, OSError) as error:
-    print(f'SKIP: socket-fed stdin case: socketpair denied in this sandbox ({error})', flush=True)
-else:
-    with socket_input, socket_writer:
+def socket_case(socketpair):
+    try:
+        socket_input, socket_writer = socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError as error:
+        return f'socket-fed stdin case: socketpair denied in this sandbox ({error})'
+    reason = None
+    close_error = None
+    try:
         socket_payload = dict(session_id='s1', hook_event_name='SessionStart', source='compact', cwd=str(base))
-        socket_writer.sendall(json.dumps(socket_payload).encode())
-        socket_writer.shutdown(socket.SHUT_WR)
-        socket_result = subprocess.run(
-            ['bash', str(hook)], stdin=socket_input, capture_output=True, cwd=base,
-            env=dict(os.environ, CC_ORCH_PROJECT='t', CC_ORCH_STATE_DIR=str(state)), timeout=10)
-    assert socket_result.returncode == 0, socket_result
-    assert socket_result.stderr == b'', socket_result.stderr
-    assert socket_result.stdout == out and out
-    ok('socket-fed stdin produces the same nonempty context as pipe-fed stdin')
+        op = 'sendall'
+        try:
+            socket_writer.sendall(json.dumps(socket_payload).encode())
+            op = 'shutdown'
+            socket_writer.shutdown(socket.SHUT_WR)
+        except OSError as error:
+            reason = f'socket-fed stdin case: {op} denied in this sandbox ({error})'
+        if reason is None:
+            socket_result = subprocess.run(
+                ['bash', str(hook)], stdin=socket_input, capture_output=True, cwd=base,
+                env=dict(os.environ, CC_ORCH_PROJECT='t', CC_ORCH_STATE_DIR=str(state)), timeout=10)
+            assert socket_result.returncode == 0, socket_result
+            assert socket_result.stderr == b'', socket_result.stderr
+            assert socket_result.stdout == out and out
+    finally:
+        for endpoint in (socket_input, socket_writer):
+            try:
+                endpoint.close()
+            except OSError as error:
+                if close_error is None:
+                    close_error = error
+    if reason is None and close_error is not None:
+        reason = f'socket-fed stdin case: close denied in this sandbox ({close_error})'
+    return reason
 
-print(f'PASS: {passed} compact-context cases')
+
+def report_socket_case(socketpair):
+    reason = socket_case(socketpair)
+    if reason:
+        skip(reason)
+    else:
+        ok('socket-fed stdin produces the same nonempty context as pipe-fed stdin')
+
+
+for denied_op in ('socketpair', 'sendall', 'shutdown'):
+    calls = []
+    denial = PermissionError(1, 'Operation not permitted') if denied_op != 'shutdown' else OSError(5, 'Input/output error')
+
+    class FakeSocket:
+        def __init__(self, name):
+            self.name = name
+
+        def sendall(self, payload):
+            calls.append('sendall')
+            if denied_op == 'sendall':
+                raise denial
+
+        def shutdown(self, how):
+            calls.append('shutdown')
+            if denied_op == 'shutdown':
+                raise denial
+
+        def close(self):
+            calls.append(self.name + '.close')
+            if denied_op == 'sendall':
+                raise OSError(5, 'close denied')
+
+    def fake_socketpair(family, kind):
+        calls.append('socketpair')
+        assert (family, kind) == (socket.AF_UNIX, socket.SOCK_STREAM)
+        if denied_op == 'socketpair':
+            raise denial
+        return FakeSocket('input'), FakeSocket('writer')
+
+    previous_passed, previous_skipped = passed, len(skipped)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        report_socket_case(fake_socketpair)
+    expected_reason = f'socket-fed stdin case: {denied_op} denied in this sandbox ({denial})'
+    assert captured.getvalue() == f'SKIPPED: {expected_reason}\n', captured.getvalue()
+    assert passed == previous_passed
+    assert skipped[previous_skipped:] == [expected_reason], skipped
+    expected_calls = ['socketpair']
+    if denied_op != 'socketpair':
+        expected_calls += ['sendall']
+        if denied_op == 'shutdown':
+            expected_calls += ['shutdown']
+        expected_calls += ['input.close', 'writer.close']
+    assert calls == expected_calls, calls
+    del skipped[previous_skipped:]
+ok('simulated socket denial (socketpair, sendall+close, shutdown) reports SKIPPED without counting a pass or running the hook')
+
+report_socket_case(socket.socketpair)
+
+reasons = ' (' + '; '.join(skipped) + ')' if skipped else ''
+print(f'PASS: {passed} compact-context cases; SKIPPED: {len(skipped)}{reasons}')
 PY

@@ -137,6 +137,22 @@ PY
 install_safety_hooks() {
   python3 - "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" "$REPO_DIR" <<'PY'
 import json, os, shlex, sys, tempfile
+SAFETY_HOOKS = (
+    ("PreToolUse", "Bash", "orch-worktree-guard.sh", 10),
+    ("SubagentStop", "(route-)?lead-.*", "orch-stop-gate.sh", 30),
+    ("SessionStart", "compact", "orch-compact-context.sh", 10),
+)
+
+def is_safety_hook(hook, basename):
+    if not isinstance(hook, dict) or not isinstance(hook.get("command"), str):
+        return False
+    try:
+        tokens = shlex.split(hook["command"])
+    except ValueError:
+        return False
+    path = "hooks/" + basename
+    return any(token == path or token.endswith("/" + path) for token in tokens)
+
 path, repo = sys.argv[1:]
 path = os.path.abspath(path)
 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -145,30 +161,41 @@ if os.path.exists(path):
     with open(path, encoding="utf-8") as source:
         settings = json.load(source)
 hooks = settings.setdefault("hooks", {})
-for event, matcher, basename, timeout in (
-    ("PreToolUse", "Bash", "orch-worktree-guard.sh", 10),
-    ("SubagentStop", "(route-)?lead-.*", "orch-stop-gate.sh", 30),
-    ("SessionStart", "compact", "orch-compact-context.sh", 10),
-):
+for event, matcher, basename, timeout in SAFETY_HOOKS:
     entries = hooks.setdefault(event, [])
     if not isinstance(entries, list):
         raise SystemExit(f"settings hooks.{event} must be a list")
     command = "bash " + shlex.quote(os.path.join(repo, "hooks", basename)) + " || true"
-    found = False
+    matches = []
     for entry in entries:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
             continue
-        for hook in entry.get("hooks", []):
-            if isinstance(hook, dict) and basename in str(hook.get("command", "")):
-                # Update this command only; co-located hooks and their matcher stay intact.
-                hook["command"] = command
-                hook["type"] = "command"
-                hook["timeout"] = timeout
-                found = True
-    if not found:
+        for hook in entry["hooks"]:
+            if is_safety_hook(hook, basename):
+                matches.append((entry, hook))
+    if not matches:
         entries.append({"matcher": matcher, "hooks": [
             {"type": "command", "command": command, "timeout": timeout}
         ]})
+        continue
+    kept_entry, kept_hook = next(
+        (match for match in matches if match[0].get("matcher") == matcher), matches[0])
+    kept_hook["command"] = command
+    kept_hook["type"] = "command"
+    kept_hook["timeout"] = timeout
+    for entry, hook in matches:
+        if hook is kept_hook:
+            continue
+        entry["hooks"][:] = [item for item in entry["hooks"] if item is not hook]
+        if not entry["hooks"]:
+            entries[:] = [item for item in entries if item is not entry]
+    if kept_entry.get("matcher") != matcher:
+        if len(kept_entry["hooks"]) == 1:
+            kept_entry["matcher"] = matcher
+        else:
+            # Preserve the matcher and position of any co-located user hooks.
+            kept_entry["hooks"][:] = [item for item in kept_entry["hooks"] if item is not kept_hook]
+            entries.append({"matcher": matcher, "hooks": [kept_hook]})
 fd, tmp = tempfile.mkstemp(prefix="settings.", dir=os.path.dirname(path), text=True)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as out:

@@ -862,7 +862,9 @@ verdict 파일만 쓰라는 지시와 명령 정책은 그대로 적용됩니다
 `bash install.sh --safety-hooks-only`는 이 등록만 병합하며 symlink 설치, 실행 권한 변경,
 systemd 호출은 수행하지 않습니다. `CC_ORCH_SETTINGS`로 settings 경로를 지정할 수 있으며,
 기본값은 `$HOME/.claude/settings.json`입니다. 기존의 관련 없는 항목을 보존하고 checkout
-경로가 바뀌면 해당 hook command만 현재 경로로 갱신합니다. 등록 command의 `|| true`는
+경로가 바뀌면 해당 hook command를 현재 경로로 갱신합니다. 재실행하면 각 hook의 의도한 matcher와
+timeout도 복구하고, `hooks/<name>` 경로 요소로 식별한 중복 등록을 하나의 항목으로 합칩니다.
+등록 command의 `|| true`는
 유지해야 합니다. Timeout은 `PreToolUse` 10초, `SubagentStop` 30초입니다. 저장소의
 `guardrails.json`은 기존 `/home/janghun/cc-orchestra/hooks/` 경로를 사용하므로 다른 위치에
 설치한 경우 그 경로를 조정하십시오.

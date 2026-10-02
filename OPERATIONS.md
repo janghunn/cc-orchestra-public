@@ -829,7 +829,9 @@ Installation registers independent hooks in user settings and in the session gua
 `bash install.sh --safety-hooks-only` merges just these registrations, without installing links,
 changing executable bits, or contacting systemd. It honors `CC_ORCH_SETTINGS` (default:
 `$HOME/.claude/settings.json`), preserves unrelated entries, and updates an existing hook command
-when the checkout path changes. Commands retain `|| true`; timeouts are 10 seconds for
+when the checkout path changes; re-running it also restores each hook's intended matcher and timeout
+and collapses duplicate registrations (recognised by the `hooks/<name>` path segment) to one entry.
+Commands retain `|| true`; timeouts are 10 seconds for
 `PreToolUse` and 30 seconds for `SubagentStop`. The checked-in `guardrails.json` uses the existing
 `/home/janghun/cc-orchestra/hooks/` prefix; adjust it for a different installation location.
 
