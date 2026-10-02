@@ -30,7 +30,7 @@ usage:
 
 modes:
   --codex-only   install Codex launchers without Claude, usage polling, or a timer
-  --safety-hooks-only  merge only the two runtime safety hooks into Claude settings
+  --safety-hooks-only  merge only the runtime safety and compaction-recovery hooks into Claude settings
   --check       inspect the current cc-orchestra installation without changing it
   --bootstrap   prepare a fresh Linux user after the repository has been cloned:
                 install missing system dependencies, Claude Code, Codex CLI,
@@ -148,6 +148,7 @@ hooks = settings.setdefault("hooks", {})
 for event, matcher, basename, timeout in (
     ("PreToolUse", "Bash", "orch-worktree-guard.sh", 10),
     ("SubagentStop", "(route-)?lead-.*", "orch-stop-gate.sh", 30),
+    ("SessionStart", "compact", "orch-compact-context.sh", 10),
 ):
     entries = hooks.setdefault(event, [])
     if not isinstance(entries, list):
@@ -277,7 +278,7 @@ check() {
   fi
   echo "  budget   $("$REPO_DIR/bin/orch-model-guard-runtime" budget --compact 2>/dev/null || echo unavailable)"
 
-  for hook in orch-worktree-guard.sh orch-stop-gate.sh; do
+  for hook in orch-worktree-guard.sh orch-stop-gate.sh orch-compact-context.sh; do
     if grep -q "$hook" "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" 2>/dev/null; then
       echo "  ok       $hook in settings.json"
     else
@@ -513,6 +514,7 @@ run_regression_tests() {
     tests/test-notice-runtime.sh \
     tests/test-worktree-guard.sh \
     tests/test-stop-gate.sh \
+    tests/test-compact-context.sh \
     tests/test-hook-wiring.sh
   do
     [[ -f "$REPO_DIR/$test" ]] || continue

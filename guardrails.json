@@ -18,9 +18,22 @@
     "new cc-orch session), settings.json is watched (so it reaches sessions already running).",
     "The hook de-duplicates per prompt, so loading it twice still prints one notice.",
     "PreToolUse worktree protection denies classified lead/dev Git collisions and is also installed in user settings.",
-    "SubagentStop validates lead gate-result claims with orch-summary-check --strict and is also installed in user settings."
+    "SubagentStop validates lead gate-result claims with orch-summary-check --strict and is also installed in user settings.",
+    "SessionStart(compact) re-injects the registry, slot board and DIRECTIVES.md after compaction and is also installed in user settings."
   ],
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/janghun/cc-orchestra/hooks/orch-compact-context.sh || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "*",
