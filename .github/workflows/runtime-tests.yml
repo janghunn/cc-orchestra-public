@@ -41,6 +41,8 @@ jobs:
         run: bash tests/test-hook-wiring.sh
       - name: Advisory security scan suite
         run: bash tests/test-security-scan.sh
+      - name: Archive vault and raw store suite
+        run: bash tests/test-archive.sh
       - name: Jev advisory sidecar suite
         run: bash tests/test-jev.sh
       - name: Jev Codex-routing shadow suite

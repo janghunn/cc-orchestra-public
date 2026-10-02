@@ -45,6 +45,7 @@ cc-orchestra 자체를 수정할 때는 [AGENTS.md](AGENTS.md)를 읽습니다.
 ~/.local/bin/orch-model-guard              -> bin/orch-model-guard-runtime
 ~/.local/bin/orch-summary-check
 ~/.local/bin/orch-usage-report
+~/.local/bin/orch-archive
 ```
 
 이 밖에 Fable legacy guard timer, Claude 5h/7d status-line quota tap, live runtime routing
@@ -984,6 +985,89 @@ transcript 전달은 실제 세션에서 확인해야 합니다. Gate claim 이�
 확인하십시오. 기록이 없으면 지원되지 않는 payload, hook 미호출, off-switch 등을 확인해야
 합니다. `SubagentStop`에서 `systemMessage`가 표시되는지도 미확인 상태이므로 stderr와
 journal에도 경고를 보존합니다.
+
+## 아카이브 (orch-archive)
+
+`orch-archive`는 cc-orch 세션, 진행 중인 작업과 중첩된 과거 복사본을 포함한 작업 디렉터리,
+레지스트리, 연결된 Claude transcript 및 작업에서 참조한 Codex rollout을 보관한다.
+cc-orch 연결이 없는 native Codex rollout은 개수와 용량만 보고한다. 생성되는 구조는 영어이며
+한국어 레지스트리 셀을 포함한 과거 원문은 번역 없이 그대로 보존한다.
+
+비공개 로컬 git vault 기본 경로는 `~/orchestra-vault`이다. 무손실 압축 원본 로그는 git 밖의
+`~/.claude/orchestra-archive/raw`에 저장한다(디렉터리 0700, 파일 0600).
+원본은 수정·이동·삭제하지 않는다. 실행 중 로그는 byte-offset watermark로 완성된 줄을
+복사하고 줄바꿈 없는 꼬리도 별도로 보존한다. 스냅샷은 불변이며 누적 catalog는 원본
+checkout이 삭제된 작업도 유지한다.
+
+```bash
+orch-archive                       # 읽기 전용 계획; 파일 생성 없음
+orch-archive plan --json --top 20
+orch-archive apply                 # 로컬 저장 및 vault 변경 commit
+orch-archive apply --no-commit
+orch-archive verify
+orch-archive show cc-orchestra--38-orch-archive
+```
+
+`archive-policy.conf`에서 저장 경로, 탐색 기반 디렉터리, 포함 여부, 크기 한도를 설정한다.
+`ORCH_ARCHIVE_POLICY`로 override 정책을 선택한다. 경로 환경 변수는
+`ORCH_ARCHIVE_VAULT`, `ORCH_ARCHIVE_RAW`, `ORCH_ARCHIVE_ALLOWLIST`,
+`ORCH_ARCHIVE_STATE_DIRS`, `ORCH_ARCHIVE_CLAUDE_PROJECTS`, `ORCH_ARCHIVE_CODEX_HOME`
+(다음 순위 `CODEX_HOME`), `ORCH_ARCHIVE_EXTRA_BASES`이다. 정책을 shell로 실행하지 않는다.
+vault/raw 경로의 겹침과 원본 루트 내부의 저장 경로는 거부한다.
+
+모든 텍스트 파일은 raw 저장소에 복사한다. 비텍스트 payload 기본 한도는 파일당 16 MiB,
+작업당 합계 256 MiB이다. 작업 한도 초과 시 해당 스냅샷의 모든 payload를 manifest에만
+기록한다. apply 전에 `PAYLOAD_FILE_MAX_BYTES`와 `PAYLOAD_TASK_MAX_BYTES`를 변경할 수 있다
+(`0`은 무제한). `INCLUDE_PAYLOAD=0`으로 payload 복사를 끌 수 있다. 제외 파일은 크기와
+사유를 모두 기록하며 계획 보고서에는 압축 전후 용량과 artifacts, notes,
+catalog, other별 vault 용량을 표시한다. 생성한 작업·루트 manifest는 raw 저장소의
+결정적인 gzip blob에만 저장하며 `raw.manifests`로 집계한다. 작업·프로젝트 노트는
+blob 경로, 압축 전 SHA-256과 길이를 참조하고 catalog 스냅샷에는 개수와 manifest
+포인터를 기록한다. `verify`는 포인터와 manifest JSON을 검증한다. artifact는 쓰기 시 검증한 raw blob에서
+복원하므로 계획에는 길이와 포인터만 유지한다.
+
+checkpoint 파일은 복사하거나 내용 해시를 계산하지 않는다. `CHECKPOINT_EXTENSIONS` 기본값은
+`.pt .pth .ckpt .safetensors .onnx .engine .trt .h5 .npz .npy`이며 대소문자를 구분하지 않는다
+(빈 값이면 이 분류를 끈다). 작업 노트에는 경로·크기·UTC mtime만 기록하며 보고서에는
+개수·용량·상위 작업을 표시한다. checkpoint는 payload 한도 합계에서 제외한다.
+PNG 처리는 기존 한도를 유지한다. 첫 실제 apply는 별도 PNG-to-JPEG thumbnail 후속 작업이
+끝날 때까지 기다려야 한다. 이 릴리스에는 thumbnail 기능을 구현하지 않았다.
+
+읽을 수 없거나 사라진 원본은 실행을 중단하지 않고 건너뛴다. `source_errors`는 정확한
+개수와 보호된 경로·사유·errno의 제한된 목록을 보고한다(`--top`으로 목록 크기 설정).
+원본 오류가 하나라도 있으면 plan과 apply는 종료 코드 **4**를 반환한다. apply는 성공한
+원본을 저장하고 commit한다. 접근 권한이나 사라진 원본을 복구한 뒤 다시 실행한다.
+오류 없이 성공하면 종료 코드 0이며 기존 사용법·정책, verify, lock-busy 상태는 유지한다.
+
+기존 advisory secret scanner로 vault에 들어가는 모든 텍스트를 검사한다. 오탐과 누락이
+가능하다. 보류된 내용은 비공개 raw 저장소에 남는다. `_meta/withheld.md`는 해시와 위치만
+기록하며 탐지된 원문을 표시하지 않는다. 해제하려면 보고서의 전체 해시를
+`sha256:<해시>` 형식으로 `~/.claude/orchestra-archive/allowlist.txt`(또는 설정한 경로)에
+추가하고 apply를 다시 실행한다. raw 로그는 무손실 보존되며 검사하지 않는다.
+전체 텍스트 backstop은 해제한 값의 원문과 JSON-escaped metadata를 허용하며,
+그 외 secret-shaped 줄은 거부한다.
+네트워크·모델 호출, remote 설정, push는 하지 않는다.
+
+관리 파일 `.obsidian/graph.json`은 apply마다 재생성하며 artifacts, metadata, dashboard를
+graph에서 제외한다. frontmatter와 `.base`는 Python 표준 라이브러리로 검증 가능한
+JSON-compatible YAML flow 형식이다. Obsidian 렌더링은 시각적으로 검증하지 않았다.
+Bases에는 Obsidian >= 1.9.0이 필요하다.
+
+### 남은 제한 사항 (재검증 안 됨)
+
+- 보류된 세션 conf 값에는 raw 백업이 없다. 세션 conf, named-launch record 또는
+  `project.json`의 secret-shaped 값은 vault catalog에서 가려지며 원본 파일 자체는
+  raw 저장소에 복사하지 않는다. 원본이 삭제되면 값을 복구할 수 없고, 나중에
+  allow-list에 추가해도 복원되지 않는다(`lib/orch_archive.py`, `Archive.build` 세션 루프;
+  최종 리뷰 지적 사항).
+- secret-shaped 파일명의 payload 한도 수정은 마지막 gate 이후 반영되었으며
+  gate 검증을 받지 않았다(`lib/orch_archive.py`, `Archive.scan_files`).
+- `.orchestra/wt`와 `.orchestra/archive` 컨테이너는 전체를 건너뛰고 합계 용량을 보고한다.
+  내부의 중첩된 `.orchestra` 루트만 보관하므로 `archive/<x>/handoff/` 같은 개별 파일은
+  복사하지 않는다.
+- Codex-only 설치(`install_codex_only`)는 `orch-archive` 링크를 만들지 않는다.
+- Obsidian 렌더링(graph 색상과 Bases dashboard)은 시각적으로 확인하지 않았다.
+- PNG-to-JPEG thumbnail은 별도 후속 작업이며 첫 실제 apply는 해당 작업을 기다려야 한다.
 
 ## 설정 튜닝
 
