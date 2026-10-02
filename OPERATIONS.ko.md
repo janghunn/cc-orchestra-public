@@ -1245,3 +1245,17 @@ bash tests/test-notice-runtime.sh
 Model-policy profile, reset-aware pressure, Claude/Codex routing, Fast 호환성, provider reserve,
 Tier 1 normal=Sonnet, stale-policy notice 오탐, tmux/worktree lifecycle, status-line 보존,
 runtime hook JSON contract를 검사합니다.
+
+### Codex 추정 비용 (orch-usage-report --cost)
+
+`orch-usage-report --days 7 --cost`는 공개 API 요금 기준 추정치이며 계정에서 차감된 금액이 아닙니다.
+호출은 ChatGPT 플랜 quota를 사용하므로 달러 금액은 상대적 부하를 비교하는 지표입니다.
+요금, 적용일, 출처 URL은 `pricing-policy.conf`에 기록하며 `CC_ORCH_PRICING_POLICY`로 경로를 바꿉니다. 이 정책은 라우팅에 영향을 주지 않습니다.
+Astra 가정 비용은 관측된 토큰 수를 그대로 재계산합니다. 실제 Astra의 토큰 수는 달라집니다.
+unpriced는 남아 있는 토큰 데이터가 없는 호출이며, coverage는 기간 내 전체 호출 중 토큰과 유효한 요금이 있는 호출의 비율입니다.
+Fast 배수는 기본적으로 미상이라 Standard 요금으로 추정하며, 요청별 긴 컨텍스트 할증은 적용하지 않습니다.
+이벤트 파일 mtime과 wrapper 로그 순서로 연결합니다. 같은 root의 동일 mode 호출 구간이 교차하고 두 완료 사이에 다른 wrapper 호출이 시작되지 않으면 서로 뒤바뀔 수 있습니다.
+작업 디렉터리를 복사하거나 touch하여 mtime이 바뀌면 과거 토큰이 더 최근 호출에 연결될 수 있습니다.
+토큰과 호출의 연결은 추정입니다. `codex.log`에는 이벤트 파일 또는 실행 식별자가 없습니다.
+`codex-run`은 이벤트 파일을 `codex.log` 행보다 먼저 쓰므로, 그 사이 다른 호출이 로그에 행을 추가하면 완료 중인 호출이 다른 호출의 모델 요금으로 계산될 수 있습니다.
+정확한 연결에는 `codex-run` 로그 변경이 필요하며 이는 보류합니다. `orch-jev`는 전체 행에 대한 정규식으로 로그 행을 파싱합니다.

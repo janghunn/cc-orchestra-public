@@ -1856,6 +1856,8 @@ report="$(CC_ORCH_CLAUDE_PROJECTS="$TMP/empty-claude" CC_ORCH_CODEX_LOG="$TMP/no
 assert_has "$report" "LOCAL USAGE REPORT" "usage heading"
 assert_has "$report" "Codex wrapper runs" "Codex usage heading"
 ok "empty local usage report"
+bash "$ROOT/tests/test-usage-cost.sh" >/dev/null || fail "usage-report --cost tests"
+ok "usage-report --cost estimate"
 
 HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR/.claude/agents" "$HOME_DIR/.local/bin"
