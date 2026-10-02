@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 
+import atexit
 import csv
 import fnmatch
 import hashlib
@@ -13,7 +14,9 @@ import os
 from pathlib import Path, PurePosixPath
 import random
 import re
+import shutil
 import subprocess
+import tempfile
 import uuid
 
 CLONE = Path(__file__).resolve().parents[2]
@@ -26,12 +29,14 @@ DIFF_OPTIONS = ('--no-color', '--no-ext-diff', '--no-textconv', '-M',
                 '--inter-hunk-context=0', '--no-color-moved')
 GIT_CONFIG = ('diff.noprefix=false', 'diff.mnemonicPrefix=false', 'diff.relative=false',
               'diff.renames=true', 'diff.renameLimit=1000', 'diff.suppressBlankEmpty=false',
-              'core.quotePath=true', 'diff.external=', 'core.autocrlf=false', 'core.safecrlf=false')
+              'core.quotePath=true', 'diff.external=', 'core.autocrlf=false', 'core.safecrlf=false',
+              'core.attributesFile=/dev/null')
 SECURITY = re.compile(
     r'\b(subprocess|shell=True|os\.system|eval|exec|chmod|chown|sudo|rm\s+-rf|curl|wget|'
     r'socket|token|secret|password|credential|api[_-]?key|permission|allow|deny|sandbox|guard)\b|--force',
     re.I)
 _COMMON = None
+_HISTORY_REPOS = {}
 
 
 def load_common():
@@ -44,17 +49,52 @@ def load_common():
     return _COMMON
 
 
+def _git_env():
+    env = {key: value for key, value in os.environ.items()
+           if key not in {'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_DIFF_OPTS',
+                          'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'}
+           and not key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))}
+    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', LC_ALL='C',
+               GIT_LITERAL_PATHSPECS='1', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+               GIT_ATTR_NOSYSTEM='1')
+    return env
+
+
+def _history_repo(repo):
+    source = Path(repo).resolve()
+    if source not in _HISTORY_REPOS:
+        # Reject an in-worktree TMPDIR before creating anything there.
+        load_common().assert_out_of_tree(Path(tempfile.gettempdir()) / 'diff-triage-git-probe')
+        directory = Path(tempfile.mkdtemp(prefix='diff-triage-git-'))
+        try:
+            load_common().assert_out_of_tree(directory)
+            env = dict(_git_env(), XDG_CONFIG_HOME=str(directory / 'xdg'))
+            config = [arg for value in GIT_CONFIG for arg in ('-c', value)]
+            result = subprocess.run(
+                ['git', *config, '-c', 'core.hooksPath=/dev/null', 'clone', '--bare',
+                 '--shared', '--quiet', '--template=', str(source), str(directory)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if result.returncode:
+                raise ValueError('read-only history clone failed')
+            (directory / 'xdg').mkdir(mode=0o700)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        atexit.register(shutil.rmtree, directory, ignore_errors=True)
+        _HISTORY_REPOS[source] = directory
+    return _HISTORY_REPOS[source]
+
+
 def git(repo, *args, binary=False):
     allowed = {'rev-parse', 'cat-file', 'diff', 'log', 'merge-base', 'for-each-ref', 'status'}
     if not args or args[0] not in allowed:
         raise ValueError('only read-only git commands are allowed')
     if args[0] == 'status' and not any(a.startswith('--porcelain') for a in args):
         raise ValueError('status requires --porcelain')
-    env = {key: value for key, value in os.environ.items()
-           if key not in {'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_DIFF_OPTS'}
-           and not key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))}
-    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', LC_ALL='C',
-               GIT_LITERAL_PATHSPECS='1', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+    env = _git_env()
+    if args[0] in {'cat-file', 'diff', 'log', 'merge-base'}:
+        repo = _history_repo(repo)
+        env['XDG_CONFIG_HOME'] = str(repo / 'xdg')
     config = [arg for value in GIT_CONFIG for arg in ('-c', value)]
     if args[0] == 'diff':
         args = ('diff', *DIFF_OPTIONS, *args[1:])

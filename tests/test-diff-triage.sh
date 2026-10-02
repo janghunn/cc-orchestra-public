@@ -213,6 +213,45 @@ finally:
     config_file.write_bytes(original_config)
 ok('canonical input bytes ignore hostile global, system, injected and local Git config')
 
+# Start fresh processes so hostile attributes are present even during clone creation.
+ATTR_REPO = TMP / 'attributes-repo'
+ATTR_REPO.mkdir()
+fixture_git('init', repo=ATTR_REPO)
+put(ATTR_REPO / 'example.py', 'value = 1\n')
+attr_base = commit('attribute base', repo=ATTR_REPO)
+put(ATTR_REPO / 'example.py', 'value = 2\n')
+attr_head = commit('attribute head', repo=ATTR_REPO)
+clean_attributes = lib.build_scorer_input(ATTR_REPO, attr_base, attr_head)
+
+
+def check_attributes(env=None):
+    result = passed(subprocess.run(
+        [sys.executable, '-B', '-c',
+         'import sys, triage_lib as lib; sys.stdout.buffer.write(lib.build_scorer_input(*sys.argv[1:]))',
+         str(ATTR_REPO), attr_base, attr_head], env=env, capture_output=True, timeout=90))
+    assert result.stdout == clean_attributes
+    files = lib.input_files(result.stdout)
+    assert files and all(f['patch'] and not f['binary'] for f in files)
+
+
+hostile_attributes = '* -diff\n*.py binary\n'
+attributes_file = TMP / 'hostile-attributes'
+put(attributes_file, hostile_attributes)
+fixture_git('config', 'core.attributesFile', str(attributes_file), repo=ATTR_REPO)
+check_attributes()
+fixture_git('config', '--unset', 'core.attributesFile', repo=ATTR_REPO)
+for attributes_file in (ATTR_REPO / '.git/info/attributes', ATTR_REPO / '.gitattributes'):
+    put(attributes_file, hostile_attributes)
+    check_attributes()
+    attributes_file.unlink()
+xdg = TMP / 'hostile-xdg'
+put(xdg / 'git/attributes', hostile_attributes)
+check_attributes(dict(os.environ, XDG_CONFIG_HOME=str(xdg)))
+attribute_env = dict(os.environ)
+attribute_env.pop('GIT_ATTR_NOSYSTEM', None)
+check_attributes(attribute_env)
+ok('nonempty canonical patches ignore local, info, worktree, XDG and system attributes')
+
 # Additional task snapshots supply citation-only and pure-addition mapping cases.
 # The first task fix changes an existing line; the next fix only appends to a file.
 put(REPO / 'docs/notes.md', '# just a comment\nnew guidance\n')
@@ -254,7 +293,10 @@ INDEX_MTIME = (REPO / '.git/index').stat().st_mtime_ns
 build_args = ['--repo', REPO, '--manifest', MANIFEST, '--root', CORPUS, '--out', OUT]
 built = passed(cli('build_labels.py', *build_args))
 eval_args = ['--repo', REPO, '--manifest', MANIFEST, '--labels-dir', OUT, '--out', OUT, '--s3', 'off']
-first = passed(cli('run_eval.py', *eval_args))
+cli_tmp = TMP / 'cli-temp'
+cli_tmp.mkdir()
+first = passed(cli('run_eval.py', *eval_args, env=dict(os.environ, TMPDIR=str(cli_tmp))))
+assert not list(cli_tmp.glob('diff-triage-git-*')), 'history clones must be removed at CLI exit'
 first_bytes = (OUT / 'results.jsonl').read_bytes()
 second = passed(cli('run_eval.py', *eval_args))
 assert first_bytes == (OUT / 'results.jsonl').read_bytes()
@@ -262,7 +304,7 @@ def stable(text):
     return '\n'.join(line for line in text.splitlines() if not line.startswith(('runtime seconds:', 'peak RSS')))
 assert stable(first.stdout) == stable(second.stdout)
 assert 'S3 skipped: disabled by --s3 off' in first.stdout
-ok('two complete evaluations produce identical results and stable aggregate stdout')
+ok('two complete evaluations produce identical results and stable aggregate stdout; CLI clones cleaned')
 
 LINK = TMP / 'clone-link'
 LINK.symlink_to(ROOT, target_is_directory=True)

@@ -91,8 +91,10 @@ and a sleeping process; they do not establish real local-model accuracy.
 ## Private outputs and read-only guarantees
 
 Dependencies are Python 3's standard library and git. Scripts disable bytecode
-before local imports. Git runs with optional locks disabled and uses read-only
-commands. The corpus, HEAD, refs and worktree are never edited by evaluation.
+before local imports. With optional locks disabled, history reads use one cached
+shared bare clone per source repository in a guarded temporary directory, isolated
+from external attributes and removed at process exit. Fingerprints inspect the real
+repository; evaluation never edits its corpus, HEAD, refs or worktree.
 Before/after fingerprints include corpus hashes, HEAD, refs, and status including
 untracked and ignored paths. A changed fingerprint exits 3 before writing a note.
 The builder reports corpus hashes; the runner reports full fingerprints, elapsed
