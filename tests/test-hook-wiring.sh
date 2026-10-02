@@ -44,12 +44,16 @@ assert_registration PreToolUse Bash orch-worktree-guard.sh 10
 ok 'PreToolUse has a concrete current-path command, matcher, fail-open suffix and timeout'
 assert_registration SubagentStop '(route-)?lead-.*' orch-stop-gate.sh 30
 ok 'SubagentStop has a concrete current-path command, matcher, fail-open suffix and timeout'
+assert_registration SessionStart compact orch-compact-context.sh 10
+ok 'SessionStart has a concrete current-path command, compact matcher, fail-open suffix and timeout'
 cp "$CC_ORCH_SETTINGS" "$TMP/first.json"
 install_hooks
 cmp "$CC_ORCH_SETTINGS" "$TMP/first.json" || fail 'second registration changes settings'
 assert_registration PreToolUse Bash orch-worktree-guard.sh 10
 assert_registration SubagentStop '(route-)?lead-.*' orch-stop-gate.sh 30
 ok 'second run retains exactly one non-empty command per hook and identical bytes'
+assert_registration SessionStart compact orch-compact-context.sh 10
+ok 'second run retains exactly one compaction recovery registration'
 
 python3 - "$CC_ORCH_SETTINGS" "$TMP/unrelated.json" <<'PY'
 import json, sys
@@ -105,6 +109,21 @@ for event, matcher, basename, timeout in [('PreToolUse', 'Bash', 'orch-worktree-
 PY
 ok 'guardrails JSON contains both matching registrations'
 
+python3 - "$ROOT/guardrails.json" <<'PY'
+import json, sys
+import shlex
+settings = json.load(open(sys.argv[1]))
+found = [(entry, hook) for entry in settings['hooks']['SessionStart'] for hook in entry['hooks']
+         if 'orch-compact-context.sh' in hook.get('command', '')]
+assert len(found) == 1, found
+entry, hook = found[0]
+assert entry['matcher'] == 'compact' and hook['type'] == 'command'
+# Identical command strings let Claude Code run the handler once when both guardrails and user settings register it.
+assert hook['command'] == 'bash ' + shlex.quote('/home/janghun/cc-orchestra/hooks/orch-compact-context.sh') + ' || true'
+assert isinstance(hook['timeout'], (int, float)) and hook['timeout'] == 10
+PY
+ok 'guardrails JSON contains the matching compaction recovery registration'
+
 python3 - "$ROOT" <<'PY'
 import json, re, subprocess, sys
 from pathlib import Path
@@ -149,6 +168,8 @@ ok 'existing prompt hook, permissions, runtime installer function and hybrid lin
 
 [ -x "$ROOT/hooks/orch-worktree-guard.sh" ] && [ -x "$ROOT/hooks/orch-stop-gate.sh" ] || fail 'hook executable bits missing'
 ok 'both hooks exist and are executable'
+[ -x "$ROOT/hooks/orch-compact-context.sh" ] || fail 'compaction hook executable bit missing'
+ok 'compaction hook exists and is executable'
 python3 - "$HOME" <<'PY'
 from pathlib import Path
 import sys
@@ -156,5 +177,31 @@ files = sorted(str(path.relative_to(sys.argv[1])) for path in Path(sys.argv[1]).
 assert files == ['.claude', '.claude/settings.json'], files
 PY
 ok 'safety-only mode creates no links, agents, service files or other HOME state'
+
+CHECK_HOME="$TMP/checkhome"
+FAKEBIN="$TMP/fakebin"
+mkdir -p "$CHECK_HOME" "$FAKEBIN"
+for provider in claude codex; do
+  cat > "$FAKEBIN/$provider" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$FAKEBIN/$provider"
+done
+before="$(HOME="$CHECK_HOME" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$TMP/checkstate" CC_ORCH_SETTINGS="$CHECK_HOME/.claude/settings.json" bash "$ROOT/install.sh" --check || true)"
+[[ "$before" == *'MISSING  orch-compact-context.sh in settings.json'* ]] || fail 'check misses absent compaction hook'
+ok '--check reports the absent compaction hook in an isolated HOME'
+HOME="$CHECK_HOME" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$TMP/checkstate" CC_ORCH_SETTINGS="$CHECK_HOME/.claude/settings.json" bash "$ROOT/install.sh" --safety-hooks-only
+python3 - "$CHECK_HOME/.claude/settings.json" "$ROOT" <<'PY'
+import json, shlex, sys
+settings = json.load(open(sys.argv[1]))
+commands = [hook['command'] for entry in settings['hooks']['SessionStart'] for hook in entry['hooks']
+            if 'orch-compact-context.sh' in hook.get('command', '')]
+assert commands == ['bash ' + shlex.quote(sys.argv[2] + '/hooks/orch-compact-context.sh') + ' || true'], commands
+PY
+ok 'installed compaction command uses the same shlex quoting as guardrails'
+after="$(HOME="$CHECK_HOME" PATH="$FAKEBIN:$PATH" CC_ORCH_STATE_DIR="$TMP/checkstate" CC_ORCH_SETTINGS="$CHECK_HOME/.claude/settings.json" bash "$ROOT/install.sh" --check || true)"
+[[ "$after" == *'ok       orch-compact-context.sh in settings.json'* ]] || fail 'check misses installed compaction hook'
+ok '--check reports the installed compaction hook in an isolated HOME'
 
 echo "PASS: $pass hook-wiring cases"

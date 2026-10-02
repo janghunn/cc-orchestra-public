@@ -825,7 +825,7 @@ and the command policy still apply when the hook misses an operation.
 
 ## Runtime safety hooks
 
-Installation registers two independent hooks in user settings and in the session guardrails.
+Installation registers independent hooks in user settings and in the session guardrails.
 `bash install.sh --safety-hooks-only` merges just these registrations, without installing links,
 changing executable bits, or contacting systemd. It honors `CC_ORCH_SETTINGS` (default:
 `$HOME/.claude/settings.json`), preserves unrelated entries, and updates an existing hook command
@@ -940,6 +940,28 @@ repository. `PreToolUse` subagent identity was measured; stop-event identity/tra
 still needs a live-session check. Inspect the journal after a known gate claim: a missing record
 may mean an unsupported payload, a hook that did not fire, or an off-switch. `systemMessage`
 display on `SubagentStop` is also unconfirmed; stderr and the journal preserve warnings.
+
+### Compaction recovery hook
+
+`hooks/orch-compact-context.sh` runs on `SessionStart` with matcher `compact`, registered in
+`guardrails.json` and user settings (also by `--safety-hooks-only`), with timeout 10 and `|| true`.
+Guardrails and the installer write the identical unquoted command for the default `/home/janghun/cc-orchestra` path.
+Locally on 2.1.287, an identical command registered in two settings files ran once, while differently quoted
+variants ran twice, so installations at another path must keep the guardrails string identical to the installed one.
+It requires `CC_ORCH_PROJECT`, skips subagent payloads, and is disabled by `$state_dir/compact-context.off`
+(`state_dir=${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}`). It reads local files only and fails open.
+The labelled data contains registry rows with full agentIds, the slot board, optional `DIRECTIVES.md`, and fixed notes.
+Open versus terminal rows follow the reload rule: `PASS`, `FAIL`, `BLOCKED`, `ACCEPTED`, `CLOSED`, `IDLE`,
+or `UNASSIGNED` followed by `[^A-Za-z0-9_-]` or end of string are terminal; an empty status is open.
+The entire JSON stdout is capped at 6144 UTF-8 bytes: drop oldest terminal rows first, then directive
+lines from the end, then oldest open rows; keep the board. Directive lines over 1000 characters are omitted whole.
+Live routing is excluded because computing it can start a usage refresh; the next prompt restores it.
+[Hook documentation](https://code.claude.com/docs/en/hooks) documents `SessionStart` matcher `compact`
+and `additionalContext`. On 2.1.287, a headless manual `/compact` locally showed
+PreCompact → SessionStart(compact) → PostCompact, with recovered context after the compact boundary.
+Automatic compaction remains unverified live. Running sessions need `cc-orch --reload <project>` or a
+relaunch to pick up the hook because guardrails are read at startup. Install with `./install.sh`,
+then run `./install.sh --check` to verify the installed runtime.
 
 ## Archive (orch-archive)
 

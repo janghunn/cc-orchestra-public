@@ -858,7 +858,7 @@ verdict 파일만 쓰라는 지시와 명령 정책은 그대로 적용됩니다
 
 ## 런타임 안전 hook
 
-설치 시 독립적인 안전 hook 두 개를 user settings와 session guardrails에 등록합니다.
+설치 시 독립 hook들을 user settings와 session guardrails에 등록합니다.
 `bash install.sh --safety-hooks-only`는 이 등록만 병합하며 symlink 설치, 실행 권한 변경,
 systemd 호출은 수행하지 않습니다. `CC_ORCH_SETTINGS`로 settings 경로를 지정할 수 있으며,
 기본값은 `$HOME/.claude/settings.json`입니다. 기존의 관련 없는 항목을 보존하고 checkout
@@ -989,6 +989,28 @@ transcript 전달은 실제 세션에서 확인해야 합니다. Gate claim 이�
 확인하십시오. 기록이 없으면 지원되지 않는 payload, hook 미호출, off-switch 등을 확인해야
 합니다. `SubagentStop`에서 `systemMessage`가 표시되는지도 미확인 상태이므로 stderr와
 journal에도 경고를 보존합니다.
+
+### 컴팩션 복구 hook
+
+`hooks/orch-compact-context.sh`는 `SessionStart`의 `compact` matcher로 실행되며,
+`guardrails.json`과 user settings에 등록됩니다(`--safety-hooks-only`도 포함). Timeout은 10초이고 `|| true`를 유지합니다.
+기본 `/home/janghun/cc-orchestra` 경로에서는 guardrails와 installer가 따옴표 없는 동일한 command 문자열을 기록합니다.
+2.1.287 로컬 실험에서 두 settings 파일에 등록한 동일 command는 한 번, 따옴표가 다른 변형은 두 번 실행되었으므로,
+다른 경로에 설치할 때도 guardrails 문자열을 설치된 문자열과 동일하게 유지해야 합니다.
+`CC_ORCH_PROJECT`가 있어야 하며 subagent payload는 건너뜁니다. `$state_dir/compact-context.off`로 끕니다.
+`state_dir=${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}`이며 로컬 파일만 읽고 오류 시 조용히 허용합니다.
+라벨이 붙은 데이터에는 전체 agentId를 가진 registry 행, slot board, 선택적인 `DIRECTIVES.md`, 고정 안내가 들어갑니다.
+Open/terminal 구분은 reload 규칙을 따릅니다. `PASS`, `FAIL`, `BLOCKED`, `ACCEPTED`, `CLOSED`, `IDLE`,
+`UNASSIGNED` 뒤가 `[^A-Za-z0-9_-]` 또는 문자열 끝이면 terminal이며 빈 상태는 open입니다.
+JSON stdout 전체를 UTF-8 6144바이트로 제한합니다. 오래된 terminal 행, 파일 끝의 directive 행,
+오래된 open 행 순서로 통째로 제외하며 board는 유지합니다. 1000자를 넘는 directive 행도 통째로 제외합니다.
+Live routing 계산은 usage refresh를 시작할 수 있어 제외하며 다음 prompt에서 다시 제공됩니다.
+[Hook 문서](https://code.claude.com/docs/en/hooks)는 `SessionStart`의 `compact` matcher와
+`additionalContext`를 명시합니다. 2.1.287 headless 수동 `/compact` 실험에서
+PreCompact → SessionStart(compact) → PostCompact 순서와 compact boundary 뒤의 복구 context를 관찰했습니다.
+자동 compaction은 live 검증하지 않았습니다. Guardrails는 시작 시 읽으므로 실행 중인 세션은
+`cc-orch --reload <project>` 또는 재실행이 필요합니다. `./install.sh`로 설치한 뒤
+`./install.sh --check`로 설치된 runtime을 확인하십시오.
 
 ## 아카이브 (orch-archive)
 
