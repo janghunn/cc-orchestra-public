@@ -20,8 +20,11 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import subprocess
 import sys
+import time
 import uuid
 from unittest.mock import patch
 
@@ -150,7 +153,8 @@ mini_base = fixture_git('rev-parse', 'HEAD', repo=MINI)
 put(MINI / 'a.txt', 'hello\n')
 mini_head = commit('add greeting', repo=MINI)
 EXPECTED = (b'{"files":[{"added":1,"binary":false,"old_path":null,"patch":"diff --git a/a.txt b/a.txt\\n'
- b'new file mode 100644\\nindex 0000000..ce01362\\n--- /dev/null\\n+++ b/a.txt\\n@@ -0,0 +1 @@\\n+hello\\n",'
+ b'new file mode 100644\\nindex 0000000000000000000000000000000000000000..ce013625030ba8dba906f756967f9e9ca394464a\\n'
+ b'--- /dev/null\\n+++ b/a.txt\\n@@ -0,0 +1 @@\\n+hello\\n",'
  b'"path":"a.txt","removed":0,"status":"A"}],"schema":"diff-triage-input/1"}')
 assert lib.build_scorer_input(MINI, mini_base, mini_head) == EXPECTED
 for forbidden in (SENTINEL, 'FINDINGSENTINEL', BASE, HEAD, FIX, mini_base, mini_head):
@@ -169,6 +173,45 @@ assert len(payloads) == 8
 assert all(p['max_tokens'] == 1 and p['top_logprobs'] == 20 and
            p['chat_template_kwargs'] == {'enable_thinking': False} for p in payloads)
 ok('exact scorer-input bytes and no finding, fix or SHA leakage to fake S3')
+
+# Both environment-selected global config and local repository config used to
+# change the canonical patch (and therefore S0's input digest and permutations).
+hostile_config = '''
+[core]
+    abbrev = 12
+    quotePath = false
+    autocrlf = true
+    safecrlf = true
+[diff]
+    algorithm = patience
+    noprefix = true
+    mnemonicPrefix = true
+    context = 7
+    renames = false
+    renameLimit = 1
+    relative = true
+    suppressBlankEmpty = true
+    indentHeuristic = false
+    interHunkContext = 9
+    colorMoved = zebra
+    external = /must-not-execute
+'''
+global_config = TMP / 'hostile.gitconfig'
+put(global_config, hostile_config)
+with patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': str(global_config),
+                             'GIT_CONFIG_SYSTEM': str(global_config),
+                             'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'diff.context',
+                             'GIT_CONFIG_VALUE_0': '12', 'GIT_DIFF_OPTS': '--unified=15'}):
+    assert lib.build_scorer_input(REPO, BASE, HEAD) == DATA
+    assert lib.build_scorer_input(MINI, mini_base, mini_head) == EXPECTED
+config_file = REPO / '.git/config'
+original_config = config_file.read_bytes()
+try:
+    config_file.write_bytes(original_config + hostile_config.encode())
+    assert lib.build_scorer_input(REPO, BASE, HEAD) == DATA
+finally:
+    config_file.write_bytes(original_config)
+ok('canonical input bytes ignore hostile global, system, injected and local Git config')
 
 # Additional task snapshots supply citation-only and pure-addition mapping cases.
 # The first task fix changes an existing line; the next fix only appends to a file.
@@ -261,7 +304,33 @@ assert 'JEV_LOCAL_GPU="7"' in spec['policy_text']
 assert f'JEV_LOCAL_SOCKET="{spec["socket"]}"' in spec['policy_text']
 assert spec['env']['CC_ORCH_JEV_POLICY'] == str(spec['policy_path'])
 assert spec['argv'] == [str(ROOT / 'bin/orch-jev-local'), 'serve']
-assert not spec['policy_path'].exists()  # launch_spec is pure.
+assert not spec['policy_path'].exists()  # Building a launch spec creates no files.
+other_spec = s3_local.launch_spec('7', TMP / 'server')
+assert spec['socket'] != other_spec['socket'] and spec['policy_path'] != other_spec['policy_path']
+assert spec['socket'].parent == other_spec['socket'].parent == TMP / 'server'
+assert len(os.fsencode(spec['socket'])) <= 95
+assert re.fullmatch(r'llama-\d+-[0-9a-f]{12}\.sock', spec['socket'].name)
+assert re.fullmatch(r'local-policy-\d+-[0-9a-f]{12}\.conf', spec['policy_path'].name)
+try:
+    s3_local.launch_spec('7', TMP / ('long-output-' + 'x' * 100))
+except ValueError as error:
+    assert 'shorter output directory' in str(error)
+else:
+    raise AssertionError('overlong socket path accepted')
+with patch.dict(sys.modules, {'ctypes': None}):
+    assert s3_local.parent_death_setup() is None
+# Another run's live or stale paths neither block availability nor get removed.
+put(other_spec['socket'], 'other socket sentinel')
+put(other_spec['policy_path'], 'other policy sentinel')
+put(spec['socket'].parent / 'llama.sock', 'legacy socket sentinel')
+values, original_policy = s3_local.policy()
+fake_model = TMP / 'model.gguf'
+put(fake_model, 'test model')
+with patch.object(s3_local, 'policy', return_value=({**values, 'JEV_LOCAL_MODEL_PATH': str(fake_model)}, original_policy)), \
+     patch.object(s3_local.shutil, 'which', return_value='/fake/llama-server'), \
+     patch.object(s3_local.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '7, 12288\n')):
+    assert s3_local.availability(spec['socket'].parent) == (True, [])
+previous_handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
 # Fake sleeping foreground server; mock socket readiness without creating any socket.
 spec['argv'] = [sys.executable, '-c', 'import time; time.sleep(300)']
 with patch.object(s3_local.stat, 'S_ISSOCK', return_value=True), \
@@ -278,6 +347,27 @@ except ProcessLookupError:
 else:
     raise AssertionError('fake server left running')
 assert not spec['policy_path'].exists()
+assert {s: signal.getsignal(s) for s in previous_handlers} == previous_handlers
+assert other_spec['socket'].read_text() == 'other socket sentinel'
+assert other_spec['policy_path'].read_text() == 'other policy sentinel'
+assert (spec['socket'].parent / 'llama.sock').read_text() == 'legacy socket sentinel'
+# A colliding policy path is refused without replacing or deleting its contents.
+try:
+    with s3_local.server(other_spec):
+        raise AssertionError('colliding run paths accepted')
+except ValueError:
+    pass
+assert other_spec['policy_path'].read_text() == 'other policy sentinel'
+# Policy-only collisions are also refused, before creating a process.
+policy_collision = s3_local.launch_spec('7', TMP / 'server')
+put(policy_collision['policy_path'], 'existing policy sentinel')
+try:
+    with s3_local.server(policy_collision):
+        raise AssertionError('existing policy was overwritten')
+except ValueError:
+    pass
+assert policy_collision['policy_path'].read_text() == 'existing policy sentinel'
+assert not policy_collision['socket'].exists()
 # Startup failure must also terminate and reap the process.
 with patch.object(s3_local.subprocess, 'Popen', wraps=subprocess.Popen) as spawned:
     try:
@@ -286,12 +376,110 @@ with patch.object(s3_local.subprocess, 'Popen', wraps=subprocess.Popen) as spawn
     except TimeoutError:
         pass
 assert not spec['policy_path'].exists()
+assert {s: signal.getsignal(s) for s in previous_handlers} == previous_handlers
 auto = passed(cli('run_eval.py', *eval_args, '--s3', 'auto'))
 assert 'S3 skipped:' in auto.stdout and 'S3 mean metrics' not in auto.stdout
 assert next(l for l in auto.stdout.splitlines() if l.startswith('verdict:')) == next(
     l for l in first.stdout.splitlines() if l.startswith('verdict:'))
 print('S3 real local-model path: SKIPPED (fake transport only in tests)', flush=True)
 ok('fake S3 probabilities, policy overrides, PID lifecycle and automatic skip')
+
+# Exercise actual OS signals across evaluator/server process boundaries. The
+# evaluator only fakes socket readiness; it owns a real sleeping server process.
+evaluator_program = r'''
+import sys
+sys.dont_write_bytecode = True
+import json, os, time
+from pathlib import Path
+from unittest.mock import patch
+import s3_local
+out = Path(sys.argv[1])
+out.mkdir(parents=True)
+spec = s3_local.launch_spec('7', out)
+spec['argv'] = [sys.executable, '-c', 'import time; time.sleep(300)']
+with patch.object(s3_local.stat, 'S_ISSOCK', return_value=True), \
+     patch.object(Path, 'lstat', return_value=os.stat(out)):
+    with s3_local.server(spec) as server:
+        print(json.dumps({'pid': server.pid, 'policy': str(spec['policy_path'])}), flush=True)
+        while True:
+            time.sleep(60)
+'''
+
+
+def pid_exists(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def wait_server_gone(pid):
+    deadline = time.monotonic() + 10
+    while True:
+        # When testing SIGKILL, the harness adopts and reaps the orphan, like
+        # a functioning init. An unreaped zombie must not masquerade as alive.
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        if not pid_exists(pid):
+            return
+        assert time.monotonic() < deadline, 'owned server survived evaluator termination'
+        time.sleep(.05)
+
+
+def evaluator_signal_test(signum):
+    out = TMP / ('sig-' + str(signum))
+    child = subprocess.Popen([sys.executable, '-c', evaluator_program, str(out)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    server_pid = None
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            assert selector.select(timeout=10), 'evaluator did not report its server PID'
+        line = child.stdout.readline()
+        if not line:
+            raise AssertionError(child.communicate(timeout=10))
+        info = json.loads(line)
+        server_pid = info['pid']
+        assert pid_exists(server_pid) and Path(info['policy']).is_file()
+        child.send_signal(signum)
+        child.wait(timeout=10)
+        assert child.returncode == (-signal.SIGKILL if signum == signal.SIGKILL else 128 + signum)
+        wait_server_gone(server_pid)
+        if signum != signal.SIGKILL:
+            assert not Path(info['policy']).exists(), 'termination left the owned policy behind'
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+        if server_pid is not None and pid_exists(server_pid):
+            os.kill(server_pid, signal.SIGKILL)
+            wait_server_gone(server_pid)
+        child.stdout.close()
+        child.stderr.close()
+
+
+for termination_signal in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    evaluator_signal_test(termination_signal)
+ok('SIGTERM, SIGHUP and SIGINT reap the owned server and remove its policy')
+
+if sys.platform.startswith('linux'):
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+    previous_subreaper = ctypes.c_int()
+    assert libc.prctl(37, ctypes.addressof(previous_subreaper), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
+    assert libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    try:
+        evaluator_signal_test(signal.SIGKILL)
+    finally:
+        assert libc.prctl(36, previous_subreaper.value, 0, 0, 0) == 0
+    ok('Linux PDEATHSIG terminates the server when its evaluator is killed with SIGKILL')
+else:
+    print('S3 SIGKILL parent-death test: SKIPPED (Linux only)', flush=True)
 
 reference = [0., 1., .25, .75, 0., .5, 1., .25, .75, 1., .5, 0.]
 candidate = [v + .25 for v in reference]

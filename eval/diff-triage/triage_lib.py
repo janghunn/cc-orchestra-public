@@ -21,7 +21,12 @@ SEED = 20260921
 REPLICATES = 2000
 MANIFEST_FIELDS = ['case', 'task', 'base', 'head', 'head_round', 'fix', 'status', 'evidence']
 DIFF_OPTIONS = ('--no-color', '--no-ext-diff', '--no-textconv', '-M',
-                '--src-prefix=a/', '--dst-prefix=b/', '--no-relative')
+                '--src-prefix=a/', '--dst-prefix=b/', '--no-relative',
+                '--full-index', '--diff-algorithm=myers', '--indent-heuristic',
+                '--inter-hunk-context=0', '--no-color-moved')
+GIT_CONFIG = ('diff.noprefix=false', 'diff.mnemonicPrefix=false', 'diff.relative=false',
+              'diff.renames=true', 'diff.renameLimit=1000', 'diff.suppressBlankEmpty=false',
+              'core.quotePath=true', 'diff.external=', 'core.autocrlf=false', 'core.safecrlf=false')
 SECURITY = re.compile(
     r'\b(subprocess|shell=True|os\.system|eval|exec|chmod|chown|sudo|rm\s+-rf|curl|wget|'
     r'socket|token|secret|password|credential|api[_-]?key|permission|allow|deny|sandbox|guard)\b|--force',
@@ -45,9 +50,15 @@ def git(repo, *args, binary=False):
         raise ValueError('only read-only git commands are allowed')
     if args[0] == 'status' and not any(a.startswith('--porcelain') for a in args):
         raise ValueError('status requires --porcelain')
-    env = dict(os.environ, GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', LC_ALL='C',
-               GIT_LITERAL_PATHSPECS='1')
-    result = subprocess.run(['git', '-C', str(repo), *map(str, args)], env=env,
+    env = {key: value for key, value in os.environ.items()
+           if key not in {'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_DIFF_OPTS'}
+           and not key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))}
+    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', LC_ALL='C',
+               GIT_LITERAL_PATHSPECS='1', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+    config = [arg for value in GIT_CONFIG for arg in ('-c', value)]
+    if args[0] == 'diff':
+        args = ('diff', *DIFF_OPTIONS, *args[1:])
+    result = subprocess.run(['git', '-C', str(repo), *config, *map(str, args)], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode:
         # Do not copy corpus paths or content from Git's diagnostics into aggregate logs.
@@ -66,14 +77,14 @@ def sha256(path):
 def build_scorer_input(repo, base, head):
     """No labels, fix identifiers, reports, or history beyond base/head enter here."""
     statuses = {}
-    tokens = iter(git(repo, 'diff', *DIFF_OPTIONS, '--name-status', '-z', base, head,
+    tokens = iter(git(repo, 'diff', '--name-status', '-z', base, head,
                       binary=True).split(b'\0')[:-1])
     for token in tokens:
         status = token.decode('ascii')
         old = next(tokens).decode('utf-8')
         path = next(tokens).decode('utf-8') if status.startswith('R') else old
         statuses[path] = (status, old if status.startswith('R') else None)
-    tokens = iter(git(repo, 'diff', *DIFF_OPTIONS, '--numstat', '-z', base, head,
+    tokens = iter(git(repo, 'diff', '--numstat', '-z', base, head,
                       binary=True).split(b'\0')[:-1])
     files = []
     for token in tokens:
@@ -85,7 +96,7 @@ def build_scorer_input(repo, base, head):
         status, old = statuses[path]
         binary = added == b'-' or removed == b'-'
         paths = [old, path] if old else [path]
-        patch = '' if binary else git(repo, 'diff', *DIFF_OPTIONS, '-U3', base, head,
+        patch = '' if binary else git(repo, 'diff', '-U3', base, head,
                                        '--', *paths, binary=True).decode('utf-8', errors='replace')
         files.append(dict(path=path, old_path=old, status=status,
                           added=0 if binary else int(added), removed=0 if binary else int(removed),
