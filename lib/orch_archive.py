@@ -41,6 +41,9 @@ OVERRIDES = {"VAULT_DIR": "VAULT", "RAW_DIR": "RAW", "ALLOWLIST_FILE": "ALLOWLIS
              "STATE_DIRS": "STATE_DIRS", "CLAUDE_PROJECTS_DIR": "CLAUDE_PROJECTS",
              "CODEX_HOME_DIR": "CODEX_HOME", "EXTRA_BASES": "EXTRA_BASES"}
 UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+SNAPSHOT_DIR = r"artifacts/(?:tasks/[^/]+/[0-9a-f]{12}|roots/[^/]+/[0-9a-f]{12})"
+MANIFEST_PATH = SNAPSHOT_DIR + r"/MANIFEST\.json"
+COPIED_ARTIFACT_PATH = SNAPSHOT_DIR + r"/files/.+"
 _WRITE_BASES = set()
 
 
@@ -1101,7 +1104,7 @@ class Archive:
             body.write(json_bytes(self.guard.tree(entry, owner, "entries"), compact=True).rstrip(b"\n"))
         snapshot = identity.hexdigest()[:12]
         for rel, data in artifacts.items():
-            self.files[f"{prefix}/{snapshot}/{rel}"] = data
+            self.files[f"{prefix}/{snapshot}/files/{rel}"] = data
         summary = {"files": file_count, "bytes": total, "counts": dict(counts),
                    "body": body.getvalue(), "archived": archived}
         return snapshot, summary, texts
@@ -1228,11 +1231,11 @@ class Archive:
         self.catalog["projects"].setdefault(project, {"id": project, "roots": [], "registry_rows": [], "raw": []})
         return "projects", project
 
-    def add_raw(self, owner, pointers):
+    def add_raw(self, owner, source, pointers):
         kind, identifier = owner
         record = self.catalog[kind][identifier]
-        sources = {p["source"] for p in pointers}
-        record["raw"] = [p for p in record.get("raw", []) if p["source"] not in sources] + pointers
+        source = self.guard.value(str(source.resolve()), "raw", "source", "path")
+        record["raw"] = [p for p in record.get("raw", []) if p["source"] != source] + pointers
         record["raw"].sort(key=lambda p: (p["source"], p["generation"], p["offset"]))
 
     def claude_transcripts(self):
@@ -1245,12 +1248,20 @@ class Archive:
             directory = Path(entry.path)
             candidates = []
             for child in entries(directory):
-                if child.is_file(follow_symlinks=False) and child.name.endswith(".jsonl"):
+                if child.is_symlink():
+                    self.skipped.append({"path": child.path, "reason": "symlink"})
+                elif child.is_file(follow_symlinks=False) and child.name.endswith(".jsonl"):
                     candidates.append(Path(child.path))
                 elif child.is_dir(follow_symlinks=False):
-                    for sub in entries(Path(child.path) / "subagents"):
-                        if sub.is_file(follow_symlinks=False) and (sub.name.endswith(".jsonl") or sub.name.endswith(".meta.json")):
-                            candidates.append(Path(sub.path))
+                    for agents in entries(child.path):
+                        if agents.name != "subagents":
+                            continue
+                        if agents.is_symlink():
+                            self.skipped.append({"path": agents.path, "reason": "symlink"})
+                        elif agents.is_dir(follow_symlinks=False):
+                            for sub in entries(agents.path):
+                                if sub.is_file(follow_symlinks=False) and (sub.name.endswith(".jsonl") or sub.name.endswith(".meta.json")):
+                                    candidates.append(Path(sub.path))
             matched = next((base for base in bases if entry.name == encoded(base) or
                             (base != home and entry.name.startswith(encoded(base) + "--orchestra-"))), None)
             if matched is None:
@@ -1280,7 +1291,7 @@ class Archive:
             owner = self.owner_for_base(matched)
             for path in sorted(candidates):
                 pointers = self.raw.archive(path, "transcripts")
-                self.add_raw(owner, pointers)
+                self.add_raw(owner, path, pointers)
                 size = sum(p["length"] for p in pointers)
                 self.transcripts["files"] += 1
                 self.transcripts["bytes"] += size
@@ -1301,7 +1312,7 @@ class Archive:
             for path in sorted(matches):
                 pointers = self.raw.archive(path, "rollouts")
                 for owner in sorted(owners):
-                    self.add_raw(owner, pointers)
+                    self.add_raw(owner, path, pointers)
                 size = sum(p["length"] for p in pointers)
                 self.rollouts["files"] += 1
                 self.rollouts["bytes"] += size
@@ -1531,9 +1542,9 @@ class Archive:
                 size = len(data) if data is not None else (self.p["VAULT_DIR"] / path).stat().st_size if (self.p["VAULT_DIR"] / path).is_file() else 0
                 if path == "_meta/catalog.json":
                     kind = "catalog"
-                elif re.fullmatch(r"artifacts/(?:tasks/[^/]+/[0-9a-f]{12}|roots/[^/]+/[0-9a-f]{12})/MANIFEST\.json", path):
+                elif re.fullmatch(MANIFEST_PATH, path):
                     kind = "manifests"
-                elif path.startswith("artifacts/") and not path.endswith("/raw.json"):
+                elif re.fullmatch(COPIED_ARTIFACT_PATH, path):
                     kind = "artifacts"
                 elif path.endswith(".md"):
                     kind = "notes"
@@ -1717,7 +1728,7 @@ def verify(policy):
                 for pointer in pointer_values(fields):
                     check_pointer(pointer, rel)
             elif rel in {"_meta/catalog.json", ".obsidian/graph.json"} or rel.startswith("dashboards/") and rel.endswith(".base") or re.fullmatch(
-                    r"artifacts/(?:tasks/[^/]+/[0-9a-f]{12}|roots/[^/]+/[0-9a-f]{12})/MANIFEST\.json|artifacts/(?:tasks|sessions|projects)/[^/]+/raw\.json", rel):
+                    MANIFEST_PATH + r"|artifacts/(?:tasks|sessions|projects)/[^/]+/raw\.json", rel):
                 value = json.loads(text)
                 for pointer in pointer_values(value):
                     check_pointer(pointer, rel)

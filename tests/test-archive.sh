@@ -136,6 +136,9 @@ put(t2 / 'summary.md', (t2 / 'summary.md').read_text() + 'GATES: [[ -f x ]]\n')
 put(t1 / 'secret.md', f'{token}\n')
 put(t1 / 'secret-[[historical-name]].md', f'{token}\n')
 put(t1 / 'invalid-history.json', 'Verbatim historical text, not JSON.\n')
+for artifact_base in (t1, p1 / '.orchestra'):
+    put(artifact_base / 'MANIFEST.json', 'Source MANIFEST.json is verbatim text.\n')
+    put(artifact_base / 'raw.json', 'Source raw.json is verbatim text.\n')
 put(t1 / f'{token}.md', 'A safe body with a secret-shaped filename.\n')
 put(t1 / 'payload.png', b'P' * 64)
 put(t1 / 'tiny.png', b'P')
@@ -155,6 +158,15 @@ transcript = claude_project / 'main.jsonl'
 put(transcript, json.dumps({'cwd': str(p1), 'message': 'original'}) + '\n')
 put(claude_project / 'main/subagents/agent-a.jsonl', '{}\n')
 put(claude_project / 'main/subagents/agent-a.meta.json', '{}\n')
+outside_agents = home / 'outside-agents'
+put(outside_agents / 'outside.jsonl', '{"message":"outside subagents sentinel"}\n')
+linked_agents = claude_project / 'linked-session/subagents'
+linked_agents.parent.mkdir()
+linked_agents.symlink_to(outside_agents, target_is_directory=True)
+outside_session = home / 'outside-session'
+put(outside_session / 'subagents/outside.jsonl', '{"message":"outside session sentinel"}\n')
+linked_session = claude_project / 'session-link'
+linked_session.symlink_to(outside_session, target_is_directory=True)
 put(home / 'claude-projects/unlinked/not-ours.jsonl', '{"cwd":"/not/cc-orch"}\n')
 put(home / 'claude-projects/cwd-linked/a-no-cwd.jsonl', '{}\n')
 put(home / 'claude-projects/cwd-linked/b-with-cwd.jsonl', json.dumps({'cwd': str(p1)}) + '\n')
@@ -176,6 +188,25 @@ report = json.loads(run('--json'))
 ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 10,
    'default plan writes nothing and discovers nested, empty and Codex-only tasks')
 first = run('apply')
+collision_task = catalog()['tasks']['demo--05-dup']
+collision_sid = next(loc['snapshot'] for loc in collision_task['locations'].values() if loc['path'] == str(t1))
+collision_dir = vault / f'artifacts/tasks/demo--05-dup/{collision_sid}'
+root_dir = vault / f'artifacts/roots/demo/{archive.sha(str(p1 / ".orchestra").encode())[:12]}'
+assert json.loads((collision_dir / 'MANIFEST.json').read_text())['snapshot'] == collision_sid
+assert json.loads((root_dir / 'MANIFEST.json').read_text())['root'] == str(p1 / '.orchestra')
+ok(all((destination / 'files' / name).read_bytes() == (source / name).read_bytes()
+       for destination, source in ((collision_dir, t1), (root_dir, p1 / '.orchestra'))
+       for name in ('MANIFEST.json', 'raw.json')) and 'verify: OK' in run('verify')
+   and report['vault_bytes_breakdown']['artifacts'] == sum(p.stat().st_size for p in vault.rglob('*')
+       if p.is_file() and re.fullmatch(archive.COPIED_ARTIFACT_PATH, str(p.relative_to(vault)))),
+   'task and root MANIFEST.json/raw.json copies live under files, preserving generated metadata and byte accounting')
+ok(all(any(item['path'] == str(link) and item['reason'] == 'symlink' for item in report['skipped'])
+       for link in (linked_agents, linked_session))
+   and not any(pointer['source'].startswith(str(target)) for pointer in catalog()['sessions']['alpha']['raw']
+       for target in (outside_agents, outside_session))
+   and not any((raw / f'blobs/{archive.sha(path.read_bytes())[:2]}/{archive.sha(path.read_bytes())}.gz').exists()
+       for path in (outside_agents / 'outside.jsonl', outside_session / 'subagents/outside.jsonl')),
+   'symlinked subagents and session directories are reported and never archived')
 generated_bytes = sum(p.stat().st_size for p in vault.rglob('*') if p.is_file() and '.git' not in p.relative_to(vault).parts)
 ok(source_hashes() == sources_before and 'commit:' in first and report['vault_bytes'] == generated_bytes
    and sum(report['vault_bytes_breakdown'].values()) == generated_bytes,
@@ -259,7 +290,7 @@ finally:
     first_spool['gzip'].close()
     second_spool['gzip'].close()
 overlapping_snapshot = next(iter(overlapping['snapshots']))
-overlapping_artifacts = vault / f'artifacts/tasks/demo--01-task/{overlapping_snapshot}'
+overlapping_artifacts = vault / f'artifacts/tasks/demo--01-task/{overlapping_snapshot}/files'
 ok(overlapping_fields['status'] == 'pass' and all((overlapping_artifacts / name).read_bytes() ==
    (overlapping_task / name).read_bytes() for name in ('brief.md', 'plan.md', 'summary.md')),
    'numeric overlapping roots are containers; nested walks exclude them and stripped captures are refreshed')
@@ -457,6 +488,24 @@ ok(pressure_report['transcripts']['unlinked_projects'] == report['transcripts'][
        for item in pressure_report['skipped']),
    '200 unlinked transcripts under a 64-fd limit are reported without descriptor exhaustion')
 shutil.rmtree(pressure_project)
+
+truncation_projects = home / 'truncation-projects'
+truncated = truncation_projects / claude_project.name / 'truncated.jsonl'
+put(truncated, '{"message":"before truncation"}\n')
+truncation_env = dict(os.environ, ORCH_ARCHIVE_CLAUDE_PROJECTS=str(truncation_projects))
+run('apply', '--no-commit', env=truncation_env)
+assert any(p['source'] == str(truncated) for p in catalog()['sessions']['alpha']['raw'])
+put(truncated, b'')
+run('apply', '--no-commit', env=truncation_env)
+truncation_report = json.loads(run('--json', env=truncation_env))
+session_index = json.loads((vault / 'artifacts/sessions/alpha/raw.json').read_text())
+ok(not any(p['source'] == str(truncated) for p in session_index)
+   and generation(truncated)['size_seen'] == 0 and reconstruct(generation(truncated)) == b''
+   and truncation_report['transcripts']['files'] == 1 and truncation_report['transcripts']['bytes'] == 0
+   and 'verify: OK' in run('verify'),
+   'zero-byte recapture replaces old source pointers and reports zero transcript bytes')
+shutil.rmtree(truncation_projects)
+run('apply', '--no-commit')
 
 for path in (vault / '.obsidian/graph.json', *vault.glob('dashboards/*.base')):
     json.loads(path.read_text())
