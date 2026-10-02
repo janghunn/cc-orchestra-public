@@ -1141,9 +1141,42 @@ artifact 복사를 생략하고, 원본 raw 내용은 raw 저장소에 유지한
 기존 catalog·노트·JSON의 포인터가 고정한 공유 페이지를 바꾸는 import는 거부하며, 로컬 정책이 secret-shaped로 판단한 artifact 경로는 보류한다.
 `--dry-run --json`은
 디렉터리·잠금·파일을 만들지 않고 추가 항목과 충돌을 보고한다. `--top N`은 보고서의
-표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다. 변경 없는 재실행은 내용과
-commit을 추가하지 않는다. 호스트를 가져오는 순서가 달라도 vault/raw 바이트는 같다.
+표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다. 이미 가져온 호스트에 대한
+일반 import는 원본이 그대로여도 `refresh-required`로 거부한다. 먼저 `--refresh --dry-run`으로
+변경 목록을 확인한다. 변경 없는 refresh는 내용과 commit을 추가하지 않는다.
+호스트를 가져오는 순서가 달라도 vault/raw 바이트는 같다.
 이후 로컬 `apply`도 가져온 레코드를 동결 상태로 보존한다.
+
+이미 가져온 호스트를 갱신할 때는 목록을 검토한 뒤 `--dry-run`을 빼고 다시 실행한다.
+
+```bash
+orch-archive import --host render --refresh --dry-run \
+  --source-vault /path/to/render-vault --source-raw /path/to/render-raw
+orch-archive import --host render --refresh \
+  --source-vault /path/to/render-vault --source-raw /path/to/render-raw
+```
+
+refresh는 해당 호스트의 레코드, catalog에 등록된 호스트 namespace 파일과
+`raw/sources/<host>/` 이력만 교체할 수 있다. 미등록 기존 파일은 보호하며 공유 페이지는
+상위 집합·기존 포인터 검사를 그대로 적용한다. 목적지의 모든 상위 경로는 실제 디렉터리여야
+하고 blob 경로를 가진 모든 사전은 유효한 digest, 정규 경로, 실제 바이트와 일치하는 길이를
+가져야 한다. import와 refresh는 아카이브 내용을 쓰기 전에 목록을 출력하며 refresh 목록에는
+추가·변경·거부 항목과 보존할 이전 버전이 포함된다.
+
+기존 레코드 id, 작업 위치, snapshot manifest 포인터, 복사한 artifact 또는 이전 blob이
+빠진 원본은 `shrunk`로 거부한다. import와 refresh는 입력 blob 목록을 raw에 저장하고
+`hosts.<host>.inventory` 포인터로 고정한다. 과거 이력 generation은 유지해야 하며, 이전의
+마지막 generation은 그 바이트가 입력의 같은 순번 generation의 접두사로 남아 있으면 된다.
+inode만 바뀐 재수집은 허용한다. inventory가 없거나 읽을 수 없으면 `catalog`로 거부한다.
+로컬 정책 변경으로 전에 복사한 artifact가 보류 대상이 되면 `policy-withdrawn`으로 거부한다.
+
+호스트 파일·이력·레코드 집합을 교체하기 전에 이전 바이트를 content-addressed raw blob으로
+저장하고 `hosts.<host>.replaced`에 기록한다. `--no-commit`과 `COMMIT=0`에서도 복구할 수 있다.
+이전 노트를 복구하려면 해당 `kind: vault`와 `path` 항목을 찾아
+`gzip -dc "$RAW_DIR/<listed blob>" > recovered-note.md`를 실행한다. 덮어쓰기 전에 전체 목록을
+`raw/hosts/<host>/replaced.json`에도 쓰고 재실행 시 이 journal을 합쳐 중단된 갱신의 복구 포인터를
+유지한다. 변경 없는 refresh는 이전 버전 항목을 추가하지 않는다. commit이 활성화되어 있으면
+`archive: refresh <host> ...` 메시지를 사용한다.
 
 종료 코드: `0` 성공, `4` 구조 오류로 거부(아카이브 내용은 쓰지 않음) 또는 로컬 정책에
 따른 보류(안전한 결과는 저장), `2` 사용법·정책 오류, `3` 잠금 사용 중, `1` 최종 secret
@@ -1153,8 +1186,8 @@ commit을 추가하지 않는다. 호스트를 가져오는 순서가 달라도 
 현재 제한:
 
 - 연쇄 import는 거부한다. 입력은 단일 호스트의 version-1 catalog여야 한다.
-- 같은 호스트는 원본이 그대로일 때만 다시 가져올 수 있다. 기존 파일·레코드를 바꿀
-  변경은 거부한다. 명시적인 refresh 모드가 생기기 전에는 새 호스트 이름을 사용한다.
+- 기존 호스트의 갱신에는 `--refresh`가 필요하며 보관한 데이터가 빠진 원본은 거부한다.
+  아직 가져오지 않은 호스트에 `--refresh`를 쓰면 사용법 오류(종료 코드 `2`)이다.
 - 입력 vault/raw는 노트 링크와 원본 이력을 포함한 `verify`를 통과해야 한다.
 - 원본 검증 통과만으로는 충분하지 않다. 재사용할 로컬 blob의 손상, 생성 결과의 잘못된
   링크·포인터, 로컬 해시 승인이 없는 thumbnail의 secret-shaped 바이트가 있으면 import를 거부한다.

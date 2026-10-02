@@ -1096,8 +1096,42 @@ omitted from copied artifacts, while original raw content remains in the raw sto
 Import refuses shared-page changes pinned by retained catalog, note or JSON pointers, and withholds artifact paths that the local policy flags as secret-shaped.
 `--dry-run --json` reports additions and collisions without creating directories, a lock or
 any files. `--top N` limits report samples; `--no-commit` suppresses the vault commit.
-An unchanged repeat writes no changed content and makes no commit. Host import order does
+Plain import of an already imported host is always refused with `refresh-required`, even
+for unchanged inputs; use `--refresh --dry-run` to review the update first. An unchanged
+refresh writes no changed content and makes no commit. Host import order does
 not change the resulting vault or raw bytes. Later local applies keep imported records frozen.
+
+To update a previously imported host, review the listing, then repeat without `--dry-run`:
+
+```bash
+orch-archive import --host render --refresh --dry-run \
+  --source-vault /path/to/render-vault --source-raw /path/to/render-raw
+orch-archive import --host render --refresh \
+  --source-vault /path/to/render-vault --source-raw /path/to/render-raw
+```
+
+Refresh may replace only that host's records, catalogued files in its namespace and
+`raw/sources/<host>/` histories. Uncatalogued existing files remain protected. Shared pages
+still obey superset and retained-pointer checks. Destination ancestors must be real
+directories, and every dictionary carrying a blob path must have a valid digest, canonical
+name, available bytes and matching length. Both import and refresh print their listing
+before writing archive content; refresh lists added, changed, refused and preserved items.
+
+Refresh refuses shrinkage (`shrunk`): earlier record ids, task locations and snapshot
+manifest pointers must remain; every copied artifact and earlier blob must still be supplied.
+Each import/refresh stores an incoming-blob inventory in raw and pins it through
+`hosts.<host>.inventory`. Earlier history generations stay identical except the previous
+last generation, whose bytes must remain a prefix of its incoming counterpart; an inode
+change alone is allowed. Missing inventory is a `catalog` rejection. If local policy now
+withholds a previously copied artifact, refresh refuses with `policy-withdrawn`.
+
+Before replacing any host file, history or record set, refresh stores the previous bytes as
+content-addressed raw blobs, indexed by `hosts.<host>.replaced`. This works with `--no-commit`
+and `COMMIT=0`. To recover a previous note, find its `kind: vault` and `path` entry, then run
+`gzip -dc "$RAW_DIR/<listed blob>" > recovered-note.md`. The full replacement list is also
+written to `raw/hosts/<host>/replaced.json` before any overwrite; a retry incorporates this
+journal so interrupted updates retain their recovery pointers. Unchanged refreshes add no
+replacement entries. When enabled, the vault commit is named `archive: refresh <host> ...`.
 
 Exit codes: `0` success; `4` structural rejection (no archive content written) or locally
 withheld items (safe output is written); `2` usage/policy errors; `3` lock busy; `1` the final
@@ -1107,8 +1141,8 @@ a non-dry run can still create the raw store's lock file.
 Open limitations:
 
 - Chained imports are refused: the incoming catalog must be a single-host version-1 catalog.
-- A host can be re-imported only from an unchanged source. Changes to any existing record or
-  file are refused; import newer work under a new host name until an explicit refresh mode exists.
+- Updating an existing host requires `--refresh`; it refuses sources that have lost archived
+  data. `--refresh` for a never-imported host is a usage error (exit `2`).
 - The source vault and raw store must pass `verify`, including note links and source histories.
 - Passing source verification is insufficient: damaged reused local blobs, invalid output
   links/pointers, or secret-shaped thumbnail bytes without a local hash release refuse import.

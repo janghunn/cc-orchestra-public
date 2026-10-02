@@ -2578,6 +2578,9 @@ class Importer:
         self.vault, self.raw = policy["VAULT_DIR"], policy["RAW_DIR"]
         self.src_vault, self.src_raw = source_vault, source_raw
         self.local = json.loads((self.vault / "_meta/catalog.json").read_bytes())
+        self.previous = self.local.get("hosts", {}).get(self.host)
+        if args.refresh and self.previous is None:
+            raise ArchiveError(f"host {self.host} was not imported; run import without --refresh")
         self.guard = Guard(policy)
         self.guard.seed_released(self.local)
         self.rejected, self.renamed = [], []
@@ -2586,6 +2589,9 @@ class Importer:
         self.available, self.local_blobs_checked = {}, set()
         self.new_blobs, self.new_sources = [], []
         self.files, self.new_files, self.changed_files = {}, [], []
+        self.pending_blobs, self.replaced, self.new_replaced = {}, [], []
+        self.withheld_artifacts = set()
+        self.journal_rel = f"hosts/{self.host}/replaced.json"
         self.models = set()
         self.artifacts_withheld = self.artifacts_unverified = 0
         self.cat_bytes = (self.src_vault / "_meta/catalog.json").read_bytes()
@@ -2668,17 +2674,38 @@ class Importer:
 
     def destination(self, base, rel):
         path = base / rel
-        if not under(path, base) or path.is_symlink():
+        if Path(rel).is_absolute() or ".." in Path(rel).parts:
             self.reject("unsafe-path", rel)
             return None
-        if path.exists() and not path.is_file():
+        current = base
+        try:
+            for part in Path(rel).parts:
+                current /= part
+                try:
+                    mode = current.lstat().st_mode
+                except FileNotFoundError:
+                    continue
+                if not (stat.S_ISREG(mode) if current == path else stat.S_ISDIR(mode)):
+                    self.reject("not-regular", rel)
+                    return None
+            if not under(path, base):
+                self.reject("unsafe-path", rel)
+                return None
+        except (OSError, ValueError, RuntimeError):
             self.reject("not-regular", rel)
             return None
         return path
 
+    def replaceable(self, base, rel):
+        if not self.args.refresh:
+            return False
+        if base == self.raw:
+            return bool(re.fullmatch(rf"sources/{re.escape(self.host)}/[0-9a-f]{{24}}\.json", rel))
+        return self.own_path(rel) and rel in self.local["generated"]
+
     def unchanged_destination(self, base, rel, data):
         path = self.destination(base, rel)
-        if path is not None and path.exists() and path.read_bytes() != data:
+        if path is not None and path.exists() and path.read_bytes() != data and not self.replaceable(base, rel):
             self.reject("existing-differs", rel)
         return path
 
@@ -2694,7 +2721,9 @@ class Importer:
     def local_blob(self, digest, expected_length=None):
         if digest in self.local_blobs_checked:
             return
-        path = self.raw / f"blobs/{digest[:2]}/{digest}.gz"
+        path = self.destination(self.raw, f"blobs/{digest[:2]}/{digest}.gz")
+        if path is None:
+            return
         if not path.exists() and not path.is_symlink():
             return
         self.local_blobs_checked.add(digest)
@@ -2738,10 +2767,12 @@ class Importer:
                             self.reject("blob-hash", rel)
                             continue
                         self.blobs[path.stem] = length
-                        target = self.raw / rel
+                        target = self.destination(self.raw, rel)
+                        if target is None:
+                            continue
                         if target.exists() or target.is_symlink():
                             self.local_blob(path.stem, length)
-                        elif self.destination(self.raw, rel) is not None:
+                        else:
                             self.available[path.stem] = length
                             self.new_blobs.append(path.stem)
         source_root = self.src_raw / "sources"
@@ -2770,7 +2801,7 @@ class Importer:
                     self.sources[path.name] = data
                     rel = f"sources/{self.host}/{path.name}"
                     target = self.unchanged_destination(self.raw, rel, data)
-                    if target is not None and not target.exists():
+                    if target is not None and (not target.exists() or target.read_bytes() != data):
                         self.new_sources.append(path.name)
         try:
             problems, _, _, _ = verify_problems(self.src_vault, self.src_raw)
@@ -2816,7 +2847,8 @@ class Importer:
                                 record["thumbnails"][guarded_root][key]["path"] = rel.replace(
                                     f"artifacts/roots/{identifier}/", f"artifacts/roots/{new}/", 1)
                     self.records[kind][new] = record
-                    if new in self.local[kind] and self.local[kind][new].get("host") == self.host and self.local[kind][new] != record:
+                    if (not self.args.refresh and new in self.local[kind] and
+                            self.local[kind][new].get("host") == self.host and self.local[kind][new] != record):
                         self.reject("existing-differs", f"{kind}/{new}")
                 except self.MALFORMED:
                     self.reject("malformed-record", f"{kind}/{identifier}")
@@ -2843,12 +2875,16 @@ class Importer:
         return None
 
     def check_blob_pointers(self, value):
-        for pointer in pointer_values(value):
-            if "blob" not in pointer:
-                continue
-            problem = self.blob_pointer_problem(pointer)
-            if problem:
-                self.reject(problem, pointer["blob"])
+        if isinstance(value, dict):
+            if "blob" in value:
+                problem = self.blob_pointer_problem(value)
+                if problem:
+                    self.reject(problem, value["blob"])
+            for child in value.values():
+                self.check_blob_pointers(child)
+        elif isinstance(value, list):
+            for child in value:
+                self.check_blob_pointers(child)
 
     def validate_raw_pointers(self):
         # verify permits other contained paths; import copies only canonical blobs.
@@ -2928,6 +2964,7 @@ class Importer:
                               for value in artifact_paths]
             if any(withheld_paths):
                 self.artifacts_withheld += 1
+                self.withheld_artifacts.add(dest)
                 continue
             path = self.src_vault / rel
             try:
@@ -2956,6 +2993,7 @@ class Importer:
                         continue
                     if self.guard.file(data, new_owner, dest):
                         self.artifacts_withheld += 1
+                        self.withheld_artifacts.add(dest)
                         continue
                     self.guard.check(data, dest, artifact=True)
                 self.unchanged_destination(self.vault, dest, data)
@@ -2979,18 +3017,162 @@ class Importer:
         return rel == f"_meta/hosts/{self.host}.md" or bool(re.fullmatch(
             rf"(?:(?:tasks|projects|sessions)/{host}--[^/]+\.md|artifacts/(?:tasks|projects|sessions|roots)/{host}--[^/]+/.+)", rel))
 
+    def stage_blob(self, data):
+        """Plan an inventory or recovery blob without touching the raw store."""
+        digest = sha(data)
+        pointer = {"blob": f"blobs/{digest[:2]}/{digest}.gz", "sha256": digest, "length": len(data)}
+        path = self.destination(self.raw, pointer["blob"])
+        if path is not None:
+            if path.exists():
+                self.local_blob(digest, len(data))
+            else:
+                if digest not in self.blobs:
+                    self.pending_blobs[digest] = data
+                self.available[digest] = len(data)
+        return pointer
+
+    def old_records(self):
+        return {"hosts": {self.host: self.previous}, **{
+            kind: {key: record for key, record in self.local[kind].items() if record.get("host") == self.host}
+            for kind in ("tasks", "sessions", "projects")}}
+
+    @staticmethod
+    def replacement_key(item):
+        return item["kind"], item["path"], item["sha256"]
+
+    def load_refresh_state(self):
+        try:
+            pointer = self.previous["inventory"]
+            if self.blob_pointer_problem(pointer):
+                raise ValueError("invalid inventory pointer")
+            path = self.destination(self.raw, pointer["blob"])
+            if path is None:
+                return
+            data = gzip.decompress(path.read_bytes())
+            if sha(data) != pointer["sha256"] or len(data) != pointer["length"]:
+                raise ValueError("invalid inventory bytes")
+            inventory = json.loads(data)
+            if not isinstance(inventory, list) or any(not isinstance(d, str) or not re.fullmatch(r"[0-9a-f]{64}", d)
+                                                      for d in inventory):
+                raise ValueError("invalid inventory")
+            if not set(inventory) <= set(self.blobs):
+                self.reject("shrunk", "incoming blob inventory lost previously imported digests")
+            journal = self.destination(self.raw, self.journal_rel)
+            saved = json.loads(journal.read_bytes()) if journal is not None and journal.exists() else []
+            previous = self.previous.get("replaced", [])
+            if not isinstance(saved, list) or not isinstance(previous, list):
+                raise ValueError("invalid replaced list")
+            merged = {}
+            for item in previous + saved:
+                if (item["kind"] not in {"vault", "raw", "records"} or not isinstance(item["path"], str)
+                        or self.blob_pointer_problem(item)):
+                    raise ValueError("invalid preserved version")
+                merged[self.replacement_key(item)] = item
+            self.replaced = [merged[key] for key in sorted(merged)]
+        except (OSError, EOFError, zlib.error, *self.MALFORMED):
+            self.reject("catalog", f"hosts/{self.host}: missing or invalid inventory/replaced journal")
+
+    def generation_prefix(self, generation, root, limit=None):
+        digest, length = hashlib.sha256(), 0
+        for pointer in generation["chunks"] + ([generation["tail"]] if generation.get("tail") else []):
+            if self.blob_pointer_problem(pointer):
+                raise ValueError("invalid history blob")
+            if root == self.raw:
+                self.local_blob(pointer["sha256"], pointer["length"])
+            with gzip.open(root / pointer["blob"], "rb") as stream:
+                while limit is None or length < limit:
+                    chunk = stream.read(min(1024 * 1024, limit - length) if limit is not None else 1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    length += len(chunk)
+            if limit is not None and length == limit:
+                break
+        return length, digest.hexdigest()
+
+    def validate_refresh(self):
+        self.load_refresh_state()
+        for kind, count in self.counts().items():
+            if kind in {"tasks", "sessions", "projects", "blobs", "sources"} and count < self.previous[kind]:
+                self.reject("shrunk", f"hosts/{self.host}: {kind}")
+        for kind in ("tasks", "sessions", "projects"):
+            for identifier, old in self.old_records()[kind].items():
+                new = self.records[kind].get(identifier)
+                if new is None:
+                    self.reject("shrunk", f"{kind}/{identifier}")
+                elif kind == "tasks":
+                    if not set(old["locations"]) <= set(new["locations"]):
+                        self.reject("shrunk", f"{kind}/{identifier}: locations")
+                    for key, snapshot in old["snapshots"].items():
+                        if key not in new["snapshots"] or snapshot["manifest"] != new["snapshots"][key]["manifest"]:
+                            self.reject("shrunk", f"{kind}/{identifier}: snapshot {key}")
+        for rel in self.local["generated"]:
+            if self.own_path(rel) and (re.fullmatch(COPIED_ARTIFACT_PATH, rel) or re.fullmatch(THUMBNAIL_PATH, rel)):
+                if rel not in self.artifacts:
+                    self.reject("policy-withdrawn" if rel in self.withheld_artifacts else "shrunk", rel)
+        source_root = self.raw / "sources" / self.host
+        if self.destination(self.raw, f"sources/{self.host}/{'0' * 24}.json") is None:
+            return
+        for path in sorted(source_root.glob("*.json")):
+            rel = str(path.relative_to(self.raw))
+            if self.destination(self.raw, rel) is None:
+                continue
+            try:
+                old = json.loads(path.read_bytes())["generations"]
+                new = json.loads(self.sources[path.name])["generations"]
+                retained = len(new) >= len(old) and new[:max(0, len(old) - 1)] == old[:-1]
+                if retained and old:
+                    length, digest = self.generation_prefix(old[-1], self.raw)
+                    retained = self.generation_prefix(new[len(old) - 1], self.src_raw, length) == (length, digest)
+                if not retained:
+                    self.reject("shrunk", rel)
+            except (OSError, EOFError, zlib.error, *self.MALFORMED):
+                self.reject("shrunk", rel)
+
+    def preserve_versions(self, host_record):
+        """Index old bytes before the final host page and catalog are serialized."""
+        merged = {self.replacement_key(item): item for item in self.replaced}
+
+        def preserve(kind, rel, data):
+            item = dict(kind=kind, path=rel, **self.stage_blob(data))
+            merged[self.replacement_key(item)] = item
+
+        for rel in sorted(set(self.files) | set(self.artifacts)):
+            if not self.replaceable(self.vault, rel):
+                continue
+            path = self.destination(self.vault, rel)
+            if path is not None and path.exists():
+                data = self.files[rel] if rel in self.files else self.artifact_data(rel)
+                old = path.read_bytes()
+                if data != old:
+                    preserve("vault", rel, old)
+        for name in self.new_sources:
+            rel = f"sources/{self.host}/{name}"
+            path = self.destination(self.raw, rel)
+            if path is not None and path.exists():
+                preserve("raw", rel, path.read_bytes())
+        records_changed = any(self.local[kind].get(key) != record for kind, records in self.records.items()
+                              for key, record in records.items())
+        previous_keys = {self.replacement_key(item) for item in self.previous.get("replaced", [])}
+        if records_changed or host_record != self.previous or set(merged) != previous_keys:
+            preserve("records", "_meta/catalog.json", json_bytes(self.old_records(), compact=True))
+            rel = f"_meta/hosts/{self.host}.md"
+            path = self.destination(self.vault, rel)
+            if self.replaceable(self.vault, rel) and path is not None and path.exists():
+                preserve("vault", rel, path.read_bytes())
+        self.replaced = [merged[key] for key in sorted(merged)]
+        self.new_replaced = [merged[key] for key in sorted(set(merged) - previous_keys)]
+        host_record["replaced"] = self.replaced
+
     def render(self):
         union = self.union = copy.deepcopy(self.local)
         for kind, records in self.records.items():
             union[kind].update(records)
         for model in sorted(self.models):
             union["models"].setdefault(model, {"id": model})
-        host_record = dict(id=self.host, source_catalog_sha256=sha(self.cat_bytes), **self.counts(), withheld=self.withheld())
-        previous = union.setdefault("hosts", {}).get(self.host)
-        if previous is not None and previous != host_record:
-            self.reject("existing-differs", f"hosts/{self.host}")
-            return
-        union["hosts"][self.host] = host_record
+        host_record = dict(id=self.host, source_catalog_sha256=sha(self.cat_bytes), **self.counts(), withheld=self.withheld(),
+                           inventory=self.inventory, replaced=self.replaced)
+        union.setdefault("hosts", {})[self.host] = host_record
         union["version"] = 2
         renderer = Archive.renderer(self.p, self.guard, union)
         for kind in ("tasks", "projects", "sessions", "models"):
@@ -3010,10 +3192,15 @@ class Importer:
         except self.MALFORMED:
             self.reject("malformed-record", "shared pages")
         self.files = renderer.files
+        if self.args.refresh and not self.rejected:
+            self.preserve_versions(host_record)
+            renderer.render_host(self.host, host_record)
         union["generated"] = sorted(set(self.local["generated"]) | set(self.files) | set(self.artifacts) | {"_meta/catalog.json"})
         self.files["_meta/catalog.json"] = json_bytes(union, compact=True)
         for kind in (*self.KINDS, "hosts"):
-            if any(union[kind].get(key) != record for key, record in self.local.get(kind, {}).items()):
+            if any(union[kind].get(key) != record for key, record in self.local.get(kind, {}).items()
+                   if not (self.args.refresh and (key == self.host if kind == "hosts" else
+                           kind != "models" and record.get("host") == self.host))):
                 raise ArchiveError("import: existing catalog record changed")
         if not set(self.local["generated"]) <= set(union["generated"]):
             raise ArchiveError("import: generated paths removed")
@@ -3028,9 +3215,9 @@ class Importer:
                 self.new_files.append(rel)
             elif path.read_bytes() != data:
                 self.changed_files.append(rel)
-                if not self.shared(rel):
+                if not self.shared(rel) and not self.replaceable(self.vault, rel):
                     self.reject("existing-differs", rel)
-                elif rel != "_meta/catalog.json" and not shared_superset(rel, path.read_bytes(), data):
+                elif self.shared(rel) and rel != "_meta/catalog.json" and not shared_superset(rel, path.read_bytes(), data):
                     self.reject("shared-page", f"{rel}: run apply first to refresh shared pages")
             if not re.fullmatch(THUMBNAIL_PATH, rel):
                 self.guard.check(data, rel, artifact=rel in self.artifacts)
@@ -3160,6 +3347,9 @@ class Importer:
                 "thumbnails": sum(bool(re.fullmatch(THUMBNAIL_PATH, rel)) for rel in self.artifacts),
                 "artifacts_unverified": self.artifacts_unverified, "artifacts_withheld": self.artifacts_withheld}
 
+    def new_blob_count(self):
+        return len(self.new_blobs) + len(self.pending_blobs)
+
     def report(self):
         top = self.args.top
         # Reports are guarded too; even a rejected catalog must not disclose its ids.
@@ -3169,7 +3359,7 @@ class Importer:
         adds.update(models=sorted(self.models - set(self.local["models"]), key=str),
                     artifacts=sum(not re.fullmatch(THUMBNAIL_PATH, rel) for rel in new_artifacts),
                     thumbnails=sum(bool(re.fullmatch(THUMBNAIL_PATH, rel)) for rel in new_artifacts),
-                    blobs=len(self.new_blobs), sources=len(self.new_sources))
+                    blobs=self.new_blob_count(), sources=len(self.new_sources))
         renamed = sorted(self.renamed, key=lambda row: (row["kind"], row["from"], row["to"]))
         rejected = sorted(self.rejected, key=lambda row: (row["reason"], row["path"]))
         report = {"host": self.host, "dry_run": self.args.dry_run, "source_catalog_sha256": sha(self.cat_bytes),
@@ -3180,11 +3370,33 @@ class Importer:
                             "new": self.new_files[:top], "changed": self.changed_files[:top]},
                   "withheld_count": len(self.guard.items), "withheld": self.withheld()[:top],
                   "rejected": {"count": len(rejected), "items": rejected[:top]}}
+        if self.args.refresh:
+            def changes(added, changed):
+                return {"added": sorted(added)[:top], "changed": sorted(changed)[:top],
+                        "added_count": len(added), "changed_count": len(changed)}
+
+            added, changed = [], []
+            for kind, records in self.records.items():
+                for key, record in records.items():
+                    if key not in self.local[kind]:
+                        added.append(key)
+                    elif self.local[kind][key] != record:
+                        changed.append(key)
+            new_sources = [name for name in self.new_sources if not (self.raw / "sources" / self.host / name).exists()]
+            changed_sources = sorted(set(self.new_sources) - set(new_sources))
+            report["refresh"] = {"records": changes(added, changed),
+                                 "files": changes(self.new_files, self.changed_files),
+                                 "sources": changes(new_sources, changed_sources),
+                                 "replaced": self.new_replaced[:top], "replaced_count": len(self.new_replaced),
+                                 "refused": rejected[:top], "refused_count": len(rejected)}
         report_guard = Guard(self.p)
         report_guard.released = set(self.guard.released)
         return report_guard.tree(report, "import", "report")
 
     def prepare(self):
+        if self.previous is not None and not self.args.refresh:
+            self.reject("refresh-required", f"host {self.host} already imported; use --refresh --dry-run")
+            return
         if not self.rejected:
             self.validate_catalog()
         if self.rejected:
@@ -3196,14 +3408,27 @@ class Importer:
         # Invalid raw data cannot safely supply artifact manifests.
         if not self.rejected:
             self.scan_artifacts()
+        if not self.rejected and self.args.refresh:
+            self.validate_refresh()
         if not self.rejected:
             self.validate_vault_pointers()
+        if not self.rejected:
+            self.inventory = self.stage_blob(json_bytes(sorted(self.blobs), compact=True))
         if not self.rejected:
             self.render()
         if not self.rejected:
             self.validate_merged()
 
     def write(self):
+        if not (self.new_files or self.changed_files or self.new_blobs or self.pending_blobs or self.new_sources):
+            return 0, "none"
+        # Inventory and recovery blobs, then the journal, precede every overwrite.
+        for digest, data in sorted(self.pending_blobs.items()):
+            def writer(stream, data=data):
+                with gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0,
+                                   compresslevel=self.p["GZIP_LEVEL"]) as packed:
+                    packed.write(data)
+            _write_atomic(self.raw, f"blobs/{digest[:2]}/{digest}.gz", writer)
         for digest in self.new_blobs:
             rel = f"blobs/{digest[:2]}/{digest}.gz"
 
@@ -3218,6 +3443,8 @@ class Importer:
                     raise ArchiveError("import: blob changed during import", 4)
 
             _write_atomic(self.raw, rel, writer)
+        if self.args.refresh and self.replaced:
+            _write_atomic(self.raw, self.journal_rel, json_bytes(self.replaced, compact=True))
         for name in self.new_sources:
             _write_atomic(self.raw, f"sources/{self.host}/{name}", self.sources[name])
         written = 0
@@ -3233,7 +3460,8 @@ class Importer:
             dirty = git(self.vault, "diff", "--cached", "--quiet", check=False)
             if dirty.returncode == 1:
                 counts = self.counts()
-                git(self.vault, "commit", "-q", "-m", f"archive: import {self.host} ({counts['tasks']} tasks, {counts['sessions']} sessions, {counts['projects']} projects)")
+                action = "refresh" if self.args.refresh else "import"
+                git(self.vault, "commit", "-q", "-m", f"archive: {action} {self.host} ({counts['tasks']} tasks, {counts['sessions']} sessions, {counts['projects']} projects)")
                 commit = git(self.vault, "rev-parse", "HEAD").stdout.strip()
             elif dirty.returncode:
                 raise ArchiveError("git diff failed")
@@ -3289,16 +3517,16 @@ def import_host(policy, args):
             output_report(report, args.json, "Archive import (copy only; sources unchanged)")
             print(f"import: host {host}: rejected ({len(importer.rejected)} problems); nothing written")
             return 4
+        output_report(report, args.json, "Archive import (copy only; sources unchanged)")
+        sys.stdout.flush()
         if args.dry_run:
-            output_report(report, args.json, "Archive import (copy only; sources unchanged)")
             adds, changes = len(importer.new_files), len(importer.changed_files)
             print(f"import: host {host} (dry run): would write {adds + changes} vault files ({adds} new, {changes} changed), "
-                  f"{len(importer.new_blobs)} new blobs, {len(importer.new_sources)} source histories; nothing written")
+                  f"{importer.new_blob_count()} new blobs, {len(importer.new_sources)} source histories; nothing written")
         else:
             written, commit = importer.write()
-            output_report(report, args.json, "Archive import (copy only; sources unchanged)")
-            print(f"vault: {written} files written; raw: {len(importer.new_blobs)} new blobs, "
-                  f"{len(importer.new_sources)} source histories written; commit: {commit}")
+            print(f"vault: {written} files written; raw: {importer.new_blob_count()} new blobs, "
+                  f"{len(importer.new_sources)} source histories written; preserved: {len(importer.new_replaced)} previous versions; commit: {commit}")
         return 4 if importer.guard.items else 0
 
 
@@ -3344,6 +3572,7 @@ def main(argv=None):
             for option in ("host", "source-vault", "source-raw"):
                 child.add_argument("--" + option, required=True)
             child.add_argument("--dry-run", action="store_true")
+            child.add_argument("--refresh", action="store_true")
         if command == "show":
             child.add_argument("id")
     args = parser.parse_args(argv)
