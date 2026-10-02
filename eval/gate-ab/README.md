@@ -18,6 +18,8 @@ The sample is small and dependent: tasks share this repository and reviewers, ga
 
 From the repository root, run `python3 eval/gate-ab/recount.py check`. Set `GATE_AB_ROOT` if the corpus is available at another path. The stdlib-only checker validates source paths, the gate partition, inventory counts, and exact agreement between each generated Markdown block and the CSV. `python3 eval/gate-ab/recount.py render` prints the four derived blocks.
 
+A file-level triage evaluation built on this corpus lives in [../diff-triage/](../diff-triage/README.md).
+
 ## Open limitations (not re-gated)
 
 At the final gate on `5bcf30b`, Codex verify passed 6/6 and Codex review returned BLOCKING 1 / NONBLOCKING 1. The user accepted the outcome after the round cap. The two subsequent fixes below have not had another gate run.
