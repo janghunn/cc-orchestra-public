@@ -1033,6 +1033,7 @@ orch-archive plan --json --top 20
 orch-archive plan --json --measure-thumbnails   # thumbnail을 메모리에서 인코딩해 측정; 파일은 쓰지 않음
 orch-archive apply                 # 로컬 저장 및 vault 변경 commit
 orch-archive apply --no-commit
+orch-archive import --host render --source-vault /copies/render-vault --source-raw /copies/render-raw
 orch-archive verify
 orch-archive show cc-orchestra--38-orch-archive
 ```
@@ -1115,6 +1116,90 @@ thumbnail의 멱등성은 한 머신 안에서만 보장한다. 원본(해시·�
 graph에서 제외한다. frontmatter와 `.base`는 Python 표준 라이브러리로 검증 가능한
 JSON-compatible YAML flow 형식이다. Obsidian 렌더링은 시각적으로 검증하지 않았다.
 Bases에는 Obsidian >= 1.9.0이 필요하다.
+
+### 다른 호스트의 아카이브 가져오기
+
+먼저 `apply`로 로컬 catalog를 만든 뒤 다른 호스트의 vault와 raw 저장소의 읽기 전용
+복사본을 `import`에 지정한다. 두 원본 디렉터리는 서로 겹치거나 로컬 저장 경로와
+겹칠 수 없다. 호스트 이름은 소문자·숫자와 구간 사이의 단일 하이픈으로 이루어진
+1–32자이다(`[a-z0-9]+(?:-[a-z0-9]+)*`). `local`은 예약어이다.
+
+프로젝트·작업·세션의 id, 경로, 링크에는 `<host>--` 접두사를 붙이며 frontmatter의
+`host`와 `host/<host>` 태그도 추가한다. 모델 id는 유지하고 모든 호스트의 작업을
+모아서 표시한다. 가져온 각 프로젝트·작업·세션은 로컬 allow-list를 적용한 원본 호스트의 id를 `source_id`로 보존한다.
+`_meta/hosts/<host>.md`에는 원본 수량, catalog 해시, 로컬 정책으로
+보류한 항목을 기록한다. 입력 blob의 gzip 무결성과 압축 전 SHA-256을 검증하고 새
+blob만 결정적으로 재압축한다. 기존 blob은 다시 쓰지 않는다. 원본 이력은
+`sources/<host>/`에 저장하므로 호스트별 inode/device watermark가 섞이지 않는다.
+재사용하는 로컬 blob도 검증하며 손상된 blob은 다시 쓰지 않고 import를 거부한다.
+`--dry-run`을 포함해 쓰기 전에 직접 생성한 링크와 포인터가 병합 결과에서 유효한지
+검증한다. 복사할 thumbnail은 전체 SHA-256이 로컬 allow-list에 있는 경우를 제외하고
+secret-shaped 바이트 문자열을 검사한다. 발견하면 thumbnail을 보류하지 않고 import를 거부한다.
+
+기존 로컬 파일과 catalog 레코드는 유지한다. 모델 노트, index, dashboard, graph 설정과
+catalog 등 공유 페이지는 기존 내용을 포함하는 상위 집합으로만 다시 생성한다.
+가져온 텍스트는 로컬 allow-list로 다시 판단한다. 보류 텍스트는 placeholder로 바꾸거나
+artifact 복사를 생략하고, 원본 raw 내용은 raw 저장소에 유지한다.
+기존 catalog·노트·JSON의 포인터가 고정한 공유 페이지를 바꾸는 import는 거부하며, 로컬 정책이 secret-shaped로 판단한 artifact 경로는 보류한다.
+`--dry-run --json`은
+디렉터리·잠금·파일을 만들지 않고 추가 항목과 충돌을 보고한다. `--top N`은 보고서의
+표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다. 이미 가져온 호스트에 대한
+일반 import는 원본이 그대로여도 `refresh-required`로 거부한다. 먼저 `--refresh --dry-run`으로
+변경 목록을 확인한다. 변경 없는 refresh는 내용과 commit을 추가하지 않는다.
+호스트를 가져오는 순서가 달라도 vault/raw 바이트는 같다.
+이후 로컬 `apply`도 가져온 레코드를 동결 상태로 보존한다.
+
+이미 가져온 호스트를 갱신할 때는 목록을 검토한 뒤 `--dry-run`을 빼고 다시 실행한다.
+
+```bash
+orch-archive import --host render --refresh --dry-run \
+  --source-vault /path/to/render-vault --source-raw /path/to/render-raw
+orch-archive import --host render --refresh \
+  --source-vault /path/to/render-vault --source-raw /path/to/render-raw
+```
+
+refresh는 해당 호스트의 레코드, catalog에 등록된 호스트 namespace 파일과
+`raw/sources/<host>/` 이력만 교체할 수 있다. 미등록 기존 파일은 보호하며 공유 페이지는
+상위 집합·기존 포인터 검사를 그대로 적용한다. 목적지의 모든 상위 경로는 실제 디렉터리여야
+하고 blob 경로를 가진 모든 사전은 유효한 digest, 정규 경로, 실제 바이트와 일치하는 길이를
+가져야 한다. import와 refresh는 아카이브 내용을 쓰기 전에 목록을 출력하며 refresh 목록에는
+추가·변경·거부 항목과 보존할 이전 버전이 포함된다.
+
+기존 레코드 id, 작업 위치, snapshot manifest 포인터, 복사한 artifact 또는 이전 blob이
+빠진 원본은 `shrunk`로 거부한다. import와 refresh는 입력 blob 목록을 raw에 저장하고
+`hosts.<host>.inventory` 포인터로 고정한다. 과거 이력 generation은 유지해야 하며, 이전의
+마지막 generation은 그 바이트가 입력의 같은 순번 generation의 접두사로 남아 있으면 된다.
+inode만 바뀐 재수집은 허용한다. inventory가 없거나 읽을 수 없으면 `catalog`로 거부한다.
+로컬 정책 변경으로 전에 복사한 artifact가 보류 대상이 되면 `policy-withdrawn`으로 거부한다.
+
+호스트 파일·이력·레코드 집합을 교체하기 전에 이전 바이트를 content-addressed raw blob으로
+저장하고 `hosts.<host>.replaced`에 기록한다. `--no-commit`과 `COMMIT=0`에서도 복구할 수 있다.
+이전 노트를 복구하려면 해당 `kind: vault`와 `path` 항목을 찾아
+`gzip -dc "$RAW_DIR/<listed blob>" > recovered-note.md`를 실행한다. 덮어쓰기 전에 전체 목록을
+`raw/hosts/<host>/replaced.json`에도 쓰고 재실행 시 이 journal을 합쳐 중단된 갱신의 복구 포인터를
+유지한다. 변경 없는 refresh는 이전 버전 항목을 추가하지 않는다. commit이 활성화되어 있으면
+`archive: refresh <host> ...` 메시지를 사용한다.
+
+종료 코드: `0` 성공, `4` 구조 오류로 거부(아카이브 내용은 쓰지 않음) 또는 로컬 정책에
+따른 보류(안전한 결과는 저장), `2` 사용법·정책 오류, `3` 잠금 사용 중, `1` 최종 secret
+검사 실패이다. 구조 오류는 내용을 쓰기 전에 보고하며, dry-run이 아닌 경우 raw 잠금
+파일은 만들어질 수 있다.
+
+현재 제한:
+
+- 연쇄 import는 거부한다. 입력은 단일 호스트의 version-1 catalog여야 한다.
+- 기존 호스트의 갱신에는 `--refresh`가 필요하며 보관한 데이터가 빠진 원본은 거부한다.
+  아직 가져오지 않은 호스트에 `--refresh`를 쓰면 사용법 오류(종료 코드 `2`)이다.
+- 입력 vault/raw는 노트 링크와 원본 이력을 포함한 `verify`를 통과해야 한다.
+- 원본 검증 통과만으로는 충분하지 않다. 재사용할 로컬 blob의 손상, 생성 결과의 잘못된
+  링크·포인터, 로컬 해시 승인이 없는 thumbnail의 secret-shaped 바이트가 있으면 import를 거부한다.
+- 현재 root manifest에 없는 과거 root artifact는 manifest 해시 검증 없이 복사하며
+  `artifacts_unverified`로 집계한다.
+- 쓰는 도중 중단되면 일부만 저장될 수 있다. 재실행할 수 있지만 파일 전체를 아우르는
+  transaction은 없다.
+- import 이후 `show`의 짧은 작업 이름이 모호해질 수 있다. 전체 `<host>--…` id를 쓴다.
+- 가져온 노트는 이 호스트의 thumbnail/embed 정책으로 렌더링한다.
+- 로컬에서 발견한 프로젝트·세션 id가 가져온 id와 같으면 `apply`가 중단된다.
 
 ### 남은 제한 사항 (재검증 안 됨)
 

@@ -3,9 +3,10 @@ set -euo pipefail
 REPO_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 ARCHIVE_TEST_HOME="$(mktemp -d)"
 IMAGE_TEST_HOME="$(mktemp -d)"
+IMPORT_TEST_HOME="$(mktemp -d)"
 # A temporary HOME hides a per-user Pillow install; keep the real user site visible to the image tests.
 IMAGE_USER_BASE="$(python3 -c 'import site; print(site.getuserbase())')"
-trap 'rm -rf -- "$ARCHIVE_TEST_HOME" "$IMAGE_TEST_HOME"' EXIT
+trap 'rm -rf -- "$ARCHIVE_TEST_HOME" "$IMAGE_TEST_HOME" "$IMPORT_TEST_HOME"' EXIT
 export HOME="$ARCHIVE_TEST_HOME" PYTHONDONTWRITEBYTECODE=1
 export ORCH_ARCHIVE_VAULT="$HOME/vault" ORCH_ARCHIVE_RAW="$HOME/raw"
 export ORCH_ARCHIVE_ALLOWLIST="$HOME/allowlist.txt"
@@ -1700,4 +1701,902 @@ else:
 
 ok(checked_applies >= 20, f'source files were byte- and mtime-identical after each of {checked_applies} archive runs')
 print(f'PASS: {groups} image test groups; SKIPPED: {len(skipped)}' + (' (' + '; '.join(skipped) + ')' if skipped else ''))
+PY
+
+# Host import tests use identical source paths across fixture hosts, then leave A's sources live.
+env HOME="$IMPORT_TEST_HOME" CODEX_HOME="$IMPORT_TEST_HOME/codex" PYTHONUSERBASE="$IMAGE_USER_BASE" python3 - <<'PY'
+import sys
+sys.dont_write_bytecode = True
+import collections
+import copy
+import fcntl
+import gzip
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import zlib
+
+repo, home = Path(os.environ['ARCHIVE_REPO_DIR']), Path(os.environ['HOME'])
+command = repo / 'bin/orch-archive'
+sys.path.insert(0, str(repo / 'lib'))
+import orch_archive as archive
+groups, skipped = 0, []
+work = home / 'work'
+base = work / 'demo'
+secret = 'AKIA' + 'ABCDEFGHIJKLMNOP'
+secret_line = '# ' + secret + '\n'
+have_encoder = importlib.util.find_spec('PIL') is not None or shutil.which('ffmpeg') is not None
+
+def ok(condition, description):
+    global groups
+    assert condition, description
+    groups += 1
+    print(f'ok {groups} - {description}', flush=True)
+
+def skip(description):
+    skipped.append(description)
+    print(f'skip - {description} (SKIPPED: no image encoder)', flush=True)
+
+def put(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data if isinstance(data, bytes) else data.encode())
+
+def environment(name):
+    root = home / name
+    return dict(os.environ, HOME=str(home), CODEX_HOME=str(work / 'codex'),
+                ORCH_ARCHIVE_VAULT=str(root / 'vault'), ORCH_ARCHIVE_RAW=str(root / 'raw'),
+                ORCH_ARCHIVE_ALLOWLIST=str(root / 'allowlist'), ORCH_ARCHIVE_POLICY=str(home / 'policy'),
+                ORCH_ARCHIVE_STATE_DIRS=str(work / 'state'), ORCH_ARCHIVE_CLAUDE_PROJECTS=str(work / 'claude-projects'),
+                ORCH_ARCHIVE_CODEX_HOME=str(work / 'codex'), ORCH_ARCHIVE_EXTRA_BASES='')
+
+def run(name, *args, code=0):
+    result = subprocess.run([str(command), *args], env=environment(name), text=True, capture_output=True)
+    assert result.returncode == code, (name, args, result.returncode, code, result.stdout, result.stderr)
+    return result.stdout + result.stderr
+
+def report(output):
+    return json.loads(output.splitlines()[0])
+
+def catalog(name):
+    return json.loads((home / name / 'vault/_meta/catalog.json').read_bytes())
+
+def save_catalog(name, value):
+    put(home / name / 'vault/_meta/catalog.json', archive.json_bytes(value, compact=True))
+
+def hashes(path, git=False):
+    return {str(p.relative_to(path)): archive.sha(p.read_bytes()) for p in sorted(path.rglob('*'))
+            if p.is_file() and (git or '.git' not in p.relative_to(path).parts)}
+
+def listing(path, git=False):
+    result = {}
+    for p in sorted(path.rglob('*')):
+        if not git and '.git' in p.relative_to(path).parts:
+            continue
+        st = p.lstat()
+        result[str(p.relative_to(path))] = (st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode), st.st_ino)
+    return result
+
+def state(name, git=False):
+    return [(hashes(home / name / kind, git), listing(home / name / kind, git)) for kind in ('vault', 'raw')]
+
+def clone(source, dest):
+    shutil.copytree(home / source, home / dest)
+    return dest
+
+def imported(dest, source='bee', host=None, *options, code=0):
+    return run(dest, 'import', '--host', host or source, '--source-vault', str(home / source / 'vault'),
+               '--source-raw', str(home / source / 'raw'), '--json', '--top', '1000', *options, code=code)
+
+# Rejection helper proves all local bytes and metadata are preserved.
+def rejected(dest, source, reason, host='bee', *options):
+    before = state(dest, git=True)
+    data = report(imported(dest, source, host, *options, code=4))
+    assert reason in {item['reason'] for item in data['rejected']['items']}, data
+    assert state(dest, git=True) == before, (source, reason)
+    return data
+
+def verified(name):
+    return 'verify: OK' in run(name, 'verify')
+
+def task(name, label):
+    path = base / '.orchestra' / name
+    put(path / 'brief.md', f'# {label}\nRISK: normal\n## Git\nBRANCH: orch/{name}\n' +
+        ('Build on orch/01-shared\n' if name.startswith('02-') else ''))
+    put(path / 'plan.md', '# Plan\n')
+    put(path / 'summary.md', 'STATUS: PASS\nCLAUDE PROFILE: lead-alpha opus@high\n')
+    return path
+
+def make_host(name, dest=None):
+    if work.exists():
+        shutil.rmtree(work)
+    put(work / 'state/sessions/alpha.conf', f'LAUNCH_NAME=alpha\nPROJECT_NAME=demo\nREPO={base}\nBACKEND=claude\n')
+    put(base / '.orchestra/REGISTRY.md', '# Registry\n')
+    shared = task('01-shared', name + ' shared task')
+    other = task('02-' + name + '-only', name + ' task')
+    model = {'bee': 'gpt-6-sol', 'cat': 'gpt-6-astra', 'sec': 'gpt-6-luna', 'A': 'gpt-6.1-sol'}[name]
+    put(other / 'summary.md', f'STATUS: PASS\nCODEX PROFILE: {model}@high\n')
+    if name == 'sec':
+        put(shared / 'brief.md', secret_line)
+        put(home / name / 'allowlist', 'sha256:' + archive.sha(secret_line.encode()) + '\nsha256:' + archive.sha(secret.encode()) + '\n')
+    if name == 'bee' and have_encoder:
+        def chunk(kind, data):
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+        png = archive.PNG_SIGNATURE + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 2, 0, 0, 0))
+        png += chunk(b'IDAT', zlib.compress((b'\0' + b'\xff\0\0' * 2) * 2)) + chunk(b'IEND', b'')
+        put(other / 'plot.png', png)
+    encoded = re.sub(r'[^A-Za-z0-9]', '-', str(base))
+    put(work / 'claude-projects' / encoded / 't.jsonl', json.dumps({'message': name}) + '\n')
+    run(dest or name, 'apply')
+    assert verified(dest or name)
+
+put(home / 'policy', '')
+for name in ('bee', 'cat', 'sec', 'A'):
+    make_host(name)
+clone('A', 'original')
+bee_before = state('bee', git=True)
+local_before = state('A')
+local_catalog = catalog('A')
+local_pages = {rel: (home / 'A/vault' / rel).read_bytes() for rel in local_before[0][0]}
+
+# 1: namespace collisions, relation links, model aggregation, roots, histories and thumbnails.
+output = imported('A')
+data = report(output)
+merged = catalog('A')
+for kind in ('tasks', 'sessions', 'projects'):
+    for identifier in catalog('bee')[kind]:
+        assert merged[kind]['bee--' + identifier]['source_id'] == identifier
+for rel in ('projects/bee--demo.md', 'sessions/bee--alpha.md', 'tasks/bee--demo--01-shared.md',
+            'tasks/bee--demo--02-bee-only.md', '_meta/hosts/bee.md', 'projects/demo.md', 'sessions/alpha.md', 'tasks/demo--01-shared.md'):
+    assert (home / 'A/vault' / rel).is_file(), rel
+fields, _ = archive.frontmatter((home / 'A/vault/models/claude-opus.md').read_text())
+assert {'[[tasks/demo--01-shared]]', '[[tasks/bee--demo--01-shared]]'} <= set(fields['tasks'])
+assert '[[tasks/bee--demo--01-shared]]' in (home / 'A/vault/tasks/bee--demo--02-bee-only.md').read_text()
+assert list((home / 'A/vault/artifacts/roots/bee--demo').glob('*/files/REGISTRY.md'))
+for p in (home / 'bee/raw/sources').glob('*.json'):
+    assert (home / 'A/raw/sources/bee' / p.name).read_bytes() == p.read_bytes()
+assert {p.name for p in (home / 'bee/raw/sources').glob('*.json')} & {p.name for p in (home / 'original/raw/sources').glob('*.json')}
+assert {'kind': 'projects', 'from': 'demo', 'to': 'bee--demo'} in data['collisions']['renamed']
+assert 'claude-opus' in data['collisions']['models_aggregated']
+if have_encoder:
+    thumbnails = merged['tasks']['bee--demo--02-bee-only']['thumbnails']
+    assert thumbnails and all((home / 'A/vault' / row['path']).is_file() for row in thumbnails.values())
+    assert '![[artifacts/tasks/bee--demo--02-bee-only/thumbs/' in (home / 'A/vault/tasks/bee--demo--02-bee-only.md').read_text()
+else:
+    skip('imported thumbnail and image embed')
+ok(verified('A'), 'host records, relations, aggregate models, artifacts and raw histories resolve')
+
+# 2: independently check shared-page supersets and immutability of all other pre-existing content.
+def superset(rel, old, new):
+    if rel.endswith('.md'):
+        of, ob = archive.frontmatter(old.decode())
+        nf, nb = archive.frontmatter(new.decode())
+        assert of.keys() == nf.keys()
+        for key, value in of.items():
+            if isinstance(value, list):
+                encode = lambda rows: collections.Counter(json.dumps(row, sort_keys=True) for row in rows)
+                assert encode(value) <= encode(nf[key])
+            else:
+                assert value == nf[key]
+        assert collections.Counter(ob.splitlines()) <= collections.Counter(nb.splitlines())
+    elif rel == '.obsidian/graph.json':
+        of, nf = json.loads(old), json.loads(new)
+        groups = of.pop('colorGroups')
+        assert nf.pop('colorGroups')[:len(groups)] == groups and of == nf
+    elif rel == '_meta/catalog.json':
+        of, nf = json.loads(old), json.loads(new)
+        for kind in ('tasks', 'sessions', 'projects', 'models'):
+            assert all(nf[kind][key] == value for key, value in of[kind].items())
+        assert set(of['generated']) <= set(nf['generated'])
+    else:
+        assert old == new
+
+for rel, old in local_pages.items():
+    new = (home / 'A/vault' / rel).read_bytes()
+    if archive.Importer.shared(rel):
+        superset(rel, old, new)
+    else:
+        assert old == new, rel
+assert all(hashes(home / 'A/raw')[rel] == value for rel, value in local_before[1][0].items())
+ok(True, 'local files and records remain identical; shared pages only gain content')
+
+# 3 and 11: dry runs before and after import change no bytes, mtimes, modes, inodes or git files.
+clone('original', 'dry')
+(home / 'dry/raw/.lock').unlink()
+before = state('dry', git=True)
+dry_report = report(imported('dry', 'bee', None, '--dry-run'))
+assert state('dry', git=True) == before and not (home / 'dry/raw/.lock').exists()
+assert dry_report['dry_run'] and dry_report['adds']['tasks'] and dry_report['collisions']['renamed']
+before = state('A', git=True)
+rejected('A', 'bee', 'refresh-required', 'bee', '--dry-run')
+assert report(imported('A', 'bee', None, '--refresh', '--dry-run'))['files']['new_count'] == 0
+assert state('A', git=True) == before
+ok(state('bee', git=True) == bee_before, 'both source trees stay byte- and metadata-identical during import and dry-run')
+ok(True, 'dry-run before and after import writes nothing, creates no lock and reports additions/collisions')
+
+# 4: plain re-import refuses; unchanged refresh changes no content, metadata or commit.
+def commit_count(name):
+    return subprocess.check_output(['git', '-C', str(home / name / 'vault'), 'rev-list', '--count', 'HEAD'],
+                                   env=archive.git_env(), text=True).strip()
+before, commits = state('A'), commit_count('A')
+rejected('A', 'bee', 'refresh-required')
+assert 'commit: none' in imported('A', 'bee', 'bee', '--refresh')
+ok(state('A') == before and commit_count('A') == commits, 'plain re-import refuses; unchanged refresh preserves hashes/mtimes and creates no commit')
+
+# 5 and 14: import order commutes, including colors and raw gzip bytes.
+clone('original', 'order1')
+clone('original', 'order2')
+imported('order1', 'bee')
+imported('order1', 'cat')
+imported('order2', 'cat')
+first_graph = json.loads((home / 'order2/vault/.obsidian/graph.json').read_bytes())['colorGroups']
+imported('order2', 'bee')
+second_graph = json.loads((home / 'order2/vault/.obsidian/graph.json').read_bytes())['colorGroups']
+ok(all(hashes(home / 'order1' / kind) == hashes(home / 'order2' / kind) for kind in ('vault', 'raw'))
+   and verified('order1') and verified('order2'), 'bee then cat equals cat then bee byte-for-byte')
+local_graph = json.loads(local_pages['.obsidian/graph.json'])['colorGroups']
+ok(all(group in second_graph for group in first_graph) and first_graph[:len(local_graph)] == second_graph[:len(local_graph)] == local_graph,
+   'host graph colors survive later imports; local groups retain their prefix')
+
+# 6: later applies retain all imported records, host pages, notes and artifacts.
+def host_files(name, host='bee'):
+    return {rel: value for rel, value in hashes(home / name / 'vault').items()
+            if any(part.startswith(host + '--') for part in Path(rel).parts) or rel == f'_meta/hosts/{host}.md'}
+
+def host_records(name, host='bee'):
+    value = catalog(name)
+    return {kind: {key: row for key, row in value[kind].items() if row.get('host') == host}
+            for kind in ('tasks', 'sessions', 'projects')}
+
+before_files, before_records = host_files('A'), host_records('A')
+all_before = set(hashes(home / 'A/vault'))
+task('03-new-local', 'new local task')
+run('A', 'apply')
+assert host_files('A') == before_files and host_records('A') == before_records
+assert all_before <= set(hashes(home / 'A/vault')) and 'demo--03-new-local' in catalog('A')['tasks']
+rejected('A', 'bee', 'refresh-required')
+assert 'commit: none' in imported('A', 'bee', 'bee', '--refresh')
+run('A', 'apply')
+ok(host_files('A') == before_files and host_records('A') == before_records and verified('A'),
+   'apply/import/apply freezes imported notes and records while discovering new local tasks')
+
+# 7: importing must not opportunistically migrate legacy local snapshots.
+clone('original', 'legacy')
+legacy = catalog('legacy')
+for item in legacy['tasks'].values():
+    for snapshot in item['snapshots'].values():
+        snapshot['entries'] = json.loads(gzip.decompress((home / 'legacy/raw' / snapshot['manifest']['blob']).read_bytes()))['entries']
+        for key in ('manifest', 'counts', 'files', 'bytes'):
+            snapshot.pop(key)
+save_catalog('legacy', legacy)
+imported('legacy')
+assert all(catalog('legacy')['tasks'][key] == value for key, value in legacy['tasks'].items())
+before = host_files('legacy')
+run('legacy', 'apply')
+ok(before == host_files('legacy') and verified('legacy') and all('manifest' in snapshot for item in catalog('legacy')['tasks'].values()
+   for snapshot in item['snapshots'].values()), 'legacy local catalogs import unchanged and migrate only on later apply')
+
+# 8: invalid gzip, wrong uncompressed digest, missing referenced blob.
+clone('original', 'reject')
+for name, reason in [('bad-gzip', 'blob-gzip'), ('bad-hash', 'blob-hash'), ('missing-blob', 'source-verify')]:
+    clone('bee', name)
+    pointer = next(iter(catalog(name)['tasks']['demo--01-shared']['snapshots'].values()))['manifest']
+    path = home / name / 'raw' / pointer['blob']
+    if name == 'missing-blob':
+        path.unlink()
+    else:
+        put(path, b'bad gzip' if name == 'bad-gzip' else gzip.compress(b'wrong content'))
+    rejected('reject', name, reason)
+ok(True, 'bad gzip, wrong blob hashes and missing referenced blobs reject before writes')
+
+# 9: traversal ids and generated artifact paths.
+clone('bee', 'unsafe-id')
+value = catalog('unsafe-id')
+record = value['tasks'].pop('demo--01-shared')
+record['id'] = '../../evil'
+value['tasks']['../../evil'] = record
+save_catalog('unsafe-id', value)
+rejected('reject', 'unsafe-id', 'unsafe-id')
+clone('bee', 'unsafe-path')
+value = catalog('unsafe-path')
+value['generated'].append('artifacts/tasks/demo--01-shared/../../../x')
+save_catalog('unsafe-path', value)
+rejected('reject', 'unsafe-path', 'unsafe-path')
+ok(not (home / 'evil').exists() and not (home / 'x').exists(), 'traversal ids and artifact paths are rejected without writes')
+
+# 10: source release policy is not authority for local vault output.
+clone('original', 'secret')
+value = report(imported('secret', 'sec', code=4))
+assert value['withheld_count'] >= 1 and not value['rejected']['count']
+assert all(secret.encode() not in p.read_bytes() for p in (home / 'secret/vault').rglob('*') if p.is_file())
+assert archive.sha(secret_line.encode()) in (home / 'secret/vault/_meta/hosts/sec.md').read_text()
+ok(verified('secret'), 'locally withheld imported text stays out of the vault and is reported by hash')
+
+# 12: usage, chaining, id collisions, apply collision guard and lock busy.
+for host in ('local', 'Bad', 'a--b', '-a', 'a-', 'a' * 33):
+    before = state('reject', git=True)
+    run('reject', 'import', '--host=' + host, '--source-vault', str(home / 'bee/vault'), '--source-raw', str(home / 'bee/raw'), code=2)
+    assert state('reject', git=True) == before
+run('reject', 'import', '--host', 'bee', '--source-vault', str(home / 'reject/vault'), '--source-raw', str(home / 'bee/raw'), code=2)
+rejected('reject', 'A', 'chained-import', host='nested')
+clone('original', 'id-collision')
+value = catalog('id-collision')
+value['projects']['bee--demo'] = dict(value['projects']['demo'], id='bee--demo')
+save_catalog('id-collision', value)
+rejected('id-collision', 'bee', 'id-collision')
+clone('A', 'apply-collision')
+conf = work / 'state/sessions/alpha.conf'
+original_conf = conf.read_bytes()
+put(conf, original_conf.replace(b'PROJECT_NAME=demo', b'PROJECT_NAME=bee--demo'))
+before = hashes(home / 'apply-collision/vault', git=True)
+assert 'collides with an imported host record' in run('apply-collision', 'apply', code=2)
+assert hashes(home / 'apply-collision/vault', git=True) == before
+put(conf, original_conf)
+with (home / 'reject/raw/.lock').open('r+b') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    imported('reject', code=3)
+ok(True, 'usage, chained imports, record collisions, apply collisions and concurrent writers fail safely')
+
+# 13: append-only checks and source-history/artifact integrity.
+clone('bee', 'changed-record')
+value = catalog('changed-record')
+value['tasks']['demo--01-shared']['fields']['title'] = 'changed title'
+save_catalog('changed-record', value)
+rejected('A', 'changed-record', 'refresh-required')
+clone('original', 'existing-file')
+put(home / 'existing-file/vault/tasks/bee--demo--01-shared.md', 'uncatalogued local data\n')
+rejected('existing-file', 'bee', 'existing-differs')
+clone('bee', 'guard-collision')
+value = catalog('guard-collision')
+for sid in (secret, 'withheld-' + archive.sha(secret.encode())[:12]):
+    value['sessions'][sid] = dict(copy.deepcopy(value['sessions']['alpha']), id=sid)
+save_catalog('guard-collision', value)
+rejected('reject', 'guard-collision', 'id-collision')
+clone('bee', 'history-corrupt')
+path = next((home / 'history-corrupt/raw/sources').glob('*.json'))
+value = json.loads(path.read_bytes())
+value['generations'][0]['prefix_sha256'] = '0' * 64
+put(path, archive.json_bytes(value))
+rejected('reject', 'history-corrupt', 'source-verify')
+clone('bee', 'artifact-corrupt')
+path = next((home / 'artifact-corrupt/vault/artifacts/tasks/demo--01-shared').glob('*/files/brief.md'))
+put(path, 'modified artifact\n')
+rejected('reject', 'artifact-corrupt', 'artifact-hash')
+ok(True, 'changed records/files, guarded-id collisions, broken histories and edited artifacts reject before writes')
+
+# Round 2: released source ids remain intact after namespacing, including in references.
+clone('bee', 'released-id-source')
+clone('original', 'released-id-dest')
+released_id = 'AKIA' + 'PONMLKJIHGFEDCBA'
+value = catalog('released-id-source')
+value['sessions'][released_id] = dict(copy.deepcopy(value['sessions']['alpha']), id=released_id)
+value['tasks']['demo--01-shared']['sessions'].append(released_id)
+save_catalog('released-id-source', value)
+put(home / 'released-id-dest/allowlist', 'sha256:' + archive.sha(released_id.encode()) + '\n')
+assert verified('released-id-source')
+data = report(imported('released-id-dest', 'released-id-source', 'bee'))
+assert data['withheld_count'] == 0 and not data['withheld']
+assert not catalog('released-id-dest')['hosts']['bee']['withheld']
+assert catalog('released-id-dest')['sessions']['bee--' + released_id]['source_id'] == released_id
+assert (home / 'released-id-dest/vault/sessions' / ('bee--' + released_id + '.md')).is_file()
+fields, _ = archive.frontmatter((home / 'released-id-dest/vault/tasks/bee--demo--01-shared.md').read_text())
+assert '[[sessions/bee--' + released_id + ']]' in fields['sessions']
+rejected('released-id-dest', 'released-id-source', 'refresh-required')
+assert 'commit: none' in imported('released-id-dest', 'released-id-source', 'bee', '--refresh')
+before_files, before_records = host_files('released-id-dest'), host_records('released-id-dest')
+run('released-id-dest', 'apply')
+assert host_files('released-id-dest') == before_files and host_records('released-id-dest') == before_records
+ok(verified('released-id-dest'), 'source_id preserves locally released ids across apply; imported files/records stay frozen and reports add no withheld items')
+
+# Every reference must address the raw files import actually copies, even when verify
+# accepts the same bytes under a hidden filename. Exercise all pointer-bearing inputs.
+def hidden_blob(name, pointer):
+    source = home / name / 'raw' / pointer['blob']
+    hidden = source.parent / '.hidden.gz'
+    put(hidden, source.read_bytes())
+    pointer['blob'] = str(hidden.relative_to(home / name / 'raw'))
+
+def replace_manifest(name, pointer, manifest):
+    data = archive.json_bytes(manifest, compact=True)
+    digest = archive.sha(data)
+    rel = f'blobs/{digest[:2]}/{digest}.gz'
+    put(home / name / 'raw' / rel, gzip.compress(data, mtime=0))
+    pointer.update(blob=rel, sha256=digest, length=len(data))
+
+for location in ('snapshot', 'session', 'task-entry', 'project-entry', 'history-chunk', 'history-tail'):
+    source_name = 'hidden-' + location
+    clone('bee', source_name)
+    value = catalog(source_name)
+    snapshot = next(iter(value['tasks']['demo--01-shared']['snapshots'].values()))
+    if location == 'snapshot':
+        hidden_blob(source_name, snapshot['manifest'])
+    elif location == 'session':
+        pointer = next(pointer for pointer in archive.pointer_values(value['sessions']['alpha']) if 'blob' in pointer)
+        hidden_blob(source_name, pointer)
+    elif location.endswith('-entry'):
+        pointer = snapshot['manifest'] if location == 'task-entry' else value['projects']['demo']['manifests'][0]
+        manifest = json.loads(gzip.decompress((home / source_name / 'raw' / pointer['blob']).read_bytes()))
+        embedded = next(pointer for pointer in archive.pointer_values(manifest['entries']) if 'blob' in pointer)
+        hidden_blob(source_name, embedded)
+        replace_manifest(source_name, pointer, manifest)
+    else:
+        path = next((home / source_name / 'raw/sources').glob('*.json'))
+        history = json.loads(path.read_bytes())
+        generation = history['generations'][0]
+        if location == 'history-tail':
+            generation['tail'] = generation['chunks'].pop()
+            prefix = b''.join(gzip.decompress((home / source_name / 'raw' / pointer['blob']).read_bytes())
+                              for pointer in generation['chunks'])
+            generation['prefix_sha256'] = archive.sha(prefix)
+            hidden_blob(source_name, generation['tail'])
+        else:
+            hidden_blob(source_name, generation['chunks'][0])
+        put(path, archive.json_bytes(history))
+    save_catalog(source_name, value)
+    assert verified(source_name), location
+    rejected('reject', source_name, 'blob-name')
+ok(True, 'noncanonical blob pointers in records, both manifest kinds, chunks and tails reject before writes')
+
+clone('bee', 'extra-vault-pointer')
+value = catalog('extra-vault-pointer')
+value['sessions']['alpha']['fields']['extra'] = {'path': 'extra.txt', 'sha256': archive.sha(b'x\n')}
+put(home / 'extra-vault-pointer/vault/extra.txt', b'x\n')
+save_catalog('extra-vault-pointer', value)
+assert verified('extra-vault-pointer')
+rejected('reject', 'extra-vault-pointer', 'unsafe-path')
+ok(True, 'vault pointers outside the copied artifact set reject before writes')
+
+# Round 3: a source verify pass must not hide bad reused blobs or catalog-only pointers.
+clone('original', 'damaged-local-blob')
+bee_only = next(rel for rel in hashes(home / 'bee/raw')
+                if rel.startswith('blobs/') and not (home / 'original/raw' / rel).exists())
+put(home / 'damaged-local-blob/raw' / bee_only, b'garbage local blob\n')
+assert verified('bee') and verified('damaged-local-blob')
+rejected('damaged-local-blob', 'bee', 'local-blob')
+ok(True, 'damaged unreferenced local blobs are refused before becoming imported references')
+
+for source_name, reason in (('missing-catalog-blob', 'blob-missing'), ('short-catalog-blob', 'blob-length')):
+    clone('bee', source_name)
+    value = catalog(source_name)
+    pointer = value['sessions']['alpha']['raw'][0]
+    if reason == 'blob-missing':
+        digest = archive.sha(b'not present in either raw store\n')
+        pointer.update(sha256=digest, blob=f'blobs/{digest[:2]}/{digest}.gz')
+        assert not (home / source_name / 'raw' / pointer['blob']).exists()
+        assert not (home / 'reject/raw' / pointer['blob']).exists()
+    else:
+        pointer['length'] += 1
+    value['generated'].remove('_meta/catalog.json')
+    save_catalog(source_name, value)
+    assert verified(source_name)
+    rejected('reject', source_name, reason)
+    ok(True, f'{reason} is detected even when the source generated list omits its catalog')
+
+# A catalog-only pointer can also use a good local blob absent from the incoming store.
+clone('bee', 'local-only-source')
+clone('original', 'local-only-dest')
+value = catalog('local-only-source')
+payload = b'verified local-only content\n'
+digest = archive.sha(payload)
+rel = f'blobs/{digest[:2]}/{digest}.gz'
+value['sessions']['alpha']['raw'][0].update(sha256=digest, blob=rel, length=len(payload))
+value['generated'].remove('_meta/catalog.json')
+save_catalog('local-only-source', value)
+put(home / 'local-only-dest/raw' / rel, gzip.compress(payload, mtime=0))
+assert verified('local-only-source') and verified('local-only-dest')
+before = (home / 'local-only-dest/raw' / rel).read_bytes()
+imported('local-only-dest', 'local-only-source', 'bee')
+ok(verified('local-only-dest') and (home / 'local-only-dest/raw' / rel).read_bytes() == before,
+   'a pointer can reuse a verified local-only blob without rewriting it')
+
+clone('bee', 'rendered-broken-link')
+value = catalog('rendered-broken-link')
+snapshot = next(iter(value['tasks']['demo--01-shared']['snapshots'].values()))
+snapshot['counts']['x [[nowhere]]'] = 1
+save_catalog('rendered-broken-link', value)
+assert verified('rendered-broken-link')
+rejected('reject', 'rendered-broken-link', 'merged-verify')
+rejected('reject', 'rendered-broken-link', 'merged-verify', 'bee', '--dry-run')
+clone('original', 'escaped-link-dest')
+put(home / 'outside-link', 'outside vault\n')
+(home / 'escaped-link-dest/vault/nowhere').symlink_to(home / 'outside-link')
+put(home / 'escaped-link-dest/vault/nowhere.md', 'an existing alias does not authorize an escaping target\n')
+assert verified('escaped-link-dest')
+rejected('escaped-link-dest', 'rendered-broken-link', 'merged-verify')
+ok(True, 'rendered live links are checked before import and dry-run, independent of source notes')
+
+clone('bee', 'rendered-bad-pointer')
+value = catalog('rendered-bad-pointer')
+artifact = next(rel for rel in value['generated'] if re.fullmatch(
+    r'artifacts/tasks/demo--01-shared/[0-9a-f]{12}/files/brief.md', rel))
+value['sessions']['alpha']['fields']['extra'] = {
+    'path': artifact.replace('/demo--01-shared/', '/bee--demo--01-shared/', 1), 'sha256': '0' * 64}
+value['generated'].remove('_meta/catalog.json')
+save_catalog('rendered-bad-pointer', value)
+assert verified('rendered-bad-pointer')
+rejected('reject', 'rendered-bad-pointer', 'merged-verify')
+ok(True, 'rendered pointers must match copied artifact bytes, even for catalog-only fields')
+
+if have_encoder:
+    clone('bee', 'secret-thumbnail')
+    value = catalog('secret-thumbnail')
+    thumbnail = next(iter(value['tasks']['demo--02-bee-only']['thumbnails'].values()))
+    path = home / 'secret-thumbnail/vault' / thumbnail['path']
+    data = path.read_bytes() + b'\n' + secret.encode() + b'\n'
+    put(path, data)
+    thumbnail.update(sha256=archive.sha(data), bytes=len(data))
+    save_catalog('secret-thumbnail', value)
+    assert verified('secret-thumbnail')
+    rejected('reject', 'secret-thumbnail', 'artifact-secret')
+    ok(all(secret.encode() not in p.read_bytes() for p in (home / 'reject/vault').rglob('*') if p.is_file()),
+       'secret-shaped thumbnail bytes reject import without leaking into the destination vault')
+else:
+    skip('secret-shaped thumbnail bytes')
+
+# Retained pointers must not pin shared pages that import is about to replace.
+for location in ('catalog', 'note', 'top-level', 'other-host', 'json'):
+    dest = 'retained-' + location
+    clone('original', dest)
+    if location == 'other-host':
+        imported(dest, 'cat')
+    receipt = {'path': './index.md', 'sha256': archive.sha((home / dest / 'vault/index.md').read_bytes())}
+    value = catalog(dest)
+    if location == 'note':
+        path = home / dest / 'vault/tasks/demo--01-shared.md'
+        fields, body = archive.frontmatter(path.read_text())
+        fields['receipt'] = receipt
+        put(path, archive.note(fields, body))
+    elif location == 'json':
+        rel = 'artifacts/projects/retained/raw.json'
+        put(home / dest / 'vault' / rel, archive.json_bytes({'receipt': receipt}))
+        value['generated'].append(rel)
+        save_catalog(dest, value)
+    else:
+        if location == 'top-level':
+            value['receipt'] = receipt
+        else:
+            owner = 'cat--demo' if location == 'other-host' else 'demo'
+            value['projects'][owner]['receipt'] = receipt
+        save_catalog(dest, value)
+    assert verified(dest) and verified('bee'), location
+    rejected(dest, 'bee', 'merged-verify')
+    rejected(dest, 'bee', 'merged-verify', 'bee', '--dry-run')
+    ok(True, f'retained {location} pointers to changed shared pages reject import and dry-run without writes')
+
+# Unchanged shared pages may still be referenced by retained records.
+clone('A', 'retained-unchanged')
+value = catalog('retained-unchanged')
+value['projects']['demo']['receipt'] = {
+    'path': 'index.md', 'sha256': archive.sha((home / 'retained-unchanged/vault/index.md').read_bytes())}
+save_catalog('retained-unchanged', value)
+assert verified('retained-unchanged')
+before = state('retained-unchanged', git=True)
+rejected('retained-unchanged', 'bee', 'refresh-required')
+data = report(imported('retained-unchanged', 'bee', 'bee', '--refresh', '--no-commit'))
+ok(data['files']['changed_count'] == 0 and state('retained-unchanged', git=True) == before
+   and verified('retained-unchanged'), 'retained pointers to unchanged shared pages allow a no-op import')
+
+# Artifact filenames must be guarded even when a release exempts the compact catalog line.
+clone('bee', 'secret-artifact-path')
+rel = 'artifacts/roots/demo/000000000000/files/' + secret + '.md'
+put(home / 'secret-artifact-path/vault' / rel, b'benign\n')
+value = catalog('secret-artifact-path')
+value['generated'].append(rel)
+save_catalog('secret-artifact-path', value)
+assert verified('secret-artifact-path')
+for with_release in (True, False):
+    dest = 'artifact-path-' + ('released' if with_release else 'control')
+    clone('original', dest)
+    if with_release:
+        marker = 'AKIA' + 'PONMLKJIHGFEDCBA'
+        value = catalog(dest)
+        value['projects']['demo']['release_marker'] = marker
+        save_catalog(dest, value)
+        put(home / dest / 'allowlist', 'sha256:' + archive.sha(marker.encode()) + '\n')
+    assert verified(dest)
+    data = report(imported(dest, 'secret-artifact-path', 'bee', code=4))
+    assert data['withheld_count'] >= 1 and data['incoming']['artifacts_withheld'] >= 1
+    assert not data['rejected']['count'], data
+    assert all(secret.encode() not in path.read_bytes() for path in (home / dest / 'vault').rglob('*') if path.is_file())
+    ok(verified(dest), f'secret artifact paths are withheld with exit 4, no rejection or leak ({dest})')
+
+# Round 4: destination ancestors and blob-bearing dictionaries are checked before writes.
+for location in ('vault-file', 'vault-symlink', 'raw-file', 'raw-symlink'):
+    dest = 'ancestor-' + location
+    clone('original', dest)
+    rel = 'vault/artifacts/tasks/bee--demo--01-shared' if location.startswith('vault') else 'raw/sources/bee'
+    path = home / dest / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if location.endswith('symlink'):
+        target = home / dest / ('vault' if location.startswith('vault') else 'raw') / 'real-directory'
+        target.mkdir()
+        path.symlink_to(target, target_is_directory=True)
+    else:
+        put(path, b'not a directory\n')
+    rejected(dest, 'bee', 'not-regular')
+    rejected(dest, 'bee', 'not-regular', 'bee', '--dry-run')
+ok(True, 'F5: file and symlink ancestors of vault and raw destinations reject before writes')
+
+for location in ('record', 'task-manifest', 'project-manifest', 'history'):
+    source = 'incomplete-blob-' + location
+    clone('bee', source)
+    value = catalog(source)
+    digest = archive.sha(b'missing F6 blob\n')
+    incomplete = {'blob': f'blobs/{digest[:2]}/{digest}.gz', 'length': 16}
+    if location == 'record':
+        value['sessions']['alpha']['raw'][0] = incomplete
+    elif location.endswith('manifest'):
+        pointer = (next(iter(value['tasks']['demo--01-shared']['snapshots'].values()))['manifest']
+                   if location == 'task-manifest' else value['projects']['demo']['manifests'][0])
+        manifest = json.loads(gzip.decompress((home / source / 'raw' / pointer['blob']).read_bytes()))
+        manifest['entries'].append({'extra': incomplete})
+        replace_manifest(source, pointer, manifest)
+    else:
+        path = next((home / source / 'raw/sources').glob('*.json'))
+        history = json.loads(path.read_bytes())
+        history['extra'] = incomplete
+        put(path, archive.json_bytes(history))
+    save_catalog(source, value)
+    assert verified(source)
+    rejected('reject', source, 'blob-name')
+ok(True, 'F6: every blob dictionary is validated even without sha256 in records, manifests and histories')
+
+# R1/R2: a later source apply adds work while retaining all earlier raw data.
+clone('bee', 'bee2')
+work.rename(home / 'saved-A-work')
+try:
+    make_host('bee', 'bee2')
+    task('03-bee-new', 'bee new task')
+    put(base / '.orchestra/01-shared/summary.md', 'STATUS: FAIL\nCLAUDE PROFILE: lead-alpha opus@high\n')
+    transcript = next((work / 'claude-projects').glob('*/t.jsonl'))
+    put(transcript, transcript.read_bytes() + b'{"message":"bee appended work"}\n')
+    run('bee2', 'apply')
+finally:
+    shutil.rmtree(work)
+    (home / 'saved-A-work').rename(work)
+assert verified('bee2')
+clone('A', 'refresh-main')
+for source in ('bee', 'bee2'):
+    data = rejected('refresh-main', source, 'refresh-required')
+    assert '--refresh --dry-run' in data['rejected']['items'][0]['path']
+ok(True, 'R1: plain import of unchanged or newer sources requires explicit refresh without writes')
+before = state('refresh-main', git=True)
+data = report(imported('refresh-main', 'bee2', 'bee', '--refresh', '--dry-run'))
+assert 'bee--demo--03-bee-new' in data['refresh']['records']['added']
+assert 'tasks/bee--demo--01-shared.md' in data['refresh']['files']['changed']
+ok(state('refresh-main', git=True) == before and data['refresh']['replaced_count'] > 0,
+   'R2: refresh dry-run lists added/changed records, files and recoverable versions without writes')
+
+def generation_bytes(name, generation):
+    pointers = generation['chunks'] + ([generation['tail']] if generation.get('tail') else [])
+    return b''.join(gzip.decompress((home / name / 'raw' / pointer['blob']).read_bytes()) for pointer in pointers)
+
+def check_refresh(dest, *options):
+    old_catalog = catalog(dest)
+    old_records = dict(hosts={'bee': old_catalog['hosts']['bee']}, **host_records(dest))
+    old_vault = {rel: (home / dest / 'vault' / rel).read_bytes() for rel in hashes(home / dest / 'vault')}
+    old_raw = {rel: (home / dest / 'raw' / rel).read_bytes() for rel in hashes(home / dest / 'raw')}
+    old_commit = commit_count(dest)
+    output = imported(dest, 'bee2', 'bee', '--refresh', *options)
+    data = report(output)
+    assert output.index('"refresh":') < output.index('vault: ')
+    value = catalog(dest)
+    assert (home / dest / 'vault/tasks/bee--demo--03-bee-new.md').is_file()
+    note_rel = 'tasks/bee--demo--01-shared.md'
+    assert (home / dest / 'vault' / note_rel).read_bytes() != old_vault[note_rel]
+    for rel, previous in old_vault.items():
+        current = (home / dest / 'vault' / rel).read_bytes()
+        if archive.Importer.shared(rel):
+            if rel == '_meta/catalog.json':
+                for kind in ('tasks', 'sessions', 'projects', 'models'):
+                    assert all(value[kind][key] == row for key, row in old_catalog[kind].items() if row.get('host') != 'bee')
+                assert set(old_catalog['generated']) <= set(value['generated'])
+            else:
+                superset(rel, previous, current)
+        elif rel not in host_files(dest):
+            assert current == previous, rel
+    for rel, previous in old_raw.items():
+        if not rel.startswith('sources/bee/'):
+            assert (home / dest / 'raw' / rel).read_bytes() == previous, rel
+        else:
+            old = json.loads(previous)['generations']
+            new = json.loads((home / dest / 'raw' / rel).read_bytes())['generations']
+            assert len(new) >= len(old) and new[:len(old) - 1] == old[:-1]
+            if old:
+                assert generation_bytes(dest, new[len(old) - 1]).startswith(generation_bytes(dest, old[-1]))
+    replaced = value['hosts']['bee']['replaced']
+    assert replaced and len(replaced) == len({(r['kind'], r['path'], r['sha256']) for r in replaced})
+    assert replaced == sorted(replaced, key=lambda r: (r['kind'], r['path'], r['sha256']))
+    for item in replaced:
+        data = gzip.decompress((home / dest / 'raw' / item['blob']).read_bytes())
+        assert archive.sha(data) == item['sha256'] and len(data) == item['length']
+        expected = (archive.json_bytes(old_records, compact=True) if item['kind'] == 'records'
+                    else (old_raw if item['kind'] == 'raw' else old_vault)[item['path']])
+        assert data == expected, item
+    assert any(r['kind'] == 'vault' and r['path'] == note_rel for r in replaced)
+    assert any(r['kind'] == 'records' for r in replaced)
+    assert json.loads((home / dest / 'raw/hosts/bee/replaced.json').read_bytes()) == replaced
+    inventory = value['hosts']['bee']['inventory']
+    assert json.loads(gzip.decompress((home / dest / 'raw' / inventory['blob']).read_bytes())) == sorted(
+        p.stem for p in (home / 'bee2/raw/blobs').glob('*/*.gz'))
+    assert verified(dest)
+    return old_commit, old_vault[note_rel]
+
+old_commit, old_note = check_refresh('refresh-main')
+assert int(commit_count('refresh-main')) == int(old_commit) + 1
+assert subprocess.check_output(['git', '-C', str(home / 'refresh-main/vault'), 'show', 'HEAD~1:tasks/bee--demo--01-shared.md'],
+                               env=archive.git_env()) == old_note
+assert subprocess.check_output(['git', '-C', str(home / 'refresh-main/vault'), 'log', '-1', '--format=%s'],
+                               env=archive.git_env(), text=True).startswith('archive: refresh bee (')
+ok(True, 'R3: refresh updates only its host, keeps shared supersets/history, and preserves all replaced bytes in raw and git')
+for dest, options in (('refresh-no-commit', ('--no-commit',)), ('refresh-commit-zero', ())):
+    clone('A', dest)
+    if not options:
+        put(home / 'policy', 'COMMIT=0\n')
+    try:
+        old_commit, _ = check_refresh(dest, *options)
+        assert commit_count(dest) == old_commit
+    finally:
+        put(home / 'policy', '')
+    ok(True, f'R3b/R3c: {dest} preserves every replaced version in raw without a new git commit')
+
+before = state('refresh-main', git=True)
+replaced = copy.deepcopy(catalog('refresh-main')['hosts']['bee']['replaced'])
+assert 'commit: none' in imported('refresh-main', 'bee2', 'bee', '--refresh')
+ok(state('refresh-main', git=True) == before and catalog('refresh-main')['hosts']['bee']['replaced'] == replaced,
+   'R4: repeat refresh preserves every hash, mtime and git file, with no new recovery entry or commit')
+before_files, before_records = host_files('refresh-main'), host_records('refresh-main')
+run('refresh-main', 'apply')
+ok(host_files('refresh-main') == before_files and host_records('refresh-main') == before_records and verified('refresh-main'),
+   'R5: local apply freezes refreshed host files and records and still verifies')
+
+# R6: record, source, snapshot and inventory shrinkage cannot overwrite the old import.
+for variant in ('task', 'source', 'snapshot', 'location'):
+    name = 'shrunk-' + variant
+    clone('bee2', name)
+    value = catalog(name)
+    if variant == 'task':
+        del value['tasks']['demo--01-shared']
+        for record in value['tasks'].values():
+            for key in archive.RELATION_KEYS:
+                record[key] = [ref for ref in record[key] if ref != 'demo--01-shared']
+    elif variant == 'source':
+        (home / name / 'raw/sources' / next((home / 'bee/raw/sources').glob('*.json')).name).unlink()
+    elif variant == 'location':
+        value['tasks']['demo--01-shared']['locations'].clear()
+    else:
+        sid = next(iter(catalog('bee')['tasks']['demo--01-shared']['snapshots']))
+        pointer = value['tasks']['demo--01-shared']['snapshots'][sid]['manifest']
+        manifest = json.loads(gzip.decompress((home / name / 'raw' / pointer['blob']).read_bytes()))
+        manifest['refresh_probe'] = True
+        replace_manifest(name, pointer, manifest)
+    if variant == 'task':
+        value['generated'] = [rel for rel in value['generated'] if not rel.startswith('artifacts/tasks/demo--01-shared/')]
+    save_catalog(name, value)
+    rejected('A', name, 'shrunk', 'bee', '--refresh')
+ok(True, 'R6: lost tasks, histories, locations and changed old snapshot manifests reject refresh without writes')
+
+def add_blob(name, data):
+    digest = archive.sha(data)
+    rel = f'blobs/{digest[:2]}/{digest}.gz'
+    put(home / name / 'raw' / rel, gzip.compress(data, mtime=0))
+    return {'blob': rel, 'sha256': digest, 'length': len(data)}
+
+clone('bee', 'inventory-source')
+unused = add_blob('inventory-source', b'unreferenced original blob\n')
+clone('original', 'inventory-dest')
+imported('inventory-dest', 'inventory-source', 'bee')
+clone('bee2', 'shrunk-inventory')
+add_blob('shrunk-inventory', b'replacement unreferenced blob\n')
+assert verified('shrunk-inventory')
+rejected('inventory-dest', 'shrunk-inventory', 'shrunk', 'bee', '--refresh')
+ok(True, 'R6: per-host inventory catches a lost unreferenced blob even when blob counts grow')
+
+for variant in ('missing', 'unreadable'):
+    dest = 'inventory-' + variant
+    clone('A', dest)
+    value = catalog(dest)
+    if variant == 'missing':
+        del value['hosts']['bee']['inventory']
+        save_catalog(dest, value)
+    else:
+        put(home / dest / 'raw' / value['hosts']['bee']['inventory']['blob'], b'not gzip\n')
+    rejected(dest, 'bee2', 'catalog', 'bee', '--refresh')
+ok(True, 'refresh refuses missing or unreadable previous blob inventories without writes')
+
+clone('bee', 'tail-source')
+path = next((home / 'tail-source/raw/sources').glob('*.json'))
+history = json.loads(path.read_bytes())
+old_generation = history['generations'][-1]
+payload = generation_bytes('tail-source', old_generation)
+old_generation.update(chunks=[], tail=dict(add_blob('tail-source', payload), offset=0), prefix_sha256=archive.sha(b''))
+put(path, archive.json_bytes(history))
+clone('original', 'tail-dest')
+assert verified('tail-source')
+imported('tail-dest', 'tail-source', 'bee')
+clone('tail-source', 'shrunk-tail')
+new_history = copy.deepcopy(history)
+new_payload = b'rewritten tail without old prefix\n'
+new_history['generations'][-1].update(tail=dict(add_blob('shrunk-tail', new_payload), offset=0), size_seen=len(new_payload))
+put(home / 'shrunk-tail/raw/sources' / path.name, archive.json_bytes(new_history))
+assert verified('shrunk-tail')
+rejected('tail-dest', 'shrunk-tail', 'shrunk', 'bee', '--refresh')
+ok(True, 'R6: a rewritten history tail refuses refresh even when all old blobs remain available')
+
+clone('bee', 'recaptured')
+for path in (home / 'recaptured/raw/sources').glob('*.json'):
+    history = json.loads(path.read_bytes())
+    history['generations'][-1]['inode'] += 100
+    put(path, archive.json_bytes(history))
+clone('A', 'recaptured-dest')
+assert verified('recaptured')
+imported('recaptured-dest', 'recaptured', 'bee', '--refresh')
+ok(verified('recaptured-dest'), 'R6b: metadata-only recapture with a new inode retains content and refreshes successfully')
+
+clone('original', 'withdrawn-dest')
+put(home / 'withdrawn-dest/allowlist', (home / 'sec/allowlist').read_bytes())
+imported('withdrawn-dest', 'sec', 'sec')
+put(home / 'withdrawn-dest/allowlist', '')
+rejected('withdrawn-dest', 'sec', 'policy-withdrawn', 'sec', '--refresh')
+ok(True, 'R6c: withdrawing a previously copied artifact release refuses the entire refresh')
+
+before = state('reject', git=True)
+assert 'was not imported; run import without --refresh' in imported('reject', 'bee', 'bee', '--refresh', code=2)
+ok(state('reject', git=True) == before, 'R7: refresh requires a previously imported host')
+clone('A', 'refresh-uncatalogued')
+put(home / 'refresh-uncatalogued/vault/tasks/bee--demo--03-bee-new.md', b'uncatalogued local content\n')
+rejected('refresh-uncatalogued', 'bee2', 'existing-differs', 'bee', '--refresh')
+ok(True, 'R8: refresh never overwrites uncatalogued files even inside its own namespace')
+
+# R9: the journal indexes preserved bytes even if the process dies before the catalog update.
+import contextlib
+import io
+clone('A', 'interrupted-refresh')
+original_write = archive._write_atomic
+output = io.StringIO()
+journal_entries = []
+
+def interrupted_write(base, rel, data):
+    if base == home / 'interrupted-refresh/vault' and rel.endswith('.md') and (base / rel).exists():
+        journal_entries.extend(json.loads((home / 'interrupted-refresh/raw/hosts/bee/replaced.json').read_bytes()))
+        assert report(output.getvalue())['refresh']['replaced_count'] > 0
+        for item in journal_entries:
+            assert archive.sha(gzip.decompress((home / 'interrupted-refresh/raw' / item['blob']).read_bytes())) == item['sha256']
+        raise RuntimeError('injected interruption after journal')
+    return original_write(base, rel, data)
+
+previous_env = dict(os.environ)
+try:
+    os.environ.update(environment('interrupted-refresh'))
+    archive._write_atomic = interrupted_write
+    with contextlib.redirect_stdout(output):
+        try:
+            archive.main(['import', '--host', 'bee', '--source-vault', str(home / 'bee2/vault'),
+                          '--source-raw', str(home / 'bee2/raw'), '--refresh', '--no-commit', '--json', '--top', '1000'])
+        except RuntimeError as error:
+            assert str(error) == 'injected interruption after journal'
+        else:
+            raise AssertionError('refresh was not interrupted')
+finally:
+    archive._write_atomic = original_write
+    os.environ.clear()
+    os.environ.update(previous_env)
+assert journal_entries and not catalog('interrupted-refresh')['hosts']['bee']['replaced']
+imported('interrupted-refresh', 'bee2', 'bee', '--refresh', '--no-commit')
+replaced = catalog('interrupted-refresh')['hosts']['bee']['replaced']
+ok(all(item in replaced for item in journal_entries) and verified('interrupted-refresh'),
+   'R9: listing and recovery journal precede overwrites; retry retains every interrupted-run recovery pointer')
+
+# Syntax checks keep caches in the fixture home.
+subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)
+subprocess.run(['python3', '-m', 'py_compile', str(command), str(repo / 'lib/orch_archive.py')], check=True,
+               env=dict(os.environ, PYTHONPYCACHEPREFIX=str(home / 'compile-cache')))
+ok(True, 'shell and Python syntax checks pass')
+print(f'PASS: {groups} import test groups; SKIPPED: {len(skipped)}')
 PY
