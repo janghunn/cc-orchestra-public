@@ -189,11 +189,6 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
 - **Where:** `.orchestra/44-compaction-recovery-hook` (`hooks/orch-compact-context.sh`, `tests/test-compact-context.sh`, gate round 2).
 - **Lesson:** read hook stdin with `cat`, not `/dev/stdin` redirection; a test with a socket case should skip, with a printed reason, on any denied socket operation (create, connect, send), and the case should be delegated to a non-Codex verifier for the real run.
 
-### A wrapper that writes its artifact before its log line cannot be joined to that log exactly
-- **Observed:** `orch-usage-report --cost` must attribute token usage to Codex calls, but `codex.log` carries no run identifier and the events file is written before the log line, so the join is by time proximity and races with concurrent calls. The review kept flagging it and the user accepted it as an estimate limit.
-- **Where:** `.orchestra/45-usage-counterfactual-cost` (rounds 1-3, OPERATIONS docs); `bin/orch-jev` parses the same log line with a full-line regex.
-- **Lesson:** a record that a later report must join exactly needs a shared identifier in both the artifact and the log line, decided when the writer is designed; adding a field afterwards needs a check of every parser of that line.
-
 ### Freeze evaluation criteria in their own commit before the first real scoring
 - **Observed:** orch/46 and orch/47 each committed `criteria.md` alone, before any real-corpus scoring, and graded the verdict against the commit hash recorded in the evidence note. Both also hit a corpus problem a clone does not reveal: the clone holds no historical corpus root (orch/47's recount check failed with 314 missing sources at baseline; orch/46 found no files if the projects root sits under a symlink).
 - **Where:** `.orchestra/46-compaction-replay-eval` (`criteria.md`, `evidence/real-run.md`), `.orchestra/47-diff-triage-eval` (`criteria.md`, deferred findings).
