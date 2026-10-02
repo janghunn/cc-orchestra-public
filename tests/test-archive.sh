@@ -2064,6 +2064,83 @@ put(path, 'modified artifact\n')
 rejected('reject', 'artifact-corrupt', 'artifact-hash')
 ok(True, 'changed records/files, guarded-id collisions, broken histories and edited artifacts reject before writes')
 
+# Round 2: released source ids remain intact after namespacing, including in references.
+clone('bee', 'released-id-source')
+clone('original', 'released-id-dest')
+released_id = 'AKIA' + 'PONMLKJIHGFEDCBA'
+value = catalog('released-id-source')
+value['sessions'][released_id] = dict(copy.deepcopy(value['sessions']['alpha']), id=released_id)
+value['tasks']['demo--01-shared']['sessions'].append(released_id)
+save_catalog('released-id-source', value)
+put(home / 'released-id-dest/allowlist', 'sha256:' + archive.sha(released_id.encode()) + '\n')
+assert verified('released-id-source')
+data = report(imported('released-id-dest', 'released-id-source', 'bee'))
+assert data['withheld_count'] == 0 and not data['withheld']
+assert not catalog('released-id-dest')['hosts']['bee']['withheld']
+assert (home / 'released-id-dest/vault/sessions' / ('bee--' + released_id + '.md')).is_file()
+fields, _ = archive.frontmatter((home / 'released-id-dest/vault/tasks/bee--demo--01-shared.md').read_text())
+assert '[[sessions/bee--' + released_id + ']]' in fields['sessions']
+assert 'commit: none' in imported('released-id-dest', 'released-id-source', 'bee')
+ok(verified('released-id-dest'), 'locally released ids retain namespaced links; report guarding does not create withheld items')
+
+# Every reference must address the raw files import actually copies, even when verify
+# accepts the same bytes under a hidden filename. Exercise all pointer-bearing inputs.
+def hidden_blob(name, pointer):
+    source = home / name / 'raw' / pointer['blob']
+    hidden = source.parent / '.hidden.gz'
+    put(hidden, source.read_bytes())
+    pointer['blob'] = str(hidden.relative_to(home / name / 'raw'))
+
+def replace_manifest(name, pointer, manifest):
+    data = archive.json_bytes(manifest, compact=True)
+    digest = archive.sha(data)
+    rel = f'blobs/{digest[:2]}/{digest}.gz'
+    put(home / name / 'raw' / rel, gzip.compress(data, mtime=0))
+    pointer.update(blob=rel, sha256=digest, length=len(data))
+
+for location in ('snapshot', 'session', 'task-entry', 'project-entry', 'history-chunk', 'history-tail'):
+    source_name = 'hidden-' + location
+    clone('bee', source_name)
+    value = catalog(source_name)
+    snapshot = next(iter(value['tasks']['demo--01-shared']['snapshots'].values()))
+    if location == 'snapshot':
+        hidden_blob(source_name, snapshot['manifest'])
+    elif location == 'session':
+        pointer = next(pointer for pointer in archive.pointer_values(value['sessions']['alpha']) if 'blob' in pointer)
+        hidden_blob(source_name, pointer)
+    elif location.endswith('-entry'):
+        pointer = snapshot['manifest'] if location == 'task-entry' else value['projects']['demo']['manifests'][0]
+        manifest = json.loads(gzip.decompress((home / source_name / 'raw' / pointer['blob']).read_bytes()))
+        embedded = next(pointer for pointer in archive.pointer_values(manifest['entries']) if 'blob' in pointer)
+        hidden_blob(source_name, embedded)
+        replace_manifest(source_name, pointer, manifest)
+    else:
+        path = next((home / source_name / 'raw/sources').glob('*.json'))
+        history = json.loads(path.read_bytes())
+        generation = history['generations'][0]
+        if location == 'history-tail':
+            generation['tail'] = generation['chunks'].pop()
+            prefix = b''.join(gzip.decompress((home / source_name / 'raw' / pointer['blob']).read_bytes())
+                              for pointer in generation['chunks'])
+            generation['prefix_sha256'] = archive.sha(prefix)
+            hidden_blob(source_name, generation['tail'])
+        else:
+            hidden_blob(source_name, generation['chunks'][0])
+        put(path, archive.json_bytes(history))
+    save_catalog(source_name, value)
+    assert verified(source_name), location
+    rejected('reject', source_name, 'blob-name')
+ok(True, 'noncanonical blob pointers in records, both manifest kinds, chunks and tails reject before writes')
+
+clone('bee', 'extra-vault-pointer')
+value = catalog('extra-vault-pointer')
+value['sessions']['alpha']['fields']['extra'] = {'path': 'extra.txt', 'sha256': archive.sha(b'x\n')}
+put(home / 'extra-vault-pointer/vault/extra.txt', b'x\n')
+save_catalog('extra-vault-pointer', value)
+assert verified('extra-vault-pointer')
+rejected('reject', 'extra-vault-pointer', 'unsafe-path')
+ok(True, 'vault pointers outside the copied artifact set reject before writes')
+
 # 15: syntax checks keep caches in the fixture home.
 subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)
 subprocess.run(['python3', '-m', 'py_compile', str(command), str(repo / 'lib/orch_archive.py')], check=True,

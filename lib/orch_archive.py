@@ -2755,22 +2755,25 @@ class Importer:
             for identifier, original in sorted(self.incoming[kind].items()):
                 new = self.maps[kind][identifier]
                 try:
-                    record = copy.deepcopy(original)
+                    # Guard source values before composing ids: an allowed original id
+                    # does not imply an allow-list entry for its host-prefixed spelling.
+                    record = self.guard.tree(copy.deepcopy(original), new, "import")
                     record.update(id=new, host=self.host)
                     if kind == "tasks":
-                        record["project"] = self.maps["projects"][record["project"]]
-                        record["sessions"] = sorted(self.maps["sessions"][sid] for sid in record["sessions"])
+                        record["project"] = self.maps["projects"][original["project"]]
+                        record["sessions"] = sorted(self.maps["sessions"][sid] for sid in original["sessions"])
                         for key in RELATION_KEYS:
-                            record[key] = sorted(self.maps["tasks"][tid] for tid in record.get(key, []))
-                        for key, thumbnail in record.get("thumbnails", {}).items():
+                            record[key] = sorted(self.maps["tasks"][tid] for tid in original.get(key, []))
+                        for key, thumbnail in original.get("thumbnails", {}).items():
                             rel = f"artifacts/tasks/{identifier}/thumbs/{key}.jpg"
                             if thumbnail["path"] != rel or not re.fullmatch(r"[0-9a-f]{24}", key):
                                 self.reject("unsafe-path", thumbnail["path"])
                                 continue
                             self.thumbnail_refs[rel] = copy.deepcopy(thumbnail)
-                            thumbnail["path"] = f"artifacts/tasks/{new}/thumbs/{key}.jpg"
+                            record["thumbnails"][key]["path"] = f"artifacts/tasks/{new}/thumbs/{key}.jpg"
                     elif kind == "projects":
-                        for thumbnails in record.get("thumbnails", {}).values():
+                        for root, thumbnails in original.get("thumbnails", {}).items():
+                            guarded_root = self.guard.value(root, new, "import/thumbnails", "path")
                             for key, thumbnail in thumbnails.items():
                                 rel = thumbnail["path"]
                                 pattern = rf"artifacts/roots/{re.escape(identifier)}/[0-9a-f]{{12}}/thumbs/{re.escape(key)}\.jpg"
@@ -2778,8 +2781,8 @@ class Importer:
                                     self.reject("unsafe-path", rel)
                                     continue
                                 self.thumbnail_refs[rel] = copy.deepcopy(thumbnail)
-                                thumbnail["path"] = rel.replace(f"artifacts/roots/{identifier}/", f"artifacts/roots/{new}/", 1)
-                    record = self.guard.tree(record, new, "import")
+                                record["thumbnails"][guarded_root][key]["path"] = rel.replace(
+                                    f"artifacts/roots/{identifier}/", f"artifacts/roots/{new}/", 1)
                     self.records[kind][new] = record
                     if new in self.local[kind] and self.local[kind][new].get("host") == self.host and self.local[kind][new] != record:
                         self.reject("existing-differs", f"{kind}/{new}")
@@ -2790,6 +2793,45 @@ class Importer:
         # Raw scan and verify have already checked this pointer's uncompressed digest/length.
         data = gzip.decompress((self.src_raw / pointer["blob"]).read_bytes())
         return json.loads(data)["entries"]
+
+    def check_blob_pointers(self, value):
+        for pointer in pointer_values(value):
+            if "blob" not in pointer:
+                continue
+            digest = pointer.get("sha256")
+            if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or
+                    pointer["blob"] != f"blobs/{digest[:2]}/{digest}.gz"):
+                self.reject("blob-name", pointer["blob"])
+
+    def validate_raw_pointers(self):
+        # verify permits other contained paths; import copies only canonical blobs.
+        for kind in ("tasks", "sessions", "projects"):
+            for record in self.incoming[kind].values():
+                self.check_blob_pointers(record)
+        for data in self.sources.values():
+            self.check_blob_pointers(json.loads(data))
+        if self.rejected:
+            return
+        try:
+            manifests = [snapshot["manifest"] for task in self.incoming["tasks"].values()
+                         for snapshot in task["snapshots"].values()]
+            manifests.extend(pointer for project in self.incoming["projects"].values()
+                             for pointer in project.get("manifests", []))
+            for pointer in manifests:
+                if pointer["sha256"] not in self.blobs:
+                    self.reject("source-verify", pointer["blob"])
+                    continue
+                self.check_blob_pointers(self.manifest_entries(pointer))
+        except (OSError, EOFError, zlib.error, *self.MALFORMED):
+            self.reject("source-verify", "invalid manifest")
+
+    def validate_vault_pointers(self):
+        for records in self.records.values():
+            for record in records.values():
+                for pointer in pointer_values(record):
+                    if "blob" not in pointer and (
+                            not isinstance(pointer["path"], str) or pointer["path"] not in self.artifacts):
+                        self.reject("unsafe-path", pointer["path"])
 
     def artifact_hash(self, kind, identifier, snapshot, relpath, digest):
         if kind == "tasks":
@@ -2976,7 +3018,9 @@ class Importer:
                             "new": self.new_files[:top], "changed": self.changed_files[:top]},
                   "withheld_count": len(self.guard.items), "withheld": self.withheld()[:top],
                   "rejected": {"count": len(rejected), "items": rejected[:top]}}
-        return self.guard.tree(report, "import", "report")
+        report_guard = Guard(self.p)
+        report_guard.released = set(self.guard.released)
+        return report_guard.tree(report, "import", "report")
 
     def prepare(self):
         if not self.rejected:
@@ -2985,10 +3029,13 @@ class Importer:
             return
         self.map_ids()
         self.scan_raw()
+        self.validate_raw_pointers()
         self.build_records()
         # Invalid raw data cannot safely supply artifact manifests.
         if not self.rejected:
             self.scan_artifacts()
+        if not self.rejected:
+            self.validate_vault_pointers()
         if not self.rejected:
             self.render()
 
