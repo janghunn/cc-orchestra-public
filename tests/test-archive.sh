@@ -841,6 +841,18 @@ def gray16_png():
 def bomb_png():
     return png(20000, 20000, 2, 8, None, idat=zlib.compress(b'\x00\x01\x02'))
 
+def solid_png(width, height):
+    return png(width, height, 2, 8, [bytes((x * 7 + 40) % 256 for x in range(width * 3))] * height)
+
+def trns_gray16_png():
+    # Samples equal to the tRNS key (0) are transparent; 100 is a different, almost black sample.
+    row = struct.pack('>H', 0) * 20 + struct.pack('>H', 100) * 5 + struct.pack('>H', 40000) * 15
+    return png(40, 20, 0, 16, [row] * 20, trns=struct.pack('>H', 0))
+
+def trns_rgb16_png():
+    key = struct.pack('>HHH', 1000, 2000, 3000)
+    return png(40, 20, 2, 16, [key * 20 + struct.pack('>HHH', 60000, 10000, 10000) * 20] * 20, trns=key)
+
 def jpeg_size(data):
     assert data[:2] == b'\xff\xd8', 'not a JPEG'
     i = 2
@@ -871,8 +883,9 @@ FILES = {'rgb.png': rgb_png(), 'nested/alpha.png': rgba_png(), 'paletted.png': p
 checked_applies = 0
 
 class Scn:
-    def __init__(self, name, files=None, conf=''):
+    def __init__(self, name, files=None, conf='', state=False):
         self.root = home / name
+        self.state = self.root / 'state' if state else None
         self.base = self.root / 'proj'
         self.task = self.base / '.orchestra/01-task'
         self.vault, self.raw, self.conf = self.root / 'vault', self.root / 'raw', self.root / 'archive.conf'
@@ -887,7 +900,7 @@ class Scn:
 
     def env(self, **extra):
         env = dict(os.environ, ORCH_ARCHIVE_VAULT=str(self.vault), ORCH_ARCHIVE_RAW=str(self.raw),
-                   ORCH_ARCHIVE_ALLOWLIST=str(self.root / 'allow.txt'), ORCH_ARCHIVE_STATE_DIRS='',
+                   ORCH_ARCHIVE_ALLOWLIST=str(self.root / 'allow.txt'), ORCH_ARCHIVE_STATE_DIRS=str(self.state) if self.state else '',
                    ORCH_ARCHIVE_CLAUDE_PROJECTS=str(self.root / 'claude'), ORCH_ARCHIVE_CODEX_HOME=str(self.root / 'codex'),
                    CODEX_HOME=str(self.root / 'codex'), ORCH_ARCHIVE_EXTRA_BASES=str(self.base),
                    ORCH_ARCHIVE_POLICY=str(self.conf))
@@ -1386,6 +1399,71 @@ if HAVE_ANY:
         skip('discarded thumbnail spool cleanup', 'Pillow is not available')
 else:
     skip('thumbnail spool files', 'neither Pillow nor ffmpeg is available')
+
+# round 2: per-root thumbnail records, tiny budgets, one-pixel sizes, 16-bit transparency -----------------
+if HAVE_ANY:
+    shared_png = FILES['paletted.png']
+    twin = Scn('twin-roots', state=True)
+    for checkout in ('a', 'b'):
+        put(twin.state / f'worktrees/proj/{checkout}/.orchestra/chart.png', shared_png)
+    twin_first = twin.run('apply')
+    twin_thumbs = sorted(twin.vault.glob('artifacts/roots/proj/*/thumbs/*.jpg'))
+    twin_projects = twin.catalog()['projects']['proj']
+    twin_again = twin.run('apply')
+    root_damage = []
+    for victim in twin_thumbs:
+        original = victim.read_bytes()
+        victim.write_bytes(original[:len(original) // 2] + bytes([original[len(original) // 2] ^ 1]) + original[len(original) // 2 + 1:])
+        root_damage.append('invalid' in twin.run('verify', code=1))
+        victim.write_bytes(original)
+    ok(len(twin_thumbs) == 2 and 'images: 2 encoded, 0 reused' in twin_first and len(twin_projects['thumbnails']) == 2
+       and 'images: 0 encoded, 2 reused' in twin_again and '0 files written' in twin_again and 'commit: none' in twin_again
+       and root_damage == [True, True] and 'verify: OK' in twin.run('verify'),
+       'identical PNGs in two roots of one project keep separate records: re-apply is a no-op and corrupting either root thumbnail fails verify')
+
+    tiny = Scn('tiny-budget', {'dot.png': solid_png(1, 1)}, 'PAYLOAD_TASK_MAX_BYTES=100\n')
+    tiny_report = tiny.report('apply', '--json')
+    ok(len(solid_png(1, 1)) < 100 and tiny_report['images']['metadata_only'] == {'payload-over-budget': 1} and not tiny.thumbs()
+       and tiny.snapshot_rows()[0]['reason'] == 'payload-over-budget',
+       'each image reserves the full THUMB_MAX_BYTES, so a tiny PNG cannot slip a larger JPEG past a small task budget')
+
+SIZES = {'col.png': (1, 20), 'row.png': (20, 1), 'dot.png': (1, 1), 'odd.png': (3, 5)}
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: 1x20, 20x1, 1x1 and odd-sized PNGs, and THUMB_MAX_EDGE=1, all produce thumbnails (exit 0)'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    thin = Scn('thin-' + encoder, {name: solid_png(*size) for name, size in SIZES.items()}, f'THUMB_ENCODER={encoder}\n')
+    thin_report = thin.report('apply', '--json')
+    thin_sizes = sorted(jpeg_size((thin.vault / r['path']).read_bytes()) for r in thin.task_record()['thumbnails'].values())
+    edge = Scn('edge1-' + encoder, {'wide.png': FILES['rgb.png'], 'col.png': solid_png(1, 20)}, f'THUMB_ENCODER={encoder}\nTHUMB_MAX_EDGE=1\n')
+    edge_report = edge.report('apply', '--json')
+    edge_sizes = [jpeg_size((edge.vault / r['path']).read_bytes()) for r in edge.task_record()['thumbnails'].values()]
+    ok(thin_report['images']['thumbnails'] == 4 and thin_sizes == sorted(SIZES.values())
+       and edge_report['images']['thumbnails'] == 2 and edge_sizes == [(1, 1), (1, 1)] and not edge_report['source_errors']['count'],
+       description)
+
+TRNS = {'gray16-trns.png': trns_gray16_png(), 'rgb16-trns.png': trns_rgb16_png()}
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: 16-bit gray and 16-bit RGB tRNS keys become white, other samples stay'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    if not HAVE_PIL:
+        # Without Pillow the JPEG pixels cannot be decoded here; only the structure is checked.
+        scn = Scn('trns-' + encoder, TRNS, f'THUMB_ENCODER={encoder}\n')
+        scn.report('apply', '--json')
+        ok(len(scn.thumbs()) == 2, description + ' (structure only; Pillow is needed to decode pixels)')
+        continue
+    scn = Scn('trns-' + encoder, TRNS, f'THUMB_ENCODER={encoder}\n')
+    scn.report('apply', '--json')
+    by_source = {r['source']['sha256']: (scn.vault / r['path']).read_bytes() for r in scn.task_record()['thumbnails'].values()}
+    gray, rgb = by_source[sha(TRNS['gray16-trns.png'])], by_source[sha(TRNS['rgb16-trns.png'])]
+    key_gray, near_key, light_gray = pixel(gray, (3, 10)), pixel(gray, (21, 10)), pixel(gray, (35, 10))
+    key_rgb, opaque_rgb = pixel(rgb, (3, 10)), pixel(rgb, (35, 10))
+    ok(min(key_gray) >= 240 and max(near_key) < 80 and 100 < light_gray[0] < 220
+       and min(key_rgb) >= 240 and opaque_rgb[0] > 150 and opaque_rgb[1] < 100,
+       description)
 
 # policy validation ---------------------------------------------------------------------------------------
 policy_checks = [('IMAGE_EXTENSIONS=.bmp\n', 'IMAGE_EXTENSIONS supports only .png'), ('THUMB_ENCODER=magic\n', 'THUMB_ENCODER must be auto, pillow, ffmpeg or none'),

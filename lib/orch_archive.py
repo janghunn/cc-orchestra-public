@@ -51,7 +51,7 @@ COPIED_ARTIFACT_PATH = SNAPSHOT_DIR + r"/files/.+"
 # Thumbnails are content-keyed per task or root, never per snapshot.
 THUMBNAIL_PATH = r"artifacts/(?:tasks/[^/]+|roots/[^/]+/[0-9a-f]{12})/thumbs/[0-9a-f]{24}\.jpg"
 # Bump when the encoding recipe changes; it is part of the recorded parameters and forces a re-encode.
-THUMB_RECIPE = 1
+THUMB_RECIPE = 2
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_COLOR_DEPTHS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
 FFMPEG_TIMEOUT = 120
@@ -1165,6 +1165,30 @@ def jpeg_dimensions(data):
     return None
 
 
+def png_depth(path):
+    """Bit depth from the IHDR (the file already passed png_info)."""
+    with open(path, "rb") as stream:
+        header = stream.read(26)
+    return header[24] if len(header) == 26 else 0
+
+
+def sample_mask(image, key):
+    """"L" image, 255 where a 16-bit gray sample equals `key`, else 0; byte slicing keeps it at C speed."""
+    data = image.tobytes()
+    if image.mode == "I":
+        stride, low, high = 4, *((0, 1) if sys.byteorder == "little" else (3, 2))
+    else:
+        stride, low, high = 2, *((1, 0) if image.mode == "I;16B" else (0, 1))
+    parts = []
+    for offset, wanted in ((low, key & 255), (high, key >> 8)):
+        table = bytes(255 if value == wanted else 0 for value in range(256))
+        parts.append(int.from_bytes(data[offset::stride].translate(table), "big"))
+    length = len(data) // stride
+    del data
+    from PIL import Image
+    return Image.frombytes("L", image.size, (parts[0] & parts[1]).to_bytes(length, "big"))
+
+
 def thumbnail_size(width, height, edge):
     """Longest edge at most `edge`; never upscales."""
     longest = max(width, height)
@@ -1248,10 +1272,23 @@ class ImageEncoder:
             source.load()
             mode = source.mode
             if mode.startswith("I;16") or mode == "I":
-                # 16-bit samples are scaled down to 8 bits; any transparency is ignored for these modes.
+                # 16-bit samples are scaled down to 8 bits; a tRNS key becomes an alpha mask (no numpy).
                 wide = source if mode == "I" else source.convert("I")
                 base = wide.point(lambda value: value * (1 / 256)).convert("L")
                 del wide
+                if isinstance(source.info.get("transparency"), int):
+                    from PIL import ImageChops
+                    mask = sample_mask(source, source.info["transparency"])
+                    base = base.convert("RGBA")
+                    base.putalpha(ImageChops.invert(mask))
+            elif mode == "RGB" and isinstance(source.info.get("transparency"), tuple) and png_depth(path) == 16:
+                # Pillow keeps the 16-bit key but decodes to 8 bits: match the key's high bytes (an approximation).
+                from PIL import ImageChops
+                bands = [band.point(lambda value, key=key >> 8: 255 if value == key else 0)
+                         for band, key in zip(source.split(), source.info["transparency"])]
+                base = source.convert("RGBA")
+                base.putalpha(ImageChops.invert(ImageChops.darker(ImageChops.darker(bands[0], bands[1]), bands[2])))
+                del bands
             elif mode in ("RGBA", "LA", "PA") or "transparency" in source.info:
                 base = source.convert("RGBA")
             elif mode in ("L", "RGB"):
@@ -1286,7 +1323,7 @@ class ImageEncoder:
             tw, th = thumbnail_size(width, height, edge)
             # Quality 95 -> -q:v 2 and quality 1 -> -q:v 31, linear in between (mjpeg's qscale range).
             qscale = min(31, max(2, round(31 - (quality - 1) * 29 / 94)))
-            graph = (f"[0:v]scale={tw}:{th}:flags=lanczos,format=rgba[f];color=c=white:s={tw}x{th}[b];"
+            graph = (f"[0:v]scale={tw}:{th}:flags=lanczos,format=rgba[f];color=c=white:s={tw}x{th},format=rgba[b];"
                      "[b][f]overlay=shortest=1,format=yuvj420p[o]")
             command = [self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1",
                        "-protocol_whitelist", "pipe", "-i", "pipe:0", "-filter_complex", graph, "-map", "[o]",
@@ -1406,8 +1443,9 @@ class Archive:
             try:
                 st = path.lstat()
                 if stat.S_ISREG(st.st_mode) and path.suffix.lower() in self.p["IMAGE_EXTENSIONS"]:
-                    # An image can only ever contribute its thumbnail, never its source bytes.
-                    payload_total += min(st.st_size, self.p["THUMB_MAX_BYTES"])
+                    # An image can only ever add its thumbnail (never its source bytes), and a JPEG may be
+                    # larger than a tiny PNG, so each image reserves the full per-thumbnail cap.
+                    payload_total += self.p["THUMB_MAX_BYTES"]
                 elif stat.S_ISREG(st.st_mode) and path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] | self.p["CHECKPOINT_EXTENSIONS"] and path.name != ".codex-session":
                     payload_total += st.st_size
             except OSError as error:
@@ -1669,9 +1707,10 @@ class Archive:
                     root_files.append(path)
             # A root's artifacts use the same dispositions, but no extra snapshot directory.
             root_prefix = f"artifacts/roots/{project}/{sha(str(root).encode())[:12]}"
-            rid, rentries, root_texts = self.scan_files(root, project, root_prefix, root_files, project_record.get("thumbnails"))
+            rid, rentries, root_texts = self.scan_files(root, project, root_prefix, root_files, project_record.get("thumbnails", {}).get(safe_root))
             if rentries["thumbnails"]:
-                project_record.setdefault("thumbnails", {}).update(rentries["thumbnails"])
+                # Thumbnail keys are content hashes, so records are namespaced per root (each root has its own files).
+                project_record.setdefault("thumbnails", {}).setdefault(safe_root, {}).update(rentries["thumbnails"])
             if rentries["images"]:
                 project_record.setdefault("images", {})[safe_root] = rentries["images"]
             elif safe_root in project_record.get("images", {}):

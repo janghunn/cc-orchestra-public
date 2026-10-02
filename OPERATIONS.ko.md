@@ -1052,8 +1052,8 @@ IHDR, chunk CRC, IEND까지의 chunk)를 거친다. 통과하지 못한 파일(`
 기록). 작업 노트와 catalog에는 이미지마다 상대 경로, 크기, UTC mtime, 원본 SHA-256, 픽셀
 크기, thumbnail 경로·바이트 수·픽셀 크기, 인코더 id와 버전, 사용한 파라미터를 기록한다. SHA-256과
 전체 chunk CRC 검사는 `PAYLOAD_FILE_MAX_BYTES` 이내의 원본에만 수행하며, 더 큰 원본은 seek만
-하는 chunk 순회로 검증하고 해시를 남기지 않는다. 작업 payload 예산은 이미지를 원본 크기가 아니라
-최대 `THUMB_MAX_BYTES`(thumbnail)로 계산하며, 한 번에 이미지 하나만 메모리에 디코딩한다.
+하는 chunk 순회로 검증하고 해시를 남기지 않는다. 작업 payload 예산은 이미지마다 원본 크기가 아니라
+`THUMB_MAX_BYTES`(thumbnail 상한)를 예약하며, 한 번에 이미지 하나만 메모리에 디코딩한다.
 
 thumbnail의 멱등성은 한 머신 안에서만 보장한다. 원본(해시·크기·mtime), 인코더 id/버전,
 파라미터 중 하나가 바뀔 때만 다시 인코딩한다. JPEG 출력은 인코더와 Pillow 버전마다 다르므로
@@ -1101,6 +1101,8 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
 - `--measure-thumbnails` 없는 `plan`은 픽셀 데이터 손상을 감지할 수 없다(`pending`으로 보고).
   `apply`와 측정 plan만 디코딩한다. `PAYLOAD_FILE_MAX_BYTES`를 넘는 원본은 인코딩 전에
   chunk CRC 검사와 해시가 없다.
+- tRNS 키가 있는 16비트 RGB PNG는 Pillow가 8비트로 디코딩하므로 키의 상위 바이트로 일치를
+  판정한다. 키와 하위 바이트만 다른 샘플도 흰색이 될 수 있다. 16비트 gray 키는 정확히 일치시킨다.
 - PNG만 지원한다. `.bmp`, `.tif` 등 다른 래스터 형식은 payload 한도를 따른다.
 - Pillow 9.0.1 호환은 (신규 전용 호출을 쓰지 않는) 구조로 확보했으며 실행해 보지는 않았다.
   thumbnail의 Obsidian embed 렌더링도 시각적으로 확인하지 않았다.

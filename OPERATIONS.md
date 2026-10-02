@@ -1004,8 +1004,8 @@ looks valid but cannot be decoded (`decode-failed`, metadata only). The task not
 record, per image, the relative path, size, UTC mtime, source SHA-256, pixel dimensions, thumbnail
 path, size and dimensions, encoder id and version, and the parameters used. The SHA-256 (and the
 full chunk-CRC read) is computed only for sources within `PAYLOAD_FILE_MAX_BYTES`; larger
-sources are validated by a seek-only chunk walk and keep no hash. The task payload budget counts
-each image as at most `THUMB_MAX_BYTES` (its thumbnail), not its source bytes, and only one
+sources are validated by a seek-only chunk walk and keep no hash. The task payload budget
+makes each image reserve `THUMB_MAX_BYTES` (its thumbnail cap), not its source bytes, and only one
 decoded image is held in memory at a time.
 
 Thumbnails are idempotent per machine, not across machines: an image is re-encoded only when its
@@ -1055,6 +1055,9 @@ verified; Bases needs Obsidian >= 1.9.0.
 - `plan` without `--measure-thumbnails` cannot detect pixel-data corruption (reported as
   `pending`); only `apply` or the measuring plan decodes. Sources above `PAYLOAD_FILE_MAX_BYTES`
   get no chunk-CRC check and no hash before encoding.
+- A 16-bit RGB PNG with a tRNS key is matched on the key's high bytes (Pillow decodes it to 8 bits),
+  so samples differing from the key only in the low byte may also turn white; 16-bit gray keys
+  are matched exactly.
 - Only PNG is supported; `.bmp`, `.tif` and other raster formats follow the payload limits.
 - Pillow 9.0.1 compatibility is by construction (no newer-only calls) and has not been run;
   Obsidian embed rendering of the thumbnails has not been checked visually.
