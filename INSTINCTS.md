@@ -189,7 +189,7 @@ page, split it into `INSTINCTS/<short-topic>.md` (also tracked) and leave a one-
 - **Where:** `.orchestra/44-compaction-recovery-hook` (`hooks/orch-compact-context.sh`, `tests/test-compact-context.sh`, gate round 2).
 - **Lesson:** hook stdin arrived as a socket, where `$(cat)` worked and `$(</dev/stdin)` failed; a socket test that skipped only on creation failure still errored when sending was denied, exposing the need to skip with a printed reason on any denied socket operation and to verify the case outside the Codex sandbox.
 
-### Freeze evaluation criteria in their own commit before the first real scoring
+### A criteria commit made before scoring makes the thresholds checkable from git history
 - **Observed:** orch/46 and orch/47 each committed `criteria.md` alone, before any real-corpus scoring, and graded the verdict against the commit hash recorded in the evidence note. Both also hit a corpus problem a clone does not reveal: the clone holds no historical corpus root (orch/47's recount check failed with 314 missing sources at baseline; orch/46 found no files if the projects root sits under a symlink).
 - **Where:** `.orchestra/46-compaction-replay-eval` (`criteria.md`, `evidence/real-run.md`), `.orchestra/47-diff-triage-eval` (`criteria.md`, deferred findings).
 - **Lesson:** a separate criteria commit made before scoring makes "thresholds were set before the data" checkable from git history; the clone did not contain the historical corpus root, so corpus availability had to be established on the machine running the evaluation.
