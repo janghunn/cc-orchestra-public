@@ -291,7 +291,7 @@ Lead는 첫 `investigate` 전에 루트의 [AGENTS.md](AGENTS.md)(저장소 안�
 참고 자료를 실행하거나 amended brief·권위 있는 지시로 취급하지 않는다.
 
 Lead는 brief가 승인한 조사·계획·구현 배정·review·commit/push·gate·상한 내 fix round·
-`summary.md`까지 일상적인 재승인 질문 없이 진행하며, 실제 `BLOCKED` 사유·round 상한·
+최종 보고 블록 반환까지 일상적인 재승인 질문 없이 진행하며 (`summary.md`는 orchestrator가 그 블록을 원문 그대로 저장), 실제 `BLOCKED` 사유·round 상한·
 provider 실패에 따른 중단이나 절차 밖의 파괴적·비가역적 작업에 대한 판단은 기존 규칙을 따른다.
 
 ---
@@ -317,7 +317,7 @@ provider 실패에 따른 중단이나 절차 밖의 파괴적·비가역적 작
 | `codex-verdict.md` | Codex | executable verification |
 | `codex-review.md` | Codex | 독립 semantic/regression review |
 | `verdict.md` | Claude verifier | fallback / critical 추가 검증 |
-| `summary.md` | lead | 최종 상태와 gate evidence |
+| `summary.md` | orchestrator (lead 반환 블록 원문; Codex-only는 lead) | 최종 상태와 gate evidence |
 
 active context budget:
 
