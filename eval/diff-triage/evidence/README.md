@@ -1,7 +1,7 @@
 # Real-run provenance and interpretation
 
 The lead ran these commands from the clone root on 2026-10-02 at commit
-`31fcde3`:
+`0d1a92d`:
 
 ```bash
 export GATE_AB_ROOT=<corpus root>
@@ -9,8 +9,8 @@ unshare -rn python3 eval/diff-triage/build_labels.py --note eval/diff-triage/evi
 /usr/bin/time -v unshare -rn python3 eval/diff-triage/run_eval.py --s3 auto --note eval/diff-triage/evidence/real-run.md
 ```
 
-Label building exited 0. Evaluation exited 0; wall time was `0:01.28` and
-maximum RSS was `29696 KiB`.
+Label building exited 0. Evaluation exited 0; wall time was `0:01.33` and
+maximum RSS was `30720 KiB`.
 Private outputs used the default
 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/diff-triage`.
 The script-generated aggregates are in [label-counts.md](label-counts.md) and
@@ -18,7 +18,9 @@ The script-generated aggregates are in [label-counts.md](label-counts.md) and
 
 The first run at `2e59193` gave the same verdict; it was re-run after a gate-review
 fix made scorer inputs independent of git configuration (full blob ids in patch
-index lines), which changes only S0's seeded permutations.
+index lines), which changes only S0's seeded permutations; it was re-run again at
+`0d1a92d` after history reads moved to an isolated shared bare clone (git attributes
+isolation), with identical metrics to the `31fcde3` run.
 
 The following corpus SHA-256 hashes were identical before and after the run:
 

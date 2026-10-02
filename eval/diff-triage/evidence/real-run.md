@@ -34,9 +34,9 @@ series S S2 mean metrics: {"first_rank": 1.5, "normalized_first_rank": 0.1, "rec
 series S: INSUFFICIENT DATA
 verdict: inconclusive (primary thresholds not resolved)
 S3 skipped: configured GGUF absent; llama-server unavailable; GPU with at least 12288 MiB free unavailable
-fingerprint before: {"corpus": {"0": "2c874529d069e78c719ebf8174d6c0caddf84a58301eb0869e4f800255e617e2", "1": "7f5935c9d18561e746ef67d000d14928c02586c98f9a16d6a0f138047cc812a0"}, "head": "31fcde33f4a3f41a286e4584c07510e2b4df66e7", "refs": "5d89b96c341b2e5f071f140257b8c598886da572dc8a239e89ec9c0ae3f35674", "status": "b07d319e099bfe156611560ea14c3393c365191cdfada3d57ead56c6519aa1ce"}
-fingerprint after: {"corpus": {"0": "2c874529d069e78c719ebf8174d6c0caddf84a58301eb0869e4f800255e617e2", "1": "7f5935c9d18561e746ef67d000d14928c02586c98f9a16d6a0f138047cc812a0"}, "head": "31fcde33f4a3f41a286e4584c07510e2b4df66e7", "refs": "5d89b96c341b2e5f071f140257b8c598886da572dc8a239e89ec9c0ae3f35674", "status": "b07d319e099bfe156611560ea14c3393c365191cdfada3d57ead56c6519aa1ce"}
+fingerprint before: {"corpus": {"0": "2c874529d069e78c719ebf8174d6c0caddf84a58301eb0869e4f800255e617e2", "1": "7f5935c9d18561e746ef67d000d14928c02586c98f9a16d6a0f138047cc812a0"}, "head": "0d1a92d8adf72fc544072e7c296586f9fde0f446", "refs": "a328bf2095b4ad3535a6065a7ae3158a3dcfdd8e0f2661b37441b4f4e8d53002", "status": "b07d319e099bfe156611560ea14c3393c365191cdfada3d57ead56c6519aa1ce"}
+fingerprint after: {"corpus": {"0": "2c874529d069e78c719ebf8174d6c0caddf84a58301eb0869e4f800255e617e2", "1": "7f5935c9d18561e746ef67d000d14928c02586c98f9a16d6a0f138047cc812a0"}, "head": "0d1a92d8adf72fc544072e7c296586f9fde0f446", "refs": "a328bf2095b4ad3535a6065a7ae3158a3dcfdd8e0f2661b37441b4f4e8d53002", "status": "b07d319e099bfe156611560ea14c3393c365191cdfada3d57ead56c6519aa1ce"}
 unchanged: yes
-runtime seconds: 1.242226
-peak RSS SELF KiB: 29696
-peak RSS CHILDREN KiB: 29696
+runtime seconds: 1.290259
+peak RSS SELF KiB: 30720
+peak RSS CHILDREN KiB: 30720
