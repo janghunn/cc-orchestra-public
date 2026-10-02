@@ -24,7 +24,7 @@ import tempfile
 
 STATE = Path(sys.argv[1])
 LEAD = re.compile(r"^(?:route-)?lead-(alpha|bravo|charlie|delta)(?:-(?:light|normal|critical|critical-xhigh))?$")
-INACTIVE = {"PASS", "FAIL", "BLOCKED", "CLOSED", "IDLE", "UNASSIGNED"}
+INACTIVE = {"PASS", "FAIL", "BLOCKED", "ACCEPTED", "CLOSED", "IDLE", "UNASSIGNED"}
 
 
 def journal(event, hook, decision, reason):

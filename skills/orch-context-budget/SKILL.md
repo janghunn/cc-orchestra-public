@@ -18,8 +18,9 @@ still find it.
 ## Where detail goes instead
 - Raw evidence, full command transcripts, repeated investigation rounds → `evidence/` under the
   task directory, linked from `plan.md`'s Findings.
-- Per-round review/fix history → `rounds/<n>.md`, linked from `plan.md`'s Running record, with only the final
-  outcome inline.
+- Per-round review/fix history and every gate result → `rounds/<n>.md` and the gate's own verdict
+  files, linked from `plan.md`'s Running record. `plan.md` carries only the plan and the running
+  record (decisions, agent ids, commit SHAs) — never a gate verdict, because gates read `plan.md`.
 - A long list of file:line citations → keep the 3-5 most load-bearing inline, move the rest to a
   linked evidence file.
 
@@ -36,7 +37,8 @@ still find it.
 2. Collapse multiple investigation rounds that reached the same conclusion into one paragraph with
    a pointer to the raw rounds.
 3. Move raw traces (full command output, full diffs already visible in `git diff`) to a linked
-   file; keep only the verdict and the one line of output that proves it.
+   file; keep only the verdict and the one line of output that proves it in the linked evidence/rounds
+   file. `plan.md` links to it and does not restate a gate verdict.
 4. Only after 1-3, consider whether a section is genuinely out of scope for this file's audience
    (e.g. `plan.md` doesn't need the brief's full prose restated — a link back to `brief.md`
    suffices).

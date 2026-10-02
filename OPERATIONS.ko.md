@@ -182,11 +182,15 @@ orch-model-guard lanes
 claude  healthy
   5h    used=90% headroom=6.000 reset=... in 5m
   7d    used=80% headroom=1.400 reset=... in 1d
-codex   critical
+codex   tight
   7d    used=90% headroom=0.117 reset=... in 6d
 
-dispatch=codex-sparing
+dispatch=codex-first
 ```
+
+Codex headroom `(1-0.90)/(6/7)=0.117`은 `BUDGET_CRITICAL_RATIO=0.10` 이상이고
+`BUDGET_TIGHT_RATIO=0.30` 미만이므로 tight이며, tight는
+`BUDGET_CODEX_SPARING_MIN_RANK=3`(critical)보다 낮으므로 dispatch는 codex-first를 유지합니다.
 
 Claude 사용량은 status-line tap에서 가져옵니다. Codex 사용량은 `~/.codex/sessions/**/rollout-*.jsonl` 중 가장 최신 파일에 있는 `rate_limits.primary` 객체에서 읽습니다. **사용량 확인을 위해 별도의 모델 호출을 추가로 수행하지 않습니다.**
 

@@ -216,6 +216,10 @@ if [ -r "$SUMMARY" ]; then
       if [ "$backend" != codex ] && [ "$risk" = "critical" ] && [ "$claude_verify_ok" = "0" ]; then
         gate_problem "critical risk requires claude-verifier PASS" claude-verifier
       fi
+      if [ "$backend" != codex ] && [ "$claude_verify_ok" = "0" ] && \
+         printf '%s\n' "$gates" | grep -qiE '(^|[^A-Za-z0-9_-])delegated([^A-Za-z0-9_-]|$)'; then
+        gate_problem "GATES delegates criteria to verifier-normal but claude-verifier did not PASS" claude-verifier
+      fi
 
       # An annotation must start with punctuation, not prose that merely mentions a verdict.
       hdrtail='([[:space:]]*$|[[:space:]]+-|[[:space:]]*(—|–|[(:;,.]))'
@@ -311,7 +315,7 @@ if [ -r "$SUMMARY" ]; then
     [ "$rounds" -ge 1 ] || problem error "ROUNDS must be at least 1"
     # trivial and low share the normal cap.
     cap="$NORMAL_GATE_ROUNDS"; [ "$risk" = "critical" ] && cap="$CRITICAL_GATE_ROUNDS"
-    if [ "$rounds" -gt "$cap" ] && ! grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved' "$BRIEF"; then
+    if [ "$rounds" -gt "$cap" ] && ! printf '%s\n' "${nofence:-}" | grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved'; then
       gate_problem "ROUNDS=$rounds exceeds $risk cap=$cap without EXTRA GATE ROUND: approved" ""
     fi
   else

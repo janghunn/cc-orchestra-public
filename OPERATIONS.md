@@ -181,11 +181,15 @@ Example:
 claude  healthy
   5h    used=90% headroom=6.000 reset=... in 5m
   7d    used=80% headroom=1.400 reset=... in 1d
-codex   critical
+codex   tight
   7d    used=90% headroom=0.117 reset=... in 6d
 
-dispatch=codex-sparing
+dispatch=codex-first
 ```
+
+Codex headroom `(1-0.90)/(6/7)=0.117` is ≥ `BUDGET_CRITICAL_RATIO=0.10` and <
+`BUDGET_TIGHT_RATIO=0.30`, so it is tight; tight is below `BUDGET_CODEX_SPARING_MIN_RANK=3`
+(critical), so dispatch stays codex-first.
 
 Claude data comes from the status-line tap. Codex data comes from the newest
 `rate_limits.primary` object in `~/.codex/sessions/**/rollout-*.jsonl`; no extra model call is

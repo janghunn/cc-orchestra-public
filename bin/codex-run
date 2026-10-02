@@ -419,6 +419,9 @@ Rules:
 - Extract the exact Verification commands and run them. Test-created caches/output are allowed;
   product edits are not. Compare git status after testing and report newly created paths.
 - Grade every numbered Acceptance criterion separately using command output or file:line evidence.
+- If the spec lists criteria delegated to \`verifier-normal\` (for example a
+  \`## Verification — delegated to verifier-normal\` section), do not run or grade them and do not
+  count them as INCONCLUSIVE; grade every other criterion and name the delegated ones under CONCERNS.
 - A missing/unrunnable command or uncheckable criterion is INCONCLUSIVE, never PASS.
 - Probe one cheap boundary/error path when the change introduces one. Report scope violations.
 
