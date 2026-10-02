@@ -938,9 +938,24 @@ and 256 MiB total per-task budget; if total payload exceeds the task budget, all
 that snapshot is manifest-only. Change `PAYLOAD_FILE_MAX_BYTES` and `PAYLOAD_TASK_MAX_BYTES`
 before apply (`0` means unlimited), or set `INCLUDE_PAYLOAD=0`. Every omitted payload file
 is listed with its size and reason; the plan reports sizes before and after compression, plus
-vault bytes split into artifacts, manifests, notes, catalog and other files. File entries live
-only in compact manifests; catalog snapshots hold counts and a manifest hash. Artifact copies
+vault bytes split into artifacts, notes, catalog and other files. Generated task/root manifests
+live only in the raw store as deterministic gzip blobs, counted under `raw.manifests`; task
+and project notes reference their blob path, uncompressed SHA-256 and length. Catalog snapshots
+hold counts and manifest pointers. `verify` checks the pointers and manifest JSON. Artifact copies
 are restored from verified raw blobs at write time, so plans retain lengths and pointers.
+
+Checkpoint files are never copied or content-hashed. `CHECKPOINT_EXTENSIONS` defaults to
+`.pt .pth .ckpt .safetensors .onnx .engine .trt .h5 .npz .npy` (case-insensitive; empty disables).
+Their paths, sizes and UTC mtimes appear in task notes; the report lists checkpoint counts,
+bytes and largest tasks. Checkpoints do not consume the payload budget. PNG handling keeps
+the limits above; the first real apply should wait for the separate PNG-to-JPEG thumbnail
+follow-up task. Thumbnails are not implemented in this release.
+
+Unreadable or vanished sources are skipped without aborting the run. `source_errors` reports
+the exact count and a bounded list of guarded paths, reasons and errno values (`--top` controls
+the list). Plan and apply exit **4** if any source errors occurred; apply still writes the
+successful sources and commits. Restore access or the missing source and rerun. Exit 0 means
+success without source errors; existing usage/policy, verify and lock-busy statuses are unchanged.
 
 The existing advisory secret scanner guards all vault-bound text; false positives and false
 negatives are possible. Withheld content stays in the private raw store. `_meta/withheld.md`

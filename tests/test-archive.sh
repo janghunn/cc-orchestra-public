@@ -116,6 +116,10 @@ put(t1 / 'brief.md', (t1 / 'brief.md').read_text().replace('RISK: normal',
 t2 = task(p2, '05-dup', f'STATUS: PASS\n{fence}text\n[lead-alpha] STATUS: FAIL\n{fence}\nBRANCH: orch/05-dup MODE: inplace WORKTREE: /tmp/example\n')
 task(p1, '01-base', 'STATUS: PASS\n')
 task(p1, '02-other', 'STATUS: PASS\n')
+checkpoint_task = task(p1, '10-checkpoints', 'STATUS: PASS\n')
+put(checkpoint_task / 'model.PT', b'C' * 64)
+put(checkpoint_task / 'samples.npy', b'N')
+put(checkpoint_task / 'small.png', b'P')
 running = task(p1, '06-running', extra='Build on orch/01-base\nConstraints as in orch/02-other\nT18 is a test reference.\n')
 task(p1 / '.orchestra/wt/checkout', '07-old', 'STATUS: CLOSED\n')
 task(p3, '01-codex-task')
@@ -185,15 +189,74 @@ for base, recorded in ((p1, 1767225600), (p2, 1767312000), (p3, 1767225600)):
 tree_before = listing(home)
 sources_before = source_hashes()
 report = json.loads(run('--json'))
-ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 10,
+ok(listing(home) == tree_before and not vault.exists() and not raw.exists() and report['logical_tasks'] == 11,
    'default plan writes nothing and discovers nested, empty and Codex-only tasks')
 first = run('apply')
+task_fields, task_body = archive.frontmatter((vault / 'tasks/demo--05-dup.md').read_text())
+manifest_pointer = next(p for p in task_fields['manifests'] if p['snapshot'] ==
+                        next(loc['snapshot'] for loc in catalog()['tasks']['demo--05-dup']['locations'].values() if loc['path'] == str(t1)))
+manifest_blob = raw / manifest_pointer['blob']
+manifest_bytes = gzip.decompress(manifest_blob.read_bytes())
+manifest_value = json.loads(manifest_bytes)
+assert archive.sha(manifest_bytes) == manifest_pointer['sha256'] and len(manifest_bytes) == manifest_pointer['length']
+assert any(e['relpath'] == 'outside-link' and e['kind'] == 'symlink' for e in manifest_value['entries'])
+original_blob = manifest_blob.read_bytes()
+put(manifest_blob, b'corrupted gzip')
+assert 'invalid' in run('verify', code=1)
+put(manifest_blob, original_blob)
+original_catalog = (vault / '_meta/catalog.json').read_bytes()
+invalid_manifest_catalog = json.loads(original_catalog)
+invalid_manifest_bytes = b'not valid JSON\n'
+invalid_manifest_digest = archive.sha(invalid_manifest_bytes)
+invalid_manifest_blob = f'blobs/{invalid_manifest_digest[:2]}/{invalid_manifest_digest}.gz'
+put(raw / invalid_manifest_blob, gzip.compress(invalid_manifest_bytes, mtime=0))
+invalid_manifest_catalog['tasks']['demo--05-dup']['snapshots'][manifest_pointer['snapshot']]['manifest'] = dict(
+    snapshot=manifest_pointer['snapshot'], blob=invalid_manifest_blob, sha256=invalid_manifest_digest, length=len(invalid_manifest_bytes))
+put(vault / '_meta/catalog.json', archive.json_bytes(invalid_manifest_catalog, compact=True))
+assert 'invalid' in run('verify', code=1)
+put(vault / '_meta/catalog.json', original_catalog)
+(raw / invalid_manifest_blob).unlink()
+ok(all('files' in p.relative_to(vault).parts for p in vault.rglob('MANIFEST.json'))
+   and 'symlink: 1' in task_body and 'manifests' not in report['vault_bytes_breakdown']
+   and report['raw']['manifests']['blobs'] > 0 and 'verify: OK' in run('verify'),
+   'generated manifests are raw gzip pointers containing every entry; corrupt blobs fail verify')
+checkpoint_guard = archive.Guard(archive.load_policy())
+checkpoint_discovery = archive.Discovery(archive.load_policy(), checkpoint_guard).run()
+real_capture = archive.capture
+def reject_checkpoint_capture(path, *args, **kwargs):
+    assert Path(path).suffix.lower() not in {'.pt', '.npy'}, f'checkpoint read: {path}'
+    return real_capture(path, *args, **kwargs)
+archive.capture = reject_checkpoint_capture
+try:
+    checkpoint_probe = archive.Archive(archive.load_policy(), checkpoint_discovery, checkpoint_guard).build()
+finally:
+    archive.capture = real_capture
+checkpoint_record = catalog()['tasks']['demo--10-checkpoints']
+checkpoint_snapshot = next(iter(checkpoint_record['snapshots'].values()))
+checkpoint_entries = json.loads(gzip.decompress((raw / checkpoint_snapshot['manifest']['blob']).read_bytes()))['entries']
+checkpoint_body = (vault / 'tasks/demo--10-checkpoints.md').read_text().split('## Checkpoint files (not copied)', 1)[1].split('## Per-snapshot values', 1)[0]
+assert all(e['kind'] == 'checkpoint' and e['reason'] == 'checkpoint-not-copied' and 'sha256' not in e and 'raw' not in e
+           for e in checkpoint_entries if e['relpath'] in ('model.PT', 'samples.npy'))
+assert next(e for e in checkpoint_entries if e['relpath'] == 'small.png')['kind'] == 'raw'
+assert all(f"{e['relpath']} | {e['size']} | {archive.utc(e['mtime'])}" in checkpoint_body
+           for e in checkpoint_entries if e['kind'] == 'checkpoint')
+empty_checkpoint_policy = dict(archive.load_policy(), CHECKPOINT_EXTENSIONS=set())
+empty_checkpoint_guard = archive.Guard(empty_checkpoint_policy)
+disabled_probe = archive.Archive(empty_checkpoint_policy, checkpoint_discovery, empty_checkpoint_guard)
+_, disabled_summary, _ = disabled_probe.scan_files(checkpoint_task, 'demo--10-checkpoints', 'artifacts/tasks/demo--10-checkpoints')
+ok(report['checkpoints']['files'] == 2 and report['checkpoints']['bytes'] == 65
+   and ['demo--10-checkpoints', 65] in report['checkpoints']['top_tasks']
+   and 'sha256' not in checkpoint_body and checkpoint_probe.checkpoints['files'] == 2
+   and disabled_summary['counts'].get('checkpoint', 0) == 0 and disabled_summary['counts']['payload-over-budget'] == 3,
+   'case-insensitive checkpoints are stat-only, listed without hashes, excluded from PNG budget; empty policy disables')
 collision_task = catalog()['tasks']['demo--05-dup']
 collision_sid = next(loc['snapshot'] for loc in collision_task['locations'].values() if loc['path'] == str(t1))
 collision_dir = vault / f'artifacts/tasks/demo--05-dup/{collision_sid}'
 root_dir = vault / f'artifacts/roots/demo/{archive.sha(str(p1 / ".orchestra").encode())[:12]}'
-assert json.loads((collision_dir / 'MANIFEST.json').read_text())['snapshot'] == collision_sid
-assert json.loads((root_dir / 'MANIFEST.json').read_text())['root'] == str(p1 / '.orchestra')
+collision_manifest = collision_task['snapshots'][collision_sid]['manifest']
+assert json.loads(gzip.decompress((raw / collision_manifest['blob']).read_bytes()))['snapshot'] == collision_sid
+root_manifest = next(p for p in catalog()['projects']['demo']['manifests'] if p['root'] == str(p1 / '.orchestra'))
+assert json.loads(gzip.decompress((raw / root_manifest['blob']).read_bytes()))['root'] == str(p1 / '.orchestra')
 ok(all((destination / 'files' / name).read_bytes() == (source / name).read_bytes()
        for destination, source in ((collision_dir, t1), (root_dir, p1 / '.orchestra'))
        for name in ('MANIFEST.json', 'raw.json')) and 'verify: OK' in run('verify')
@@ -232,7 +295,7 @@ assert cat['tasks']['home--01-home']['sessions'] == ['server']
 assert archive.Discovery(archive.load_policy(), archive.Guard(archive.load_policy())).run().bases[home][0] == ('server', 'home')
 for snapshot in dup['snapshots'].values():
     assert 'entries' not in snapshot
-    manifest_data = (vault / snapshot['manifest']['path']).read_bytes()
+    manifest_data = gzip.decompress((raw / snapshot['manifest']['blob']).read_bytes())
     manifest = json.loads(manifest_data)
     assert archive.sha(manifest_data) == snapshot['manifest']['sha256']
     assert snapshot['files'] == len(manifest['entries'])
@@ -398,8 +461,8 @@ historical = catalog()['tasks']['demo--06-running']
 # immutable manifests, including snapshots whose source directory is now gone.
 legacy_catalog = catalog()
 for snap in legacy_catalog['tasks']['demo--06-running']['snapshots'].values():
-    manifest_path = snap['manifest']['path']
-    snap['entries'] = json.loads((vault / manifest_path).read_text())['entries']
+    manifest_path = snap['manifest']['blob']
+    snap['entries'] = json.loads(gzip.decompress((raw / manifest_path).read_bytes()))['entries']
     for key in ('manifest', 'counts', 'files', 'bytes'):
         snap.pop(key)
 put(vault / '_meta/catalog.json', archive.json_bytes(legacy_catalog))
@@ -506,6 +569,79 @@ ok(not any(p['source'] == str(truncated) for p in session_index)
    'zero-byte recapture replaces old source pointers and reports zero transcript bytes')
 shutil.rmtree(truncation_projects)
 run('apply', '--no-commit')
+
+vanished_source = home / 'vanished-seam.jsonl'
+put(vanished_source, '{"unique":"vanished before capture"}\n')
+vanished_guard = archive.Guard(archive.load_policy())
+vanished_store = archive.RawStore(archive.load_policy(), True, vanished_guard)
+raw_before_vanish = hashes(raw)
+archive._after_stat = lambda path: Path(path).unlink()
+try:
+    vanished_pointers = vanished_store.archive(vanished_source, 'rollouts')
+finally:
+    archive._after_stat = lambda path: None
+ok(vanished_pointers is None and vanished_guard.source_errors.report(1)['count'] == 1
+   and vanished_guard.source_errors.report(1)['items'][0]['reason'] == 'vanished'
+   and vanished_guard.source_errors.report(1)['items'][0]['errno'] == 2
+   and vanished_store.new_blobs == 0 and hashes(raw) == raw_before_vanish,
+   'a source unlinked after stat is reported as vanished without partial raw data or pointers')
+
+error_fixture = home / 'source-errors-fixture'
+error_base = error_fixture / 'project'
+error_task = task(error_base, '01-errors', 'STATUS: PASS\n')
+error_thread = '44444444-4444-4444-4444-444444444444'
+put(error_task / '.codex-session', f'implement={error_thread}|gpt-6.1-sol|high\n')
+error_rollout = error_fixture / f'codex/sessions/rollout-{error_thread}.jsonl'
+put(error_rollout, '{"message":"restorable rollout"}\n')
+error_transcript = error_fixture / 'claude-projects' / re.sub(r'[^A-Za-z0-9]', '-', str(error_base)) / 'unreadable.jsonl'
+put(error_transcript, '{"message":"restorable unreadable transcript"}\n')
+put(error_fixture / 'state/sessions/errors.conf', f'LAUNCH_NAME=errors\nPROJECT_NAME=errors\nREPO={error_base}\n')
+blocked_sources = [error_transcript, error_task / 'blocked.md', error_fixture / 'state/sessions/zz-blocked.conf',
+                   error_fixture / 'state/projects/zz-blocked-record', error_fixture / 'state/codex-projects/zz-blocked-native/project.json']
+put(blocked_sources[1], 'restorable task artifact\n')
+put(blocked_sources[2], f'LAUNCH_NAME=zz-blocked\nPROJECT_NAME=errors\nREPO={error_base}\n')
+put(blocked_sources[3], f'dir={error_base}\n')
+put(blocked_sources[4], json.dumps({'directory': str(error_base)}))
+error_env = dict(os.environ, ORCH_ARCHIVE_VAULT=str(error_fixture / 'vault'), ORCH_ARCHIVE_RAW=str(error_fixture / 'raw'),
+    ORCH_ARCHIVE_STATE_DIRS=str(error_fixture / 'state'), ORCH_ARCHIVE_EXTRA_BASES=str(error_base),
+    ORCH_ARCHIVE_CLAUDE_PROJECTS=str(error_fixture / 'claude-projects'), ORCH_ARCHIVE_CODEX_HOME=str(error_fixture / 'codex'))
+if os.geteuid() != 0:
+    for blocked in blocked_sources:
+        blocked.chmod(0)
+else:
+    print('SKIP: chmod 000 unreadable sub-case (running as root)')
+error_code = 'import sys; from pathlib import Path; sys.path.insert(0, ' + repr(str(repo / 'lib')) + '); import orch_archive as a; ' + \
+    'a._after_stat = lambda p: Path(p).unlink() if Path(p) == Path(' + repr(str(error_rollout)) + ') else None; ' + \
+    'sys.exit(a.main(["apply", "--json"]))'
+error_process = subprocess.run(['python3', '-B', '-c', error_code], env=error_env, text=True, capture_output=True)
+assert error_process.returncode == 4, (error_process.returncode, error_process.stdout, error_process.stderr)
+error_report, _ = json.JSONDecoder().raw_decode(error_process.stdout)
+error_catalog = json.loads((error_fixture / 'vault/_meta/catalog.json').read_text())
+expected_error_count = len(blocked_sources) + 1 if os.geteuid() != 0 else 1
+assert error_report['source_errors']['count'] == expected_error_count
+assert any(item['path'] == str(error_rollout) and item['reason'] == 'vanished' and item['errno'] == 2
+           for item in error_report['source_errors']['items'])
+assert all(p['source'] not in (str(error_rollout), str(error_transcript)) for p in error_catalog['tasks']['errors--01-errors']['raw'])
+assert not (error_fixture / f'raw/sources/{archive.sha(str(error_rollout).encode())[:24]}.json').exists()
+if os.geteuid() != 0:
+    assert all(any(item['path'] == str(blocked) and item['reason'] == 'unreadable' and item['errno'] == 13
+                   for item in error_report['source_errors']['items']) for blocked in blocked_sources)
+    plan_errors = json.loads(run('--json', '--top', '1', code=4, env=error_env))
+    assert plan_errors['source_errors']['count'] == len(blocked_sources) and len(plan_errors['source_errors']['items']) == 1
+    assert json.loads(run('--json', '--top', '0', code=4, env=error_env))['source_errors'] == {'count': len(blocked_sources), 'items': []}
+for blocked in blocked_sources:
+    blocked.chmod(0o600)
+put(error_rollout, '{"message":"restorable rollout"}\n')
+restored_report = json.loads(run('--json', env=error_env))
+restored_apply = run('apply', env=error_env)
+restored_catalog = json.loads((error_fixture / 'vault/_meta/catalog.json').read_text())
+ok('commit: none' not in error_process.stdout and error_report['skipped_counts']['vanished'] == 1
+   and restored_report['source_errors']['count'] == 0 and 'commit:' in restored_apply
+   and any(p['source'] == str(error_rollout) for p in restored_catalog['tasks']['errors--01-errors']['raw'])
+   and any(p['source'] == str(error_transcript) for p in restored_catalog['sessions']['errors']['raw'])
+   and 'verify: OK' in run('verify', env=error_env),
+   'CLI source errors exit 4 while apply commits; restored sources archive normally with exit 0')
+shutil.rmtree(error_fixture)
 
 for path in (vault / '.obsidian/graph.json', *vault.glob('dashboards/*.base')):
     json.loads(path.read_text())

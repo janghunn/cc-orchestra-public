@@ -33,7 +33,7 @@ scan_record = _secrets.scan_record
 EXCLUDED = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 PATH_KEYS = {"VAULT_DIR", "RAW_DIR", "ALLOWLIST_FILE", "CLAUDE_PROJECTS_DIR", "CODEX_HOME_DIR"}
 LIST_KEYS = {"STATE_DIRS", "EXTRA_BASES"}
-EXT_KEYS = {"VAULT_TEXT_EXTENSIONS", "TEXT_EXTENSIONS", "APPEND_EXTENSIONS"}
+EXT_KEYS = {"VAULT_TEXT_EXTENSIONS", "TEXT_EXTENSIONS", "APPEND_EXTENSIONS", "CHECKPOINT_EXTENSIONS"}
 INT_KEYS = {"INCLUDE_CLAUDE_TRANSCRIPTS", "INCLUDE_CODEX_ROLLOUTS", "INCLUDE_PAYLOAD",
             "PAYLOAD_FILE_MAX_BYTES", "PAYLOAD_TASK_MAX_BYTES", "VAULT_TEXT_MAX_BYTES",
             "SIZE_REPORT_BYTES", "NESTED_ROOT_MAX_DEPTH", "GZIP_LEVEL", "COMMIT"}
@@ -42,7 +42,6 @@ OVERRIDES = {"VAULT_DIR": "VAULT", "RAW_DIR": "RAW", "ALLOWLIST_FILE": "ALLOWLIS
              "CODEX_HOME_DIR": "CODEX_HOME", "EXTRA_BASES": "EXTRA_BASES"}
 UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
 SNAPSHOT_DIR = r"artifacts/(?:tasks/[^/]+/[0-9a-f]{12}|roots/[^/]+/[0-9a-f]{12})"
-MANIFEST_PATH = SNAPSHOT_DIR + r"/MANIFEST\.json"
 COPIED_ARTIFACT_PATH = SNAPSHOT_DIR + r"/files/.+"
 _WRITE_BASES = set()
 
@@ -107,6 +106,7 @@ def load_policy():
         values[key] = sorted({Path(expand(v)).resolve() for v in values[key].split(":") if v})
     for key in EXT_KEYS:
         values[key] = set(values[key].split())
+    values["CHECKPOINT_EXTENSIONS"] = {ext.lower() for ext in values["CHECKPOINT_EXTENSIONS"]}
     for key in INT_KEYS:
         try:
             values[key] = int(values[key])
@@ -293,7 +293,7 @@ class Document:
 
 
 class VaultFile:
-    """An immutable existing manifest; never load it wholesale to render a note."""
+    """Stream an existing archive file for hashing and byte comparisons."""
     def __init__(self, path):
         self.path = path
 
@@ -372,11 +372,30 @@ class Samples:
             del self.items[self.top:]
 
 
+class SourceErrors:
+    """One error per source; the report bounds guarded diagnostics."""
+    def __init__(self, guard):
+        self.guard = guard
+        self.failed = {}
+
+    def record(self, path, error):
+        key = str(path)
+        if key not in self.failed:
+            self.failed[key] = {"path": self.guard.value(key, "report", "source-error", "path"),
+                                "reason": "vanished" if error.errno == errno.ENOENT else "unreadable",
+                                "errno": error.errno}
+        return self.failed[key]
+
+    def report(self, top):
+        return {"count": len(self.failed), "items": sorted(self.failed.values(), key=lambda row: row["path"])[:top]}
+
+
 class Guard:
     def __init__(self, policy):
         self.allow = set()
         self.released = set()
         self.items = {}
+        self.source_errors = SourceErrors(self)
         path = policy["ALLOWLIST_FILE"]
         if path.exists():
             for line in path.read_text().splitlines():
@@ -455,21 +474,61 @@ def slug(value):
     return re.sub(r"[^a-z0-9._-]", "-", value.lower()).strip("-.") or "unknown"
 
 
-def entries(path):
+class SourceEntry:
+    """DirEntry predicates can fail too; report them without aborting discovery."""
+    def __init__(self, entry, errors):
+        self.entry, self.errors = entry, errors
+        self.name, self.path = entry.name, entry.path
+
+    def _test(self, method, **kwargs):
+        try:
+            return getattr(self.entry, method)(**kwargs)
+        except OSError as error:
+            self.errors.record(self.path, error)
+            return False
+
+    def is_dir(self, **kwargs):
+        return self._test("is_dir", **kwargs)
+
+    def is_file(self, **kwargs):
+        return self._test("is_file", **kwargs)
+
+    def is_symlink(self):
+        return self._test("is_symlink")
+
+
+def entries(path, errors=None, optional=False):
     try:
         with os.scandir(path) as scan:
-            return sorted(scan, key=lambda e: e.name)
-    except OSError:
+            result = sorted(scan, key=lambda e: e.name)
+            return [SourceEntry(entry, errors) for entry in result] if errors else result
+    except OSError as error:
+        if errors and not (optional and error.errno == errno.ENOENT):
+            errors.record(path, error)
         return []
 
 
-def walk(path, skipped=None, skip_nested=False):
+def source_test(path, method, errors=None):
+    try:
+        return getattr(path, method)()
+    except OSError as error:
+        if errors:
+            errors.record(path, error)
+        return False
+
+
+def walk(path, skipped=None, skip_nested=False, errors=None, optional=False):
     """Yield regular files, links and specials; never descend directory symlinks."""
     try:
         with os.scandir(path) as scan:
-            children = sorted(scan, key=lambda entry: entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""))
+            children = list(scan)
+        if errors:
+            children = [SourceEntry(entry, errors) for entry in children]
+        children.sort(key=lambda entry: entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""))
     except OSError as error:
-        if skipped is not None:
+        if errors and not (optional and error.errno == errno.ENOENT):
+            errors.record(path, error)
+        elif skipped is not None:
             skipped.append({"path": str(path), "reason": "unreadable", "errno": error.errno})
         return
     for entry in children:
@@ -479,22 +538,23 @@ def walk(path, skipped=None, skip_nested=False):
             continue
         try:
             if entry.is_dir(follow_symlinks=False):
-                yield from walk(entry.path, skipped, skip_nested=skip_nested)
+                yield from walk(entry.path, skipped, skip_nested=skip_nested, errors=errors)
             else:
                 yield Path(entry.path)
         except OSError:
             yield Path(entry.path)
 
 
-def byte_total(path):
+def byte_total(path, errors=None):
     total = 0
-    for file in walk(path):
+    for file in walk(path, errors=errors):
         try:
             st = file.lstat()
             if stat.S_ISREG(st.st_mode):
                 total += st.st_size
-        except OSError:
-            pass
+        except OSError as error:
+            if errors:
+                errors.record(file, error)
     return total
 
 
@@ -533,11 +593,15 @@ def ansi_decode(value):
     return "".join(out)
 
 
-def parse_conf(path):
+def parse_conf(path, source_errors=None):
     result, errors = {}, []
     try:
         text = path.read_text()
-    except (OSError, UnicodeError):
+    except OSError as error:
+        if source_errors:
+            source_errors.record(path, error)
+        return None, []
+    except UnicodeError:
         return {}, [{"source": str(path), "line": 0}]
     for n, line in enumerate(text.splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
@@ -566,6 +630,7 @@ class Discovery:
         self.p, self.guard = policy, guard
         self.sessions, self.bases, self.roots = {}, {}, {}
         self.skipped = []
+        self.errors = guard.source_errors
 
     def session(self, name, fields, path, kind, backend, errors=None):
         sid = self.guard.identifier(name, "session", slugify=False)
@@ -592,14 +657,16 @@ class Discovery:
     def run(self):
         for state_dir in self.p["STATE_DIRS"]:
             backend = "codex" if "codex" in str(state_dir) else "claude"
-            for entry in entries(state_dir / "sessions"):
+            for entry in entries(state_dir / "sessions", self.errors, optional=True):
                 if entry.name.endswith(".conf") and entry.is_file(follow_symlinks=False):
                     path = Path(entry.path)
-                    fields, errors = parse_conf(path)
+                    fields, errors = parse_conf(path, self.errors)
+                    if fields is None:
+                        continue
                     name = fields.get("LAUNCH_NAME") or ((fields.get("PROJECT_NAME") or Path(fields.get("REPO", "unknown")).name)
                                                                + "-" + fields.get("NAME", path.stem))
                     self.session(name, fields, path, "conf", backend, errors)
-            for entry in entries(state_dir / "projects"):
+            for entry in entries(state_dir / "projects", self.errors, optional=True):
                 if entry.is_file(follow_symlinks=False):
                     path = Path(entry.path)
                     fields = {}
@@ -608,32 +675,37 @@ class Discovery:
                             if "=" in line:
                                 key, value = line.split("=", 1)
                                 fields[key] = value
-                    except (OSError, UnicodeError):
+                    except OSError as error:
+                        self.errors.record(path, error)
+                        continue
+                    except UnicodeError:
                         self.skipped.append({"path": str(path), "reason": "unreadable"})
                     self.session(entry.name, fields, path, "record", backend)
-            for entry in entries(state_dir / "codex-projects"):
+            for entry in entries(state_dir / "codex-projects", self.errors, optional=True):
                 path = Path(entry.path) / "project.json"
-                if entry.is_dir(follow_symlinks=False) and path.is_file() and not path.is_symlink():
+                if entry.is_dir(follow_symlinks=False) and source_test(path, "is_file", self.errors) and not source_test(path, "is_symlink", self.errors):
                     try:
                         fields = json.loads(path.read_text())
                         if not isinstance(fields, dict):
                             raise ValueError()
                         self.session(entry.name, fields, path, "codex project", "codex")
-                    except (ValueError, OSError, UnicodeError):
+                    except OSError as error:
+                        self.errors.record(path, error)
+                    except (ValueError, UnicodeError):
                         self.session(entry.name, {}, path, "codex project", "codex", [{"source": str(path), "line": 1}])
-            for project in entries(state_dir / "worktrees"):
+            for project in entries(state_dir / "worktrees", self.errors, optional=True):
                 if project.is_dir(follow_symlinks=False):
-                    for checkout in entries(project.path):
+                    for checkout in entries(project.path, self.errors):
                         if checkout.is_dir(follow_symlinks=False):
                             self.bases.setdefault(Path(checkout.path).resolve(), []).append((None, project.name))
         for base in self.p["EXTRA_BASES"]:
             self.bases.setdefault(base, [])
         for base in sorted(self.bases):
-            if not base.is_dir() or base.is_symlink():
+            if not source_test(base, "is_dir", self.errors) or source_test(base, "is_symlink", self.errors):
                 self.skipped.append({"path": str(base), "reason": "base missing"})
                 continue
             root = base / ".orchestra"
-            if root.is_dir() and not root.is_symlink():
+            if source_test(root, "is_dir", self.errors) and not source_test(root, "is_symlink", self.errors):
                 self.add_root(root, "direct")
                 self.nested(root, 0)
         # Reject destination overlap before locks, directories or archive writes.
@@ -665,15 +737,15 @@ class Discovery:
         self.roots.setdefault(root, {"path": str(root), "project": self.project(root), "kind": kind})
 
     @staticmethod
-    def task_dir(path):
-        documents = any((path / name).is_file() and not (path / name).is_symlink()
+    def task_dir(path, errors=None):
+        documents = any(source_test(path / name, "is_file", errors) and not source_test(path / name, "is_symlink", errors)
                         for name in ("brief.md", "summary.md", "plan.md"))
-        return documents or (bool(re.match(r"^\d+[-_]", path.name)) and not Discovery.container(path))
+        return documents or (bool(re.match(r"^\d+[-_]", path.name)) and not Discovery.container(path, errors=errors))
 
     def nested(self, directory, depth):
         if depth >= self.p["NESTED_ROOT_MAX_DEPTH"]:
             return
-        for entry in entries(directory):
+        for entry in entries(directory, self.errors):
             if entry.name in EXCLUDED or not entry.is_dir(follow_symlinks=False):
                 continue
             path = Path(entry.path)
@@ -682,20 +754,20 @@ class Discovery:
                 self.nested(path, 0)
             # Numeric container names alone must not hide historical roots.
             # Direct root children use task_dir()'s task/container classification.
-            elif not any((path / name).is_file() and not (path / name).is_symlink()
+            elif not any(source_test(path / name, "is_file", self.errors) and not source_test(path / name, "is_symlink", self.errors)
                          for name in ("brief.md", "summary.md", "plan.md")):
                 self.nested(path, depth + 1)
 
     @staticmethod
-    def container(path, depth=0):
-        if path.name == "wt" or (path / ".git").exists():
+    def container(path, depth=0, errors=None):
+        if path.name == "wt" or source_test(path / ".git", "exists", errors):
             return True
         if depth >= 3:
             return False
-        for entry in entries(path):
+        for entry in entries(path, errors):
             if entry.name in EXCLUDED or not entry.is_dir(follow_symlinks=False):
                 continue
-            if entry.name == ".orchestra" or Discovery.container(Path(entry.path), depth + 1):
+            if entry.name == ".orchestra" or Discovery.container(Path(entry.path), depth + 1, errors):
                 return True
         return False
 
@@ -705,12 +777,12 @@ class RawStore:
         self.p, self.apply, self.guard = policy, apply, guard
         self.root = policy["RAW_DIR"]
         self.new_blobs = 0
-        self.stats = {kind: {"before": 0, "after": 0, "blobs": 0} for kind in ("task-files", "withheld", "transcripts", "rollouts")}
+        self.stats = {kind: {"before": 0, "after": 0, "blobs": 0} for kind in ("task-files", "withheld", "transcripts", "rollouts", "manifests")}
         self.seen = set()
         self.cache = {}
 
     def blob(self, data, category, packed=None, digest=None, length=None):
-        digest = digest or sha(data)
+        digest = digest or data_sha(data)
         length = len(data) if length is None else length
         rel = f"blobs/{digest[:2]}/{digest}.gz"
         if digest not in self.seen:
@@ -718,7 +790,10 @@ class RawStore:
                 # GzipFile consistently omits both a filename and platform-dependent OS byte.
                 buf = io.BytesIO() if self.apply else CountingSink()
                 with gzip.GzipFile(fileobj=buf, mode="wb", filename="", mtime=0, compresslevel=self.p["GZIP_LEVEL"]) as gz:
-                    gz.write(data)
+                    if callable(data):
+                        data(gz)
+                    else:
+                        gz.write(data)
                 packed = buf.getvalue() if self.apply else buf
             self.stats[category]["before"] += length
             self.stats[category]["after"] += len(packed)
@@ -740,6 +815,13 @@ class RawStore:
             self.seen.add(digest)
 
     def archive(self, path, category, captured=None, opened=None):
+        try:
+            return self._archive(path, category, captured, opened)
+        except OSError as error:
+            self.guard.source_errors.record(path, error)
+            return None
+
+    def _archive(self, path, category, captured=None, opened=None):
         path = Path(path)
         key = str(path.resolve())
         if key in self.cache:
@@ -966,6 +1048,7 @@ def registry_rows(text, path):
 class Archive:
     def __init__(self, policy, discovery, guard, apply=False, top=20):
         self.p, self.d, self.guard, self.apply = policy, discovery, guard, apply
+        self.errors = guard.source_errors
         self.raw = RawStore(policy, apply, guard)
         self.files = {}
         self.capture_cache = {}
@@ -984,6 +1067,7 @@ class Archive:
         self.rollouts = {"files": 0, "bytes": 0, "missing": [], "native_unlinked": 0, "native_unlinked_bytes": 0}
         self.large = []
         self.payload = {"files": 0, "bytes": 0, "tasks": {}, "items": []}
+        self.checkpoints = {"files": 0, "bytes": 0, "tasks": {}}
         self.thread_owners = collections.defaultdict(set)
         self.root_reports = []
         for task in self.catalog["tasks"].values():
@@ -992,9 +1076,11 @@ class Archive:
                 if old_entries is not None:
                     snap.update(files=len(old_entries), bytes=sum(e["size"] for e in old_entries),
                                 counts=dict(collections.Counter(e["kind"] for e in old_entries)))
-                manifest = f"artifacts/tasks/{task['id']}/{sid}/MANIFEST.json"
-                if "manifest" not in snap:
-                    snap["manifest"] = {"path": manifest, "sha256": VaultFile(policy["VAULT_DIR"] / manifest).digest()}
+                    if "manifest" not in snap:
+                        summary = {"body": b",\n".join(json_bytes(entry, compact=True).rstrip(b"\n") for entry in old_entries)}
+                        snap["manifest"] = dict(self.raw.blob(self.manifest({"snapshot": sid}, summary), "manifests"), snapshot=sid)
+                if "manifest" in snap:
+                    self.raw.existing(snap["manifest"], "manifests")
             for location in task["locations"].values():
                 location["present"] = False
 
@@ -1011,17 +1097,17 @@ class Archive:
         # Neither pass retains Paths/dicts for the potentially millions of links.
         paths = sorted(paths) if paths is not None else None
         payload_total = 0
-        for path in paths if paths is not None else walk(base, skip_nested=True):
+        for path in paths if paths is not None else walk(base, skip_nested=True, errors=self.errors):
             try:
                 st = path.lstat()
-                if stat.S_ISREG(st.st_mode) and path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] and path.name != ".codex-session":
+                if stat.S_ISREG(st.st_mode) and path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] | self.p["CHECKPOINT_EXTENSIONS"] and path.name != ".codex-session":
                     payload_total += st.st_size
-            except OSError:
-                pass
-        texts, artifacts, archived = {}, {}, []
+            except OSError as error:
+                self.errors.record(path, error)
+        texts, artifacts, archived, checkpoints = {}, {}, [], []
         counts, total, file_count = collections.Counter(), 0, 0
         identity, body = hashlib.sha256(), io.BytesIO()
-        for path in paths if paths is not None else walk(base, self.skipped, skip_nested=True):
+        for path in paths if paths is not None else walk(base, self.skipped, skip_nested=True, errors=self.errors):
             rel = str(path.relative_to(base))
             entry = {"relpath": rel}
             try:
@@ -1031,10 +1117,18 @@ class Archive:
                     entry.update(kind="symlink", target=os.readlink(path))
                 elif not stat.S_ISREG(st.st_mode):
                     entry["kind"] = "special"
+                elif path.suffix.lower() in self.p["CHECKPOINT_EXTENSIONS"]:
+                    entry.update(kind="checkpoint", reason="checkpoint-not-copied")
+                    checkpoints.append({"relpath": self.guard.value(rel, owner, rel, "path"),
+                                        "size": st.st_size, "mtime": utc(st.st_mtime)})
+                    self.checkpoints["files"] += 1
+                    self.checkpoints["bytes"] += st.st_size
+                    self.checkpoints["tasks"][owner] = self.checkpoints["tasks"].get(owner, 0) + st.st_size
                 else:
                     entry["kind"] = "candidate"
             except OSError as error:
-                entry.update(kind="unreadable", errno=error.errno, size=0)
+                failure = self.errors.record(path, error)
+                entry.update(kind=failure["reason"], errno=error.errno, size=0)
             safe_rel = self.guard.value(rel, owner, rel, "path")
             if entry["kind"] == "candidate":
                 payload = path.suffix.lower() not in self.p["TEXT_EXTENSIONS"] and path.name != ".codex-session"
@@ -1077,18 +1171,24 @@ class Archive:
                             entry["kind"] = "withheld" if self.guard.file(cap["data"], owner, rel) else "vault"
                         category = "withheld" if entry["kind"] == "withheld" else "task-files"
                         entry["raw"] = self.raw.archive(path, category, cap)
+                        if entry["raw"] is None:
+                            raise OSError(self.errors.failed[str(path)]["errno"], "source archive failed")
                         if entry["kind"] == "vault":
                             artifacts[safe_rel] = Artifact(self.raw.root, entry["raw"], cap["length"], cap["sha256"])
                         archived.append({"relpath": rel, "kind": entry["kind"], "mtime": entry["mtime"]})
                         # Each source has already been captured once. Drop its bytes.
                         self.capture_cache[str(path.resolve())] = {"stat": cap["stat"], "length": cap["length"], "sha256": cap["sha256"], "data": None, "gzip": None}
                     except OSError as error:
-                        entry.update(kind="unreadable", errno=error.errno)
+                        failure = self.errors.record(path, error)
+                        entry.update(kind=failure["reason"], errno=error.errno)
+                        entry.pop("raw", None)
+                        entry.pop("sha256", None)
+                        texts.pop(rel, None)
                     finally:
                         # Do not retain the preceding source's bytes while capturing
                         # the next file; artifacts already hold only raw pointers.
                         cap = text = data = None
-            if entry["kind"] in {"symlink", "special", "unreadable"}:
+            if entry["kind"] in {"symlink", "special"}:
                 self.skipped.append({"path": str(path), "reason": entry["kind"], "bytes": entry["size"]})
             if entry["size"] > self.p["SIZE_REPORT_BYTES"]:
                 self.large.append({"path": str(path), "bytes": entry["size"], "kind": entry["kind"]})
@@ -1106,7 +1206,7 @@ class Archive:
         for rel, data in artifacts.items():
             self.files[f"{prefix}/{snapshot}/files/{rel}"] = data
         summary = {"files": file_count, "bytes": total, "counts": dict(counts),
-                   "body": body.getvalue(), "archived": archived}
+                   "body": body.getvalue(), "archived": archived, "checkpoints": checkpoints}
         return snapshot, summary, texts
 
     @staticmethod
@@ -1123,18 +1223,18 @@ class Archive:
             if safe_root not in project_record["roots"]:
                 project_record["roots"].append(safe_root)
             root_files, task_paths = [], []
-            for entry in entries(root):
+            for entry in entries(root, self.errors):
                 if entry.name in EXCLUDED or (entry.name == ".orchestra" and entry.is_dir(follow_symlinks=False)):
                     self.skipped.append({"path": entry.path, "reason": "excluded dir"})
                     continue
                 path = Path(entry.path)
                 if entry.is_dir(follow_symlinks=False):
-                    if self.d.task_dir(path):
+                    if self.d.task_dir(path, self.errors):
                         task_paths.append(path)
-                    elif self.d.container(path):
-                        self.skipped.append({"path": str(path), "reason": "checkout container", "bytes": byte_total(path)})
+                    elif self.d.container(path, errors=self.errors):
+                        self.skipped.append({"path": str(path), "reason": "checkout container", "bytes": byte_total(path, self.errors)})
                     else:
-                        root_files.extend(walk(path, self.skipped, skip_nested=True))
+                        root_files.extend(walk(path, self.skipped, skip_nested=True, errors=self.errors))
                 else:
                     root_files.append(path)
             # A root's artifacts use the same dispositions, but no extra snapshot directory.
@@ -1143,7 +1243,9 @@ class Archive:
             for rel in list(self.files):
                 if rel.startswith(root_prefix + "/" + rid + "/"):
                     self.files[root_prefix + "/" + rel.split("/" + rid + "/", 1)[1]] = self.files.pop(rel)
-            self.files[root_prefix + "/MANIFEST.json"] = self.manifest({"root": safe_root}, rentries)
+            manifest = dict(self.raw.blob(self.manifest({"root": safe_root}, rentries), "manifests"), root=safe_root)
+            project_record["manifests"] = sorted([p for p in project_record.get("manifests", []) if p["root"] != safe_root] + [manifest],
+                                                  key=lambda p: p["root"])
             rows = registry_rows(root_texts.get("REGISTRY.md", ""), root / "REGISTRY.md")
             unmatched = list(rows)
             for path in task_paths:
@@ -1174,15 +1276,13 @@ class Archive:
                                                "root": safe_root, "fields": safe_fields, "registry_rows": safe_rows}
                 task["snapshots"].setdefault(snapshot_id, {"id": snapshot_id, "fields": safe_fields,
                     "registry_rows": safe_rows, "files": task_entries["files"], "bytes": task_entries["bytes"],
-                    "counts": task_entries["counts"], "locations": []})
+                    "counts": task_entries["counts"], "locations": [], "checkpoints": task_entries["checkpoints"]})
                 snap = task["snapshots"][snapshot_id]
                 if safe_location not in snap["locations"]:
                     snap["locations"].append(safe_location)
-                manifest_path = f"{prefix}/{snapshot_id}/MANIFEST.json"
-                # Immutable manifests: an existing snapshot remains byte-identical.
-                existing_manifest = self.p["VAULT_DIR"] / manifest_path
-                self.files[manifest_path] = VaultFile(existing_manifest) if existing_manifest.exists() else self.manifest({"snapshot": snapshot_id}, task_entries)
-                snap["manifest"] = {"path": manifest_path, "sha256": data_sha(self.files[manifest_path])}
+                # The first manifest for a content identity remains immutable.
+                if "manifest" not in snap:
+                    snap["manifest"] = dict(self.raw.blob(self.manifest({"snapshot": snapshot_id}, task_entries), "manifests"), snapshot=snapshot_id)
                 for thread in threads:
                     self.thread_owners[thread].add(("tasks", task_id))
                 self.locations += 1
@@ -1199,6 +1299,9 @@ class Archive:
             record["raw"] = self.catalog["sessions"].get(sid, {}).get("raw", [])
             self.catalog["sessions"][sid] = record
         self.link_sessions()
+        for project in self.catalog["projects"].values():
+            for pointer in project.get("manifests", []):
+                self.raw.existing(pointer, "manifests")
         if self.p["INCLUDE_CLAUDE_TRANSCRIPTS"]:
             self.claude_transcripts()
         if self.p["INCLUDE_CODEX_ROLLOUTS"]:
@@ -1242,32 +1345,36 @@ class Archive:
         home = Path(expand("~")).resolve()
         bases = sorted(self.d.bases)
         encoded = lambda p: re.sub(r"[^A-Za-z0-9]", "-", str(p))
-        for entry in entries(self.p["CLAUDE_PROJECTS_DIR"]):
+        for entry in entries(self.p["CLAUDE_PROJECTS_DIR"], self.errors, optional=True):
             if not entry.is_dir(follow_symlinks=False):
                 continue
             directory = Path(entry.path)
             candidates = []
-            for child in entries(directory):
+            for child in entries(directory, self.errors):
                 if child.is_symlink():
                     self.skipped.append({"path": child.path, "reason": "symlink"})
                 elif child.is_file(follow_symlinks=False) and child.name.endswith(".jsonl"):
                     candidates.append(Path(child.path))
                 elif child.is_dir(follow_symlinks=False):
-                    for agents in entries(child.path):
+                    for agents in entries(child.path, self.errors):
                         if agents.name != "subagents":
                             continue
                         if agents.is_symlink():
                             self.skipped.append({"path": agents.path, "reason": "symlink"})
                         elif agents.is_dir(follow_symlinks=False):
-                            for sub in entries(agents.path):
+                            for sub in entries(agents.path, self.errors):
                                 if sub.is_file(follow_symlinks=False) and (sub.name.endswith(".jsonl") or sub.name.endswith(".meta.json")):
                                     candidates.append(Path(sub.path))
             matched = next((base for base in bases if entry.name == encoded(base) or
                             (base != home and entry.name.startswith(encoded(base) + "--orchestra-"))), None)
             if matched is None:
                 for path in sorted(p for p in candidates if p.parent == directory):
-                    with open(path, "rb") as stream:
-                        initial = stream.read(65536)
+                    try:
+                        with open(path, "rb") as stream:
+                            initial = stream.read(65536)
+                    except OSError as error:
+                        self.errors.record(path, error)
+                        continue
                     cwd = None
                     for line in initial.splitlines():
                         try:
@@ -1284,13 +1391,15 @@ class Archive:
                         break
             if matched is None:
                 self.transcripts["unlinked_projects"] += 1
-                size = byte_total(directory)
+                size = byte_total(directory, self.errors)
                 self.transcripts["unlinked_bytes"] += size
                 self.skipped.append({"path": str(directory), "reason": "not linked to a cc-orch base", "bytes": size})
                 continue
             owner = self.owner_for_base(matched)
             for path in sorted(candidates):
                 pointers = self.raw.archive(path, "transcripts")
+                if pointers is None:
+                    continue
                 self.add_raw(owner, path, pointers)
                 size = sum(p["length"] for p in pointers)
                 self.transcripts["files"] += 1
@@ -1301,7 +1410,7 @@ class Archive:
     def codex_rollouts(self):
         indexed = {}
         for dirname in ("sessions", "archived_sessions"):
-            for path in walk(self.p["CODEX_HOME_DIR"] / dirname):
+            for path in walk(self.p["CODEX_HOME_DIR"] / dirname, errors=self.errors, optional=True):
                 match = re.search(r"(" + UUID + r")\.jsonl$", path.name)
                 if match and path.name.startswith("rollout-") and not path.is_symlink():
                     indexed.setdefault(match[1].lower(), []).append(path)
@@ -1311,6 +1420,8 @@ class Archive:
                 self.rollouts["missing"].append(self.guard.value(thread, "rollout", "missing"))
             for path in sorted(matches):
                 pointers = self.raw.archive(path, "rollouts")
+                if pointers is None:
+                    continue
                 for owner in sorted(owners):
                     self.add_raw(owner, path, pointers)
                 size = sum(p["length"] for p in pointers)
@@ -1321,7 +1432,11 @@ class Archive:
         for thread, paths in indexed.items():
             if thread not in {t.lower() for t in self.thread_owners}:
                 self.rollouts["native_unlinked"] += len(paths)
-                self.rollouts["native_unlinked_bytes"] += sum(p.stat().st_size for p in paths)
+                for path in paths:
+                    try:
+                        self.rollouts["native_unlinked_bytes"] += path.lstat().st_size
+                    except OSError as error:
+                        self.errors.record(path, error)
 
     def primary_fields(self):
         for task in self.catalog["tasks"].values():
@@ -1414,6 +1529,8 @@ class Archive:
                 if kind == "sessions":
                     fields.update(backend=record["backend"], backend_source=record["backend_source"],
                                   created_at=record["fields"].get("CREATED_AT", "unknown"), conf=record["fields"], parse_error=record["parse_error"])
+                if kind == "projects":
+                    fields["manifests"] = record.get("manifests", [])
                 body = "# " + kind[:-1].title() + "\n\n" + fenced(json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2))
                 if kind == "sessions":
                     body += "\n\n## Recorded conf values\n\n" + fenced(history_values(record["fields"]))
@@ -1475,9 +1592,16 @@ class Archive:
         for key in ("predecessors", "successors", "supersedes", "superseded_by", "overlaps", "mentions"):
             fields[key] = [link("tasks", tid) for tid in task[key]]
             body += "\n" + key.replace("_", " ").title() + ": " + ", ".join(fields[key]) + "\n"
-        body += "\n## Snapshots\n\n| Snapshot | Current | Files | Bytes |\n| --- | --- | --- | --- |\n"
+        body += "\n## Snapshots\n\n| Snapshot | Current | Files | Bytes | Dispositions |\n| --- | --- | --- | --- | --- |\n"
         for sid, snap in sorted(task["snapshots"].items()):
-            body += f"| {sid} | {str(sid in current).lower()} | {snap['files']} | {snap['bytes']} |\n"
+            dispositions = ", ".join(f"{kind}: {count}" for kind, count in sorted(snap["counts"].items()))
+            body += f"| {sid} | {str(sid in current).lower()} | {snap['files']} | {snap['bytes']} | {dispositions} |\n"
+        body += "\n## Checkpoint files (not copied)\n"
+        for sid in sorted(current):
+            checkpoints = task["snapshots"][sid].get("checkpoints", [])
+            if checkpoints:
+                body += "\n" + sid + "\n\n" + fenced("relpath | size | mtime (UTC)\n" + "\n".join(
+                    f"{row['relpath']} | {row['size']} | {row['mtime']}" for row in checkpoints)) + "\n"
         body += "\n## Per-snapshot values\n"
         for sid, snap in sorted(task["snapshots"].items()):
             values = dict(snapshot=sid, current=sid in current, locations=snap["locations"], fields=snap["fields"],
@@ -1497,7 +1621,9 @@ class Archive:
     def report(self, top):
         tasks = self.catalog["tasks"]
         stats = self.raw.stats
-        safe_skipped = self.skipped.items
+        source_errors = self.errors.report(top)
+        skipped_counts = self.skipped.counts + collections.Counter(item["reason"] for item in self.errors.failed.values())
+        safe_skipped = self.skipped.items + source_errors["items"]
         safe_large = self.guard.tree(self.large, "report", "large")
         report = {"roots": self.guard.tree(self.root_reports, "report", "roots"), "logical_tasks": len(tasks), "locations": self.locations,
             "snapshots": sum(len(task["snapshots"]) for task in tasks.values()),
@@ -1506,13 +1632,16 @@ class Archive:
                 source["kind"] for s in self.d.sessions.values() for source in s["sources"]).items())),
             "sessions_without_tasks": sorted(set(self.catalog["sessions"]) - {sid for task in tasks.values() for sid in task["sessions"]}),
             "transcripts": self.transcripts, "rollouts": self.rollouts, "raw": stats,
+            "source_errors": source_errors,
+            "checkpoints": {"files": self.checkpoints["files"], "bytes": self.checkpoints["bytes"],
+                            "top_tasks": sorted(self.checkpoints["tasks"].items(), key=lambda row: (-row[1], row[0]))[:top]},
             "raw_total": {key: sum(value[key] for value in stats.values()) for key in ("before", "after", "blobs")},
             "vault_bytes": sum(len(data) for data in self.files.values()),
             "payload_over_budget": {"files": self.payload["files"], "bytes": self.payload["bytes"],
                 "items": self.guard.tree(self.payload["items"][:top], "report", "payload"),
                 "top_tasks": sorted(self.payload["tasks"].items(), key=lambda row: (-row[1], row[0]))[:top]},
             "withheld_count": len(self.guard.items), "withheld": sorted(self.guard.items.values(), key=lambda row: (row["id"], row["kind"], row["owner"], row["context"]))[:top],
-            "skipped_counts": dict(sorted(self.skipped.counts.items())),
+            "skipped_counts": dict(sorted(skipped_counts.items())),
             "skipped": sorted(safe_skipped, key=lambda row: (row["reason"], row["path"]))[:top],
             "large_items": sorted(safe_large, key=lambda row: (-row["bytes"], row["path"]))}
         return report
@@ -1536,14 +1665,12 @@ class Archive:
         # Include catalog/report/withheld bytes too. Iterate until the report's own
         # decimal byte-count width stabilizes; no wall-clock values are introduced.
         while True:
-            breakdown = {kind: 0 for kind in ("artifacts", "manifests", "notes", "catalog", "other")}
+            breakdown = {kind: 0 for kind in ("artifacts", "notes", "catalog", "other")}
             for path in self.catalog["generated"]:
                 data = self.files.get(path)
                 size = len(data) if data is not None else (self.p["VAULT_DIR"] / path).stat().st_size if (self.p["VAULT_DIR"] / path).is_file() else 0
                 if path == "_meta/catalog.json":
                     kind = "catalog"
-                elif re.fullmatch(MANIFEST_PATH, path):
-                    kind = "manifests"
                 elif re.fullmatch(COPIED_ARTIFACT_PATH, path):
                     kind = "artifacts"
                 elif path.endswith(".md"):
@@ -1684,6 +1811,10 @@ def verify(policy):
         print("catalog: missing or invalid")
         return 1
     checked = set()
+    manifest_blobs = {(pointer["blob"], pointer["sha256"])
+                      for record in catalog.get("projects", {}).values() for pointer in record.get("manifests", [])}
+    manifest_blobs.update((snap["manifest"]["blob"], snap["manifest"]["sha256"])
+                          for task in catalog.get("tasks", {}).values() for snap in task["snapshots"].values())
 
     def check_pointer(pointer, context):
         nonlocal pointers
@@ -1703,6 +1834,8 @@ def verify(policy):
                 pointers += 1
             if sha(data) != pointer["sha256"] or (is_raw and len(data) != pointer["length"]):
                 raise ValueError("hash or length mismatch")
+            if is_raw and (rel, pointer["sha256"]) in manifest_blobs:
+                json.loads(data)
         except (OSError, ValueError, EOFError, KeyError, TypeError, zlib.error) as error:
             problems.append(f"{context}: raw pointer or file pointer invalid ({type(error).__name__})")
 
@@ -1728,7 +1861,7 @@ def verify(policy):
                 for pointer in pointer_values(fields):
                     check_pointer(pointer, rel)
             elif rel in {"_meta/catalog.json", ".obsidian/graph.json"} or rel.startswith("dashboards/") and rel.endswith(".base") or re.fullmatch(
-                    MANIFEST_PATH + r"|artifacts/(?:tasks|sessions|projects)/[^/]+/raw\.json", rel):
+                    r"artifacts/(?:tasks|sessions|projects)/[^/]+/raw\.json", rel):
                 value = json.loads(text)
                 for pointer in pointer_values(value):
                     check_pointer(pointer, rel)
@@ -1820,7 +1953,7 @@ def main(argv=None):
         if not apply:
             archive = Archive(policy, discovery, guard, top=args.top).build()
             output_report(archive.finalize(args.top, check_secrets=False), args.json)
-            return 0
+            return 4 if guard.source_errors.failed else 0
         vault, raw = policy["VAULT_DIR"], policy["RAW_DIR"]
         global _WRITE_BASES
         _WRITE_BASES = {vault.resolve(), raw.resolve()}
@@ -1878,7 +2011,7 @@ def main(argv=None):
             private_files(vault)
             output_report(report, args.json)
             print(f"vault: {written} files written, {removed} removed; raw: {archive.raw.new_blobs} new blobs; commit: {commit}")
-        return 0
+        return 4 if guard.source_errors.failed else 0
     except ArchiveError as error:
         print(str(error), file=sys.stderr)
         return error.code

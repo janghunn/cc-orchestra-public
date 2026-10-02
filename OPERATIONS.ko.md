@@ -986,10 +986,25 @@ vault/raw 경로의 겹침과 원본 루트 내부의 저장 경로는 거부한
 작업당 합계 256 MiB이다. 작업 한도 초과 시 해당 스냅샷의 모든 payload를 manifest에만
 기록한다. apply 전에 `PAYLOAD_FILE_MAX_BYTES`와 `PAYLOAD_TASK_MAX_BYTES`를 변경할 수 있다
 (`0`은 무제한). `INCLUDE_PAYLOAD=0`으로 payload 복사를 끌 수 있다. 제외 파일은 크기와
-사유를 모두 기록하며 계획 보고서에는 압축 전후 용량과 artifacts, manifests, notes,
-catalog, other별 vault 용량을 표시한다. 파일별 항목은 compact manifest에만 저장하며
-catalog 스냅샷에는 개수와 manifest 해시를 기록한다. artifact는 쓰기 시 검증한 raw blob에서
+사유를 모두 기록하며 계획 보고서에는 압축 전후 용량과 artifacts, notes,
+catalog, other별 vault 용량을 표시한다. 생성한 작업·루트 manifest는 raw 저장소의
+결정적인 gzip blob에만 저장하며 `raw.manifests`로 집계한다. 작업·프로젝트 노트는
+blob 경로, 압축 전 SHA-256과 길이를 참조하고 catalog 스냅샷에는 개수와 manifest
+포인터를 기록한다. `verify`는 포인터와 manifest JSON을 검증한다. artifact는 쓰기 시 검증한 raw blob에서
 복원하므로 계획에는 길이와 포인터만 유지한다.
+
+checkpoint 파일은 복사하거나 내용 해시를 계산하지 않는다. `CHECKPOINT_EXTENSIONS` 기본값은
+`.pt .pth .ckpt .safetensors .onnx .engine .trt .h5 .npz .npy`이며 대소문자를 구분하지 않는다
+(빈 값이면 이 분류를 끈다). 작업 노트에는 경로·크기·UTC mtime만 기록하며 보고서에는
+개수·용량·상위 작업을 표시한다. checkpoint는 payload 한도 합계에서 제외한다.
+PNG 처리는 기존 한도를 유지한다. 첫 실제 apply는 별도 PNG-to-JPEG thumbnail 후속 작업이
+끝날 때까지 기다려야 한다. 이 릴리스에는 thumbnail 기능을 구현하지 않았다.
+
+읽을 수 없거나 사라진 원본은 실행을 중단하지 않고 건너뛴다. `source_errors`는 정확한
+개수와 보호된 경로·사유·errno의 제한된 목록을 보고한다(`--top`으로 목록 크기 설정).
+원본 오류가 하나라도 있으면 plan과 apply는 종료 코드 **4**를 반환한다. apply는 성공한
+원본을 저장하고 commit한다. 접근 권한이나 사라진 원본을 복구한 뒤 다시 실행한다.
+오류 없이 성공하면 종료 코드 0이며 기존 사용법·정책, verify, lock-busy 상태는 유지한다.
 
 기존 advisory secret scanner로 vault에 들어가는 모든 텍스트를 검사한다. 오탐과 누락이
 가능하다. 보류된 내용은 비공개 raw 저장소에 남는다. `_meta/withheld.md`는 해시와 위치만
