@@ -1124,7 +1124,8 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
 
 프로젝트·작업·세션의 id, 경로, 링크에는 `<host>--` 접두사를 붙이며 frontmatter의
 `host`와 `host/<host>` 태그도 추가한다. 모델 id는 유지하고 모든 호스트의 작업을
-모아서 표시한다. `_meta/hosts/<host>.md`에는 원본 수량, catalog 해시, 로컬 정책으로
+모아서 표시한다. 가져온 각 프로젝트·작업·세션은 로컬 allow-list를 적용한 원본 호스트의 id를 `source_id`로 보존한다.
+`_meta/hosts/<host>.md`에는 원본 수량, catalog 해시, 로컬 정책으로
 보류한 항목을 기록한다. 입력 blob의 gzip 무결성과 압축 전 SHA-256을 검증하고 새
 blob만 결정적으로 재압축한다. 기존 blob은 다시 쓰지 않는다. 원본 이력은
 `sources/<host>/`에 저장하므로 호스트별 inode/device watermark가 섞이지 않는다.

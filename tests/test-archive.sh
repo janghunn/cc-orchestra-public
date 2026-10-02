@@ -1841,6 +1841,9 @@ local_pages = {rel: (home / 'A/vault' / rel).read_bytes() for rel in local_befor
 output = imported('A')
 data = report(output)
 merged = catalog('A')
+for kind in ('tasks', 'sessions', 'projects'):
+    for identifier in catalog('bee')[kind]:
+        assert merged[kind]['bee--' + identifier]['source_id'] == identifier
 for rel in ('projects/bee--demo.md', 'sessions/bee--alpha.md', 'tasks/bee--demo--01-shared.md',
             'tasks/bee--demo--02-bee-only.md', '_meta/hosts/bee.md', 'projects/demo.md', 'sessions/alpha.md', 'tasks/demo--01-shared.md'):
     assert (home / 'A/vault' / rel).is_file(), rel
@@ -2077,11 +2080,15 @@ assert verified('released-id-source')
 data = report(imported('released-id-dest', 'released-id-source', 'bee'))
 assert data['withheld_count'] == 0 and not data['withheld']
 assert not catalog('released-id-dest')['hosts']['bee']['withheld']
+assert catalog('released-id-dest')['sessions']['bee--' + released_id]['source_id'] == released_id
 assert (home / 'released-id-dest/vault/sessions' / ('bee--' + released_id + '.md')).is_file()
 fields, _ = archive.frontmatter((home / 'released-id-dest/vault/tasks/bee--demo--01-shared.md').read_text())
 assert '[[sessions/bee--' + released_id + ']]' in fields['sessions']
 assert 'commit: none' in imported('released-id-dest', 'released-id-source', 'bee')
-ok(verified('released-id-dest'), 'locally released ids retain namespaced links; report guarding does not create withheld items')
+before_files, before_records = host_files('released-id-dest'), host_records('released-id-dest')
+run('released-id-dest', 'apply')
+assert host_files('released-id-dest') == before_files and host_records('released-id-dest') == before_records
+ok(verified('released-id-dest'), 'source_id preserves locally released ids across apply; imported files/records stay frozen and reports add no withheld items')
 
 # Every reference must address the raw files import actually copies, even when verify
 # accepts the same bytes under a hidden filename. Exercise all pointer-bearing inputs.

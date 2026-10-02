@@ -2758,6 +2758,8 @@ class Importer:
                     # Guard source values before composing ids: an allowed original id
                     # does not imply an allow-list entry for its host-prefixed spelling.
                     record = self.guard.tree(copy.deepcopy(original), new, "import")
+                    # Retain the guarded original so later applies can seed exact releases.
+                    record["source_id"] = record["id"]
                     record.update(id=new, host=self.host)
                     if kind == "tasks":
                         record["project"] = self.maps["projects"][original["project"]]

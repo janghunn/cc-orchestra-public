@@ -1078,6 +1078,7 @@ single hyphens between nonempty segments (`[a-z0-9]+(?:-[a-z0-9]+)*`); `local` i
 
 Projects, tasks and sessions gain a `<host>--` prefix in ids, paths and links, plus `host`
 frontmatter and `host/<host>` tags. Models keep their ids and aggregate tasks across hosts.
+Each imported project, task and session keeps `source_id`, its id on the source host, subject to the local allow-list.
 `_meta/hosts/<host>.md` records source counts, the source catalog hash and locally withheld
 items. Incoming blobs are checked for gzip integrity and uncompressed SHA-256, then new
 blobs are recompressed deterministically; existing blobs are never rewritten. Source
