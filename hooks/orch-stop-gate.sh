@@ -174,7 +174,23 @@ def recorded_status(task):
         summary = (task / "summary.md").read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return None
-    matches = re.findall(r"^(?:\[lead-[A-Za-z0-9_-]+\]\s*)?STATUS:\s*(PASS|FAIL|BLOCKED)\b", summary, re.M)
+    # Mirror orch-summary-check's strip_fences, including inline backtick spans.
+    unfenced = []
+    fence, fence_length = None, 0
+    for line in summary.split("\n"):
+        delimiter = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if delimiter:
+            run, rest = delimiter[1], line[delimiter.end():]
+            if fence is None and not (run[0] == "`" and "`" in rest):
+                fence, fence_length = run[0], len(run)
+                continue
+            if run[0] == fence and len(run) >= fence_length and not rest.strip():
+                fence = None
+                continue
+        if fence is None:
+            unfenced.append(line)
+    summary = "\n".join(unfenced)
+    matches = re.findall(r"^(?:\[lead-[A-Za-z0-9_-]+\]\s*)?STATUS:\s*(PASS\b|FAIL\b|BLOCKED\b|ACCEPTED(?![A-Za-z0-9_-]))", summary, re.M)
     return matches[-1] if matches else None
 
 
@@ -200,7 +216,7 @@ def main(event):
         message = last_assistant(event.get("agent_transcript_path"))
     except Exception:
         return  # With no readable transcript there is no observable claim.
-    claim = re.search(r"^\[?[A-Za-z0-9_-]*\]?\s*STATUS:\s*(PASS|FAIL|BLOCKED)\b", message, re.M)
+    claim = re.search(r"^\[?[A-Za-z0-9_-]*\]?\s*STATUS:\s*(PASS\b|FAIL\b|BLOCKED\b|ACCEPTED(?![A-Za-z0-9_-]))", message, re.M)
     if not claim or not re.search(r"^GATES:", message, re.M):
         return
     status, task = claim[1], None
@@ -238,6 +254,12 @@ def main(event):
                         task = candidate
         if task is None:
             warn(event, status, "task directory could not be resolved")
+            return
+        if task.is_dir() and not (task / "summary.md").exists():
+            command = shlex.join(["orch-summary-check", "--strict", str(task)])
+            note = f"orch-stop-gate: note: {status} was claimed; summary.md not saved yet; Tier 1 saves the returned block and runs {command}"
+            print(json.dumps({"systemMessage": note}))
+            journal(event, "orch-stop-gate", "note", note)
             return
         checker = checker_path()
         if checker is None:

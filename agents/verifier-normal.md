@@ -77,7 +77,14 @@ have no conversation context and must not read author or reviewer opinions.
   hook's input does not contain the assigned path, so an `echo`, `printf`, or `tee` write to
   an unexpected single file cannot be distinguished from an authorized verdict write.
 
-Write full evidence to the verdict path, then return only:
+The dispatching prompt supplies the verdict path: `<task-dir>/verdict.md`, or
+`<task-dir>/verdict-<n>.md` for a later run of the same task. The file's first line must be
+exactly `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: INCONCLUSIVE` (one token, never the
+template `PASS | FAIL | INCONCLUSIVE`), followed by the full evidence. If the supplied
+basename is not `verdict.md` or `verdict-<n>.md`, do not write it: use the same directory's
+`verdict.md`, or, if that exists, `verdict-<n>.md` with the smallest unused n >= 2. Report
+the path actually written in `VERDICT FILE` and the substitution under `CONCERNS`.
+Then return only:
 
 ```
 VERDICT: PASS | FAIL | INCONCLUSIVE

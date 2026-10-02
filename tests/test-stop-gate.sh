@@ -9,9 +9,10 @@ STATE="$TMP/state"
 REPO="$TMP/repo"
 GOOD="$REPO/.orchestra/passing task"
 BAD="$REPO/.orchestra/failing-task"
+NOSUMMARY="$REPO/.orchestra/unsaved task"
 MARKER="$TMP/checker.calls"
 TRANSCRIPT="$TMP/transcript.jsonl"
-mkdir -p "$STATE" "$GOOD" "$BAD" "$TMP/home"
+mkdir -p "$STATE" "$GOOD" "$BAD" "$NOSUMMARY" "$TMP/home"
 export HOME="$TMP/home"
 export CC_ORCH_STATE_DIR="$STATE"
 export TEST_REAL_CHECKER="$ROOT/bin/orch-summary-check"
@@ -61,6 +62,8 @@ ROUNDS: 1
 SUMMARY
 cp "$GOOD/brief.md" "$BAD/brief.md"
 cp "$GOOD/plan.md" "$BAD/plan.md"
+sed '/^GATES:/d' "$GOOD/summary.md" > "$BAD/summary.md"
+cp "$GOOD/brief.md" "$GOOD/plan.md" "$NOSUMMARY/"
 cat > "$TMP/checker" <<'CHECKER'
 #!/usr/bin/env bash
 python3 - "$@" <<'PY'
@@ -114,8 +117,8 @@ assert_output() {
   if [ "$expected" = allow ]; then
     [ -z "$RUN_OUTPUT" ] && [ ! -s "$TMP/stderr" ] || fail "$label unexpectedly emitted: $RUN_OUTPUT"
   else
-    if ! python3 - "$RUN_OUTPUT" "$expected" "$TMP/stderr" "${CHECK_ERROR_TEXT:-ERROR: missing summary.md}" <<'PY'
-import json, sys
+    if ! python3 - "$RUN_OUTPUT" "$expected" "$TMP/stderr" "${CHECK_ERROR_TEXT:-ERROR: summary lacks GATES}" "$expected_task" <<'PY'
+import json, shlex, sys
 from pathlib import Path
 out = json.loads(sys.argv[1])
 if sys.argv[2] == 'block':
@@ -123,6 +126,13 @@ if sys.argv[2] == 'block':
     assert sys.argv[4] in out['reason']
     assert 'Re-run:' in out['reason'] and '--strict' in out['reason']
     assert 'stop-gate.off' in out['reason']
+    assert not Path(sys.argv[3]).read_text()
+elif sys.argv[2] == 'note':
+    assert 'decision' not in out
+    assert 'orch-stop-gate: note:' in out['systemMessage']
+    assert 'summary.md not saved yet' in out['systemMessage']
+    assert 'Tier 1 saves the returned block and runs' in out['systemMessage']
+    assert shlex.join(['orch-summary-check', '--strict', sys.argv[5]]) in out['systemMessage']
     assert not Path(sys.argv[3]).read_text()
 else:
     assert 'decision' not in out
@@ -163,7 +173,7 @@ transcript "$CLAIM"
 registry '.orchestra/passing task'
 check allow 'real strict checker passes' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
 registry
-check block 'real strict checker missing summary blocks' yes
+check block 'real strict checker missing GATES blocks' yes
 transcript 'Implementation is running; waiting for the background lane.'
 check allow 'ordinary mid-task prose never invokes checker' no
 transcript 'STATUS: PASS'
@@ -266,9 +276,16 @@ for payload in '{' '' '[]'; do
   assert_output allow 'malformed/empty payload' no
 done
 transcript $'STATUS: BLOCKED\nGATES: failed'
-check warn-check 'C BLOCKED with missing summary warns without blocking' yes
+check warn-check 'C BLOCKED with missing GATES warns without blocking' yes
 transcript $'STATUS: FAIL\nGATES: failed'
-check warn-check 'C FAIL with missing summary warns without blocking' yes
+check warn-check 'C FAIL with missing GATES warns without blocking' yes
+
+registry '.orchestra/unsaved task'
+for status in PASS ACCEPTED BLOCKED; do
+  transcript "STATUS: $status"$'\nGATES: codex-verify INCONCLUSIVE'
+  check note "$status without summary emits only a note" no route-lead-charlie-critical false cccccccc1234 "$NOSUMMARY"
+  [[ "$RUN_OUTPUT" == *"$status was claimed"* ]] || fail 'note did not identify claimed status'
+done
 
 ESCALATION="$REPO/.orchestra/escalation"
 PASSED_ESCALATION="$REPO/.orchestra/passed-escalation"
@@ -314,6 +331,49 @@ registry '.orchestra/passed-escalation'
 check allow 'C BLOCKED claim and prefixed BLOCKED summary with passing check allow' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
 transcript "$CLAIM"
 check warn-mismatch 'C passing checker with mismatched recorded BLOCKED status warns' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
+
+ACCEPTED_TASK="$REPO/.orchestra/accepted-task"
+mkdir -p "$ACCEPTED_TASK"
+cp "$ESCALATION/brief.md" "$ESCALATION/plan.md" "$ESCALATION/summary.md" "$ESCALATION/codex-verdict.md" "$ESCALATION/codex-review.md" "$ACCEPTED_TASK/"
+sed -i 's/\[lead-charlie\] STATUS: FAIL/[lead-charlie] STATUS: ACCEPTED/' "$ACCEPTED_TASK/summary.md"
+printf 'USER ACCEPTED: 2026-10-02 — accept the blocking review\n' >> "$ACCEPTED_TASK/brief.md"
+registry '.orchestra/accepted-task'
+transcript $'[lead-charlie] STATUS: ACCEPTED\nGATES: codex-verify PASS; codex-review BLOCKING'
+check allow 'authorised ACCEPTED and prefixed summary allow after strict check' yes route-lead-charlie-critical false cccccccc1234 "$ACCEPTED_TASK"
+transcript "$CLAIM"
+check warn-mismatch 'PASS claim disagrees with accepted summary' yes route-lead-charlie-critical false cccccccc1234 "$ACCEPTED_TASK"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: ACCEPTED'* ]] || fail 'recorded ACCEPTED status was not read'
+cat >> "$ACCEPTED_TASK/summary.md" <<'SUMMARY'
+```
+STATUS: PASS
+```
+SUMMARY
+check warn-mismatch 'fenced PASS example cannot conceal accepted summary mismatch' yes route-lead-charlie-critical false cccccccc1234 "$ACCEPTED_TASK"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: ACCEPTED'* ]] || fail 'fenced PASS replaced recorded ACCEPTED status'
+transcript $'STATUS: ACCEPTED\nGATES: codex-verify PASS'
+registry '.orchestra/passing task'
+check warn-mismatch 'ACCEPTED claim disagrees with PASS summary' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
+registry '.orchestra/accepted-task'
+sed -i '/^USER ACCEPTED:/d' "$ACCEPTED_TASK/brief.md"
+CHECK_ERROR_TEXT="ERROR: STATUS: ACCEPTED requires a column-0 'USER ACCEPTED:" check block 'ACCEPTED without user authorisation blocks on strict failure' yes route-lead-charlie-critical false cccccccc1234 "$ACCEPTED_TASK"
+
+transcript $'STATUS: ACCEPTED-ish\nGATES: codex-verify PASS'
+check allow 'ACCEPTED-ish transcript is not an ACCEPTED claim' no
+sed -i 's/STATUS: BLOCKED/STATUS: ACCEPTED-ish/' "$PASSED_ESCALATION/summary.md"
+registry '.orchestra/passed-escalation'
+transcript $'STATUS: ACCEPTED\nGATES: codex-verify PASS'
+check warn-mismatch 'ACCEPTED-ish summary disagrees with ACCEPTED claim' yes route-lead-charlie-critical false cccccccc1234 "$PASSED_ESCALATION"
+[[ "$RUN_OUTPUT" == *'summary.md STATUS: unknown'* ]] || fail 'ACCEPTED-ish was parsed as a terminal status'
+
+cat >> "$GOOD/summary.md" <<'SUMMARY'
+~~~
+STATUS: BLOCKED
+~~~
+SUMMARY
+registry '.orchestra/passing task'
+transcript "$CLAIM"
+check allow 'fenced BLOCKED example cannot override passing PASS summary' yes route-lead-charlie-critical false cccccccc1234 "$GOOD"
+
 registry
 transcript "$CLAIM"
 python3 - "$TRANSCRIPT" <<'PY'
@@ -326,10 +386,10 @@ check allow 'only last assistant message controls claim' no
 python3 - "$STATE/safety-hooks.log" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
-assert {'allow', 'block', 'warn'} <= {row['decision'] for row in rows}
+assert {'allow', 'block', 'warn', 'note'} <= {row['decision'] for row in rows}
 assert all(row['hook'] == 'orch-stop-gate' and row['event'] == 'SubagentStop' and '\n' not in row['reason'] for row in rows)
 PY
-ok 'claimed outcomes journal allow/block/warn'
+ok 'claimed outcomes journal allow/block/warn/note'
 before="$(wc -c < "$STATE/safety-hooks.log")"
 check allow 'mid-task journal bypass' no
 [ "$(wc -c < "$STATE/safety-hooks.log")" = "$before" ] || fail 'non-claim journalled'

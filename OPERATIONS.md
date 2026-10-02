@@ -253,6 +253,15 @@ ordinary prose and fenced examples do not conflict. The self-check `GATES:` expl
 contain at least one ASCII letter or digit identifying a command, file, or count.
 See [README gate policy](README.md#gate-정책) for applicability and the low-to-trivial amendment.
 
+`STATUS: ACCEPTED` means the user reviewed the actual gate results and accepted them; it is
+never a PASS. Only the user can authorise it; Tier 1 records
+`USER ACCEPTED: <YYYY-MM-DD> — <what was accepted and why>` at column 0 in `brief.md`, outside
+fenced blocks. `GATES:` must still explicitly state the actual results. With that record,
+gate-claim failures and an unapproved round-cap overrun become `ACCEPTED EXCEPTION:` lines;
+structural errors, contradicted PASS claims, and a missing `USER ACCEPTED:` record stay errors
+under `--strict`. The security scan stays advisory. A successful strict check ends with
+`CHECK: PASS (accepted with exceptions: n, risk=...)`, distinguishable from a clean PASS.
+
 For non-trivial tasks, `orch-summary-check --strict` cross-checks positive `GATES:` claims
 against artifacts in the task directory:
 
@@ -261,9 +270,16 @@ against artifacts in the task directory:
   `CODEX-REVIEW: CLEAR` or `CODEX-REVIEW: BLOCKING 0 / NONBLOCKING <m>`.
 - `codex-auditor PASS` (Codex backend): `codex-audit.md`, first non-blank line `CODEX-AUDIT: PASS`.
 - `claude-verifier PASS`: the newest file by mtime among `verdict.md`, `verdict-*.md`,
-  `verifier-verdict.md`, and `verifier-verdict-*.md`. It must contain `VERDICT: PASS` or
+  `verifier-verdict.md`, `verifier-verdict-*.md`, `verifier-normal-verdict.md`, and
+  `verifier-normal-verdict-*.md`. It must contain `VERDICT: PASS` or
   `VERIFIER-VERDICT: PASS` (optionally a Markdown heading), or a `## Verdict` heading whose
   next non-blank line starts with `PASS` (Markdown emphasis and `PASS.` are accepted).
+
+`verifier-normal` uses the dispatched path `<task-dir>/verdict.md` or `verdict-<n>.md` for a
+later run, with exactly `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: INCONCLUSIVE` as its
+first line, followed by evidence. A nonstandard basename is replaced with `verdict.md` in
+the same directory, or the smallest unused `verdict-<n>.md` with n >= 2 if that file exists;
+the verifier reports the actual path and the substitution in `CONCERNS`.
 
 Only top-level files count; archived files under `evidence/` or `rounds/` are ignored.
 All matching verifier files are considered; the newest mtime wins, and equal mtimes choose
@@ -678,7 +694,7 @@ and use `cc-orch session restart <name>` to continue the conversation.
 With a live session, reload discovers `.orchestra/REGISTRY.md` like the hooks: git toplevel
 and its ancestors, process cwd and its ancestors, the git common directory's parent, then
 linked worktrees. The first existing file wins. Any active lead row refuses reload. Terminal
-statuses are `PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`, and `UNASSIGNED`, optionally followed
+statuses are `PASS`, `FAIL`, `BLOCKED`, `ACCEPTED`, `CLOSED`, `IDLE`, and `UNASSIGNED`, optionally followed
 by a character outside `[A-Za-z0-9_-]` and an annotation, such as `PASS (done)` or
 `CLOSED - merged`; `PASS-ish` and empty statuses are active. A missing or unreadable registry,
 or an unresolvable process cwd, also refuses reload. Missing-registry diagnostics list every
@@ -864,7 +880,7 @@ malformed registries do not block. Complex shell evaluation is not a complete sh
 
 `hooks/orch-stop-gate.sh` is registered on **SubagentStop**, with matcher `(route-)?lead-.*`;
 `Stop` is for the main session. It checks the last assistant transcript message only when it
-contains a `STATUS: PASS`, `FAIL`, or `BLOCKED` line (optionally prefixed with a lead label) and a
+contains a `STATUS: PASS`, `FAIL`, `BLOCKED`, or `ACCEPTED` line (optionally prefixed with a lead label) and a
 `GATES:` line. Prose such as “I will report the STATUS: PASS when done” does not claim a result.
 Ordinary mid-task messages do not run a checker. Any truthy `stop_hook_active`
 value (including boolean `true`, string `"true"`, or numeric `1`) bypasses the gate to prevent a
@@ -875,15 +891,21 @@ never validates an unrelated artifact directory. The fallback must be an existin
 containing `brief.md` whose resolved path stays inside the Git repository root derived from
 payload `cwd`; an unknown repository root or an outside path, including a symlink escape, warns.
 
+When the resolved task directory exists but has no `summary.md`, the hook emits only an
+informational `systemMessage`: `summary.md not saved yet; Tier 1 saves the returned block and
+runs orch-summary-check --strict <dir>`. It journals a `note`, writes nothing to stderr,
+and does not invoke the checker.
+
 The checker is resolved through `CC_ORCH_SUMMARY_CHECK` (an executable path for operators/tests),
 then the hook's own repository `bin/orch-summary-check`, `$HOME/.local/bin/orch-summary-check`,
 then `PATH`. It runs with `--strict <task-dir>` and reads the task's own `summary.md` STATUS
 line, accepting a `[lead-x]` prefix. Exit 0 allows silently when the transcript and recorded
 statuses agree; disagreement, including an unavailable recorded status, produces a warning.
-Exit 1 blocks only a transcript claiming `PASS`, including when summary.md records `BLOCKED`
+Like the checker, the hook reads the `summary.md` STATUS line outside fenced blocks.
+Exit 1 blocks a transcript claiming `PASS` or `ACCEPTED`, including when summary.md records `BLOCKED`
 or `FAIL`. The block includes the first 1,500 bytes of checker output, the exact rerun command,
 and the off-switch. A transcript claiming `BLOCKED` or `FAIL` is never blocked: a failing check
-or missing summary produces a warning carrying checker output so honest escalation can finish.
+produces a warning carrying checker output so honest escalation can finish.
 An unresolved task/checker, exit 2, or execution failure also allows with a `systemMessage`
 warning, the same warning on stderr, and a journal record. An absent/unreadable transcript has no observable claim and
 allows silently. Repository containment and `brief.md` checks are structural validation, not
@@ -902,7 +924,7 @@ tail -n 30 "$state_dir/safety-hooks.log"
 
 The journal path is `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/safety-hooks.log`.
 Evaluated Git invocations and detected claims append an ISO timestamp, hook/event, actor identity,
-decision (`allow`, `deny`, `block`, `warn`, or `skip`), and one-line reason. Fast paths do not log.
+decision (`allow`, `deny`, `block`, `warn`, `note`, or `skip`), and one-line reason. Fast paths do not log.
 Bash payloads without both a bare `git` token and a mutation keyword return before starting Python
 or Git. Records use one bounded append write. Only above 2 MiB does an exclusive trim lock permit
 retaining about 1 MiB via a temporary file and atomic rename; appenders coordinate with rotation so records

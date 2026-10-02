@@ -288,7 +288,7 @@ cmd_switch() {
     active="$(awk -F'|' '
           /^\|[[:space:]]*lead-/ {
             s=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
-            if (s !~ /^(PASS|FAIL|BLOCKED|CLOSED|IDLE|UNASSIGNED)([^A-Za-z0-9_-]|$)/) print $0
+            if (s !~ /^(PASS|FAIL|BLOCKED|ACCEPTED|CLOSED|IDLE|UNASSIGNED)([^A-Za-z0-9_-]|$)/) print $0
           }' "$WORKDIR/.orchestra/REGISTRY.md")"
   fi
   if [ -n "$active" ] && [ "$force" = 0 ]; then
