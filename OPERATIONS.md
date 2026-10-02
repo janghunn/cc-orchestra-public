@@ -1051,6 +1051,8 @@ verified; Bases needs Obsidian >= 1.9.0.
   final review finding).
 - The payload-limit fix for secret-shaped filenames landed after the last gate and is not
   gated (`lib/orch_archive.py`, `Archive.scan_files`).
+- The PLTE-required check for indexed PNGs landed after the last gate and is not gated
+  (`lib/orch_archive.py`, `png_info`).
 - `.orchestra/wt` and `.orchestra/archive` containers are skipped as a whole with their byte
   totals reported. Only nested `.orchestra` roots inside them are archived; loose files such
   as `archive/<x>/handoff/` are not copied.

@@ -1196,6 +1196,39 @@ ok(order_details == {'dup.png': 'bad-header', 'noidat.png': 'bad-header', 'iend.
    and order_report['images']['invalid'] == 3 and not order.thumbs() and order_probe.images['invalid'] == 3,
    'a second IHDR, an IEND without IDAT data or a non-empty IEND is invalid-image/bad-header (exit 4) and never reaches the encoder')
 
+# Indexed PNGs require a palette before their image data; keep all other chunks and CRCs intact.
+palette_source = FILES['paletted.png']
+palette_parts, position = [SIGNATURE], len(SIGNATURE)
+while position < len(palette_source):
+    length = struct.unpack('>I', palette_source[position:position + 4])[0]
+    end = position + 12 + length
+    if palette_source[position + 4:position + 8] != b'PLTE':
+        palette_parts.append(palette_source[position:end])
+    position = end
+missing_palette = Scn('missing-palette', {'indexed.png': b''.join(palette_parts)})
+real_encode = archive.ImageEncoder.encode
+def reject_palette_encode(self, *args, **kwargs):
+    raise AssertionError('an indexed PNG without PLTE reached the encoder')
+archive.ImageEncoder.encode = reject_palette_encode
+try:
+    for limit in (16777216, 1):
+        palette_probe = missing_palette.inprocess(PAYLOAD_FILE_MAX_BYTES=limit)
+        palette_probe.build()
+        assert palette_probe.images['invalid'] == 1 and not palette_probe.encoder.resolved
+finally:
+    archive.ImageEncoder.encode = real_encode
+palette_report = missing_palette.report('apply', '--json', code=4)
+palette_errors = palette_report['source_errors']['items']
+palette_snap = next(iter(missing_palette.task_record()['snapshots'].values()))
+palette_entries = json.loads(gzip.decompress((missing_palette.raw / palette_snap['manifest']['blob']).read_bytes()))['entries']
+palette_entry = next(entry for entry in palette_entries if entry['relpath'] == 'indexed.png')
+ok(palette_report['source_errors']['count'] == 1 and palette_report['images']['invalid'] == 1
+   and palette_errors[0]['reason'] == 'invalid-image' and palette_errors[0]['detail'] == 'bad-header'
+   and palette_entry['kind'] == 'invalid-image' and palette_entry['reason'] == 'bad-header'
+   and not missing_palette.thumbs() and not palette_report['images']['resolved']
+   and 'verify: OK' in missing_palette.run('verify'),
+   'an indexed PNG with PLTE removed and valid CRCs is invalid-image/bad-header (apply exit 4), never reaching an encoder in full or seek-only validation')
+
 noise = random.Random(1)
 cut_zlib = zlib.compress(b''.join(b'\x00' + bytes(noise.randrange(256) for _ in range(300 * 3)) for _ in range(200)))
 partial = png(300, 200, 2, 8, None, idat=cut_zlib[:len(cut_zlib) // 2])

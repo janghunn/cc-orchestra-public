@@ -1097,6 +1097,8 @@ Bases에는 Obsidian >= 1.9.0이 필요하다.
   최종 리뷰 지적 사항).
 - secret-shaped 파일명의 payload 한도 수정은 마지막 gate 이후 반영되었으며
   gate 검증을 받지 않았다(`lib/orch_archive.py`, `Archive.scan_files`).
+- indexed PNG의 PLTE 필수 검사는 마지막 gate 이후 반영되었으며 gate 검증을 받지 않았다
+  (`lib/orch_archive.py`, `png_info`).
 - `.orchestra/wt`와 `.orchestra/archive` 컨테이너는 전체를 건너뛰고 합계 용량을 보고한다.
   내부의 중첩된 `.orchestra` 루트만 보관하므로 `archive/<x>/handoff/` 같은 개별 파일은
   복사하지 않는다.
