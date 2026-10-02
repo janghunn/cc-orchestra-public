@@ -982,6 +982,7 @@ orch-archive plan --json --top 20
 orch-archive plan --json --measure-thumbnails   # also encodes thumbnails in memory; writes nothing
 orch-archive apply                 # writes locally and commits changes in the vault
 orch-archive apply --no-commit
+orch-archive import --host render --source-vault /copies/render-vault --source-raw /copies/render-raw
 orch-archive verify
 orch-archive show cc-orchestra--38-orch-archive
 ```
@@ -1067,6 +1068,48 @@ The managed `.obsidian/graph.json` is regenerated on apply and excludes artifact
 and dashboards from the graph. Frontmatter and `.base` dashboards use JSON-compatible YAML
 flow syntax, validated with the Python standard library. Obsidian rendering was not visually
 verified; Bases needs Obsidian >= 1.9.0.
+
+### Importing another host's archive
+
+Run `apply` once to create the local catalog, then use `import` with read-only copies of
+another host's vault and raw store. The two source directories must be separate from each
+other and from both local destinations. Host names are 1–32 lowercase letters/digits with
+single hyphens between nonempty segments (`[a-z0-9]+(?:-[a-z0-9]+)*`); `local` is reserved.
+
+Projects, tasks and sessions gain a `<host>--` prefix in ids, paths and links, plus `host`
+frontmatter and `host/<host>` tags. Models keep their ids and aggregate tasks across hosts.
+`_meta/hosts/<host>.md` records source counts, the source catalog hash and locally withheld
+items. Incoming blobs are checked for gzip integrity and uncompressed SHA-256, then new
+blobs are recompressed deterministically; existing blobs are never rewritten. Source
+histories live under `sources/<host>/`, keeping machine-specific watermarks separate.
+
+Import preserves existing local files and catalog records. Shared model notes, the index,
+dashboards, graph configuration and catalog are regenerated only as supersets. Imported
+text is checked against the local allow-list; withheld text becomes placeholders or is
+omitted from copied artifacts, while original raw content remains in the raw store.
+`--dry-run --json` reports additions and collisions without creating directories, a lock or
+any files. `--top N` limits report samples; `--no-commit` suppresses the vault commit.
+An unchanged repeat writes no changed content and makes no commit. Host import order does
+not change the resulting vault or raw bytes. Later local applies keep imported records frozen.
+
+Exit codes: `0` success; `4` structural rejection (no archive content written) or locally
+withheld items (safe output is written); `2` usage/policy errors; `3` lock busy; `1` the final
+secret-guard backstop. Structural rejection reports reasons before any content is written;
+a non-dry run can still create the raw store's lock file.
+
+Open limitations:
+
+- Chained imports are refused: the incoming catalog must be a single-host version-1 catalog.
+- A host can be re-imported only from an unchanged source. Changes to any existing record or
+  file are refused; import newer work under a new host name until an explicit refresh mode exists.
+- The source vault and raw store must pass `verify`, including note links and source histories.
+- Historical root artifacts absent from the current root manifest are copied without a
+  manifest hash check and counted as `artifacts_unverified`.
+- A crash during writing can leave a partial, re-runnable import; there is no transaction
+  spanning all files.
+- Short task names in `show` can become ambiguous after import; use the full `<host>--…` id.
+- Imported notes use this host's thumbnail/embed policy when rendered.
+- Local discovery of a project or session whose id equals an imported id stops `apply`.
 
 ### Open limitations (not re-gated)
 

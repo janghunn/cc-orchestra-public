@@ -3,9 +3,10 @@ set -euo pipefail
 REPO_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 ARCHIVE_TEST_HOME="$(mktemp -d)"
 IMAGE_TEST_HOME="$(mktemp -d)"
+IMPORT_TEST_HOME="$(mktemp -d)"
 # A temporary HOME hides a per-user Pillow install; keep the real user site visible to the image tests.
 IMAGE_USER_BASE="$(python3 -c 'import site; print(site.getuserbase())')"
-trap 'rm -rf -- "$ARCHIVE_TEST_HOME" "$IMAGE_TEST_HOME"' EXIT
+trap 'rm -rf -- "$ARCHIVE_TEST_HOME" "$IMAGE_TEST_HOME" "$IMPORT_TEST_HOME"' EXIT
 export HOME="$ARCHIVE_TEST_HOME" PYTHONDONTWRITEBYTECODE=1
 export ORCH_ARCHIVE_VAULT="$HOME/vault" ORCH_ARCHIVE_RAW="$HOME/raw"
 export ORCH_ARCHIVE_ALLOWLIST="$HOME/allowlist.txt"
@@ -1700,4 +1701,373 @@ else:
 
 ok(checked_applies >= 20, f'source files were byte- and mtime-identical after each of {checked_applies} archive runs')
 print(f'PASS: {groups} image test groups; SKIPPED: {len(skipped)}' + (' (' + '; '.join(skipped) + ')' if skipped else ''))
+PY
+
+# Host import tests use identical source paths across fixture hosts, then leave A's sources live.
+env HOME="$IMPORT_TEST_HOME" CODEX_HOME="$IMPORT_TEST_HOME/codex" PYTHONUSERBASE="$IMAGE_USER_BASE" python3 - <<'PY'
+import sys
+sys.dont_write_bytecode = True
+import collections
+import copy
+import fcntl
+import gzip
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import zlib
+
+repo, home = Path(os.environ['ARCHIVE_REPO_DIR']), Path(os.environ['HOME'])
+command = repo / 'bin/orch-archive'
+sys.path.insert(0, str(repo / 'lib'))
+import orch_archive as archive
+groups, skipped = 0, []
+work = home / 'work'
+base = work / 'demo'
+secret = 'AKIA' + 'ABCDEFGHIJKLMNOP'
+secret_line = '# ' + secret + '\n'
+have_encoder = importlib.util.find_spec('PIL') is not None or shutil.which('ffmpeg') is not None
+
+def ok(condition, description):
+    global groups
+    assert condition, description
+    groups += 1
+    print(f'ok {groups} - {description}', flush=True)
+
+def skip(description):
+    skipped.append(description)
+    print(f'skip - {description} (SKIPPED: no image encoder)', flush=True)
+
+def put(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data if isinstance(data, bytes) else data.encode())
+
+def environment(name):
+    root = home / name
+    return dict(os.environ, HOME=str(home), CODEX_HOME=str(work / 'codex'),
+                ORCH_ARCHIVE_VAULT=str(root / 'vault'), ORCH_ARCHIVE_RAW=str(root / 'raw'),
+                ORCH_ARCHIVE_ALLOWLIST=str(root / 'allowlist'), ORCH_ARCHIVE_POLICY=str(home / 'policy'),
+                ORCH_ARCHIVE_STATE_DIRS=str(work / 'state'), ORCH_ARCHIVE_CLAUDE_PROJECTS=str(work / 'claude-projects'),
+                ORCH_ARCHIVE_CODEX_HOME=str(work / 'codex'), ORCH_ARCHIVE_EXTRA_BASES='')
+
+def run(name, *args, code=0):
+    result = subprocess.run([str(command), *args], env=environment(name), text=True, capture_output=True)
+    assert result.returncode == code, (name, args, result.returncode, code, result.stdout, result.stderr)
+    return result.stdout + result.stderr
+
+def report(output):
+    return json.loads(output.splitlines()[0])
+
+def catalog(name):
+    return json.loads((home / name / 'vault/_meta/catalog.json').read_bytes())
+
+def save_catalog(name, value):
+    put(home / name / 'vault/_meta/catalog.json', archive.json_bytes(value, compact=True))
+
+def hashes(path, git=False):
+    return {str(p.relative_to(path)): archive.sha(p.read_bytes()) for p in sorted(path.rglob('*'))
+            if p.is_file() and (git or '.git' not in p.relative_to(path).parts)}
+
+def listing(path, git=False):
+    result = {}
+    for p in sorted(path.rglob('*')):
+        if not git and '.git' in p.relative_to(path).parts:
+            continue
+        st = p.lstat()
+        result[str(p.relative_to(path))] = (st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode), st.st_ino)
+    return result
+
+def state(name, git=False):
+    return [(hashes(home / name / kind, git), listing(home / name / kind, git)) for kind in ('vault', 'raw')]
+
+def clone(source, dest):
+    shutil.copytree(home / source, home / dest)
+    return dest
+
+def imported(dest, source='bee', host=None, *options, code=0):
+    return run(dest, 'import', '--host', host or source, '--source-vault', str(home / source / 'vault'),
+               '--source-raw', str(home / source / 'raw'), '--json', '--top', '1000', *options, code=code)
+
+def verified(name):
+    return 'verify: OK' in run(name, 'verify')
+
+def task(name, label):
+    path = base / '.orchestra' / name
+    put(path / 'brief.md', f'# {label}\nRISK: normal\n## Git\nBRANCH: orch/{name}\n' +
+        ('Build on orch/01-shared\n' if name.startswith('02-') else ''))
+    put(path / 'plan.md', '# Plan\n')
+    put(path / 'summary.md', 'STATUS: PASS\nCLAUDE PROFILE: lead-alpha opus@high\n')
+    return path
+
+def make_host(name):
+    if work.exists():
+        shutil.rmtree(work)
+    put(work / 'state/sessions/alpha.conf', f'LAUNCH_NAME=alpha\nPROJECT_NAME=demo\nREPO={base}\nBACKEND=claude\n')
+    put(base / '.orchestra/REGISTRY.md', '# Registry\n')
+    shared = task('01-shared', name + ' shared task')
+    other = task('02-' + name + '-only', name + ' task')
+    model = {'bee': 'gpt-6-sol', 'cat': 'gpt-6-astra', 'sec': 'gpt-6-luna', 'A': 'gpt-6.1-sol'}[name]
+    put(other / 'summary.md', f'STATUS: PASS\nCODEX PROFILE: {model}@high\n')
+    if name == 'sec':
+        put(shared / 'brief.md', secret_line)
+        put(home / name / 'allowlist', 'sha256:' + archive.sha(secret_line.encode()) + '\nsha256:' + archive.sha(secret.encode()) + '\n')
+    if name == 'bee' and have_encoder:
+        def chunk(kind, data):
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+        png = archive.PNG_SIGNATURE + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 2, 0, 0, 0))
+        png += chunk(b'IDAT', zlib.compress((b'\0' + b'\xff\0\0' * 2) * 2)) + chunk(b'IEND', b'')
+        put(other / 'plot.png', png)
+    encoded = re.sub(r'[^A-Za-z0-9]', '-', str(base))
+    put(work / 'claude-projects' / encoded / 't.jsonl', json.dumps({'message': name}) + '\n')
+    run(name, 'apply')
+    assert verified(name)
+
+put(home / 'policy', '')
+for name in ('bee', 'cat', 'sec', 'A'):
+    make_host(name)
+clone('A', 'original')
+bee_before = state('bee', git=True)
+local_before = state('A')
+local_catalog = catalog('A')
+local_pages = {rel: (home / 'A/vault' / rel).read_bytes() for rel in local_before[0][0]}
+
+# 1: namespace collisions, relation links, model aggregation, roots, histories and thumbnails.
+output = imported('A')
+data = report(output)
+merged = catalog('A')
+for rel in ('projects/bee--demo.md', 'sessions/bee--alpha.md', 'tasks/bee--demo--01-shared.md',
+            'tasks/bee--demo--02-bee-only.md', '_meta/hosts/bee.md', 'projects/demo.md', 'sessions/alpha.md', 'tasks/demo--01-shared.md'):
+    assert (home / 'A/vault' / rel).is_file(), rel
+fields, _ = archive.frontmatter((home / 'A/vault/models/claude-opus.md').read_text())
+assert {'[[tasks/demo--01-shared]]', '[[tasks/bee--demo--01-shared]]'} <= set(fields['tasks'])
+assert '[[tasks/bee--demo--01-shared]]' in (home / 'A/vault/tasks/bee--demo--02-bee-only.md').read_text()
+assert list((home / 'A/vault/artifacts/roots/bee--demo').glob('*/files/REGISTRY.md'))
+for p in (home / 'bee/raw/sources').glob('*.json'):
+    assert (home / 'A/raw/sources/bee' / p.name).read_bytes() == p.read_bytes()
+assert {p.name for p in (home / 'bee/raw/sources').glob('*.json')} & {p.name for p in (home / 'original/raw/sources').glob('*.json')}
+assert {'kind': 'projects', 'from': 'demo', 'to': 'bee--demo'} in data['collisions']['renamed']
+assert 'claude-opus' in data['collisions']['models_aggregated']
+if have_encoder:
+    thumbnails = merged['tasks']['bee--demo--02-bee-only']['thumbnails']
+    assert thumbnails and all((home / 'A/vault' / row['path']).is_file() for row in thumbnails.values())
+    assert '![[artifacts/tasks/bee--demo--02-bee-only/thumbs/' in (home / 'A/vault/tasks/bee--demo--02-bee-only.md').read_text()
+else:
+    skip('imported thumbnail and image embed')
+ok(verified('A'), 'host records, relations, aggregate models, artifacts and raw histories resolve')
+
+# 2: independently check shared-page supersets and immutability of all other pre-existing content.
+def superset(rel, old, new):
+    if rel.endswith('.md'):
+        of, ob = archive.frontmatter(old.decode())
+        nf, nb = archive.frontmatter(new.decode())
+        assert of.keys() == nf.keys()
+        for key, value in of.items():
+            if isinstance(value, list):
+                encode = lambda rows: collections.Counter(json.dumps(row, sort_keys=True) for row in rows)
+                assert encode(value) <= encode(nf[key])
+            else:
+                assert value == nf[key]
+        assert collections.Counter(ob.splitlines()) <= collections.Counter(nb.splitlines())
+    elif rel == '.obsidian/graph.json':
+        of, nf = json.loads(old), json.loads(new)
+        groups = of.pop('colorGroups')
+        assert nf.pop('colorGroups')[:len(groups)] == groups and of == nf
+    elif rel == '_meta/catalog.json':
+        of, nf = json.loads(old), json.loads(new)
+        for kind in ('tasks', 'sessions', 'projects', 'models'):
+            assert all(nf[kind][key] == value for key, value in of[kind].items())
+        assert set(of['generated']) <= set(nf['generated'])
+    else:
+        assert old == new
+
+for rel, old in local_pages.items():
+    new = (home / 'A/vault' / rel).read_bytes()
+    if archive.Importer.shared(rel):
+        superset(rel, old, new)
+    else:
+        assert old == new, rel
+assert all(hashes(home / 'A/raw')[rel] == value for rel, value in local_before[1][0].items())
+ok(True, 'local files and records remain identical; shared pages only gain content')
+
+# 3 and 11: dry runs before and after import change no bytes, mtimes, modes, inodes or git files.
+clone('original', 'dry')
+(home / 'dry/raw/.lock').unlink()
+before = state('dry', git=True)
+dry_report = report(imported('dry', 'bee', None, '--dry-run'))
+assert state('dry', git=True) == before and not (home / 'dry/raw/.lock').exists()
+assert dry_report['dry_run'] and dry_report['adds']['tasks'] and dry_report['collisions']['renamed']
+before = state('A', git=True)
+assert report(imported('A', 'bee', None, '--dry-run'))['files']['new_count'] == 0
+assert state('A', git=True) == before
+ok(state('bee', git=True) == bee_before, 'both source trees stay byte- and metadata-identical during import and dry-run')
+ok(True, 'dry-run before and after import writes nothing, creates no lock and reports additions/collisions')
+
+# 4: re-import makes no content or file metadata changes and no commit.
+def commit_count(name):
+    return subprocess.check_output(['git', '-C', str(home / name / 'vault'), 'rev-list', '--count', 'HEAD'],
+                                   env=archive.git_env(), text=True).strip()
+before, commits = state('A'), commit_count('A')
+assert 'commit: none' in imported('A')
+ok(state('A') == before and commit_count('A') == commits, 'unchanged re-import preserves hashes/mtimes and creates no commit')
+
+# 5 and 14: import order commutes, including colors and raw gzip bytes.
+clone('original', 'order1')
+clone('original', 'order2')
+imported('order1', 'bee')
+imported('order1', 'cat')
+imported('order2', 'cat')
+first_graph = json.loads((home / 'order2/vault/.obsidian/graph.json').read_bytes())['colorGroups']
+imported('order2', 'bee')
+second_graph = json.loads((home / 'order2/vault/.obsidian/graph.json').read_bytes())['colorGroups']
+ok(all(hashes(home / 'order1' / kind) == hashes(home / 'order2' / kind) for kind in ('vault', 'raw'))
+   and verified('order1') and verified('order2'), 'bee then cat equals cat then bee byte-for-byte')
+local_graph = json.loads(local_pages['.obsidian/graph.json'])['colorGroups']
+ok(all(group in second_graph for group in first_graph) and first_graph[:len(local_graph)] == second_graph[:len(local_graph)] == local_graph,
+   'host graph colors survive later imports; local groups retain their prefix')
+
+# 6: later applies retain all imported records, host pages, notes and artifacts.
+def host_files(name, host='bee'):
+    return {rel: value for rel, value in hashes(home / name / 'vault').items()
+            if any(part.startswith(host + '--') for part in Path(rel).parts) or rel == f'_meta/hosts/{host}.md'}
+
+def host_records(name, host='bee'):
+    value = catalog(name)
+    return {kind: {key: row for key, row in value[kind].items() if row.get('host') == host}
+            for kind in ('tasks', 'sessions', 'projects')}
+
+before_files, before_records = host_files('A'), host_records('A')
+all_before = set(hashes(home / 'A/vault'))
+task('03-new-local', 'new local task')
+run('A', 'apply')
+assert host_files('A') == before_files and host_records('A') == before_records
+assert all_before <= set(hashes(home / 'A/vault')) and 'demo--03-new-local' in catalog('A')['tasks']
+assert 'commit: none' in imported('A')
+run('A', 'apply')
+ok(host_files('A') == before_files and host_records('A') == before_records and verified('A'),
+   'apply/import/apply freezes imported notes and records while discovering new local tasks')
+
+# 7: importing must not opportunistically migrate legacy local snapshots.
+clone('original', 'legacy')
+legacy = catalog('legacy')
+for item in legacy['tasks'].values():
+    for snapshot in item['snapshots'].values():
+        snapshot['entries'] = json.loads(gzip.decompress((home / 'legacy/raw' / snapshot['manifest']['blob']).read_bytes()))['entries']
+        for key in ('manifest', 'counts', 'files', 'bytes'):
+            snapshot.pop(key)
+save_catalog('legacy', legacy)
+imported('legacy')
+assert all(catalog('legacy')['tasks'][key] == value for key, value in legacy['tasks'].items())
+before = host_files('legacy')
+run('legacy', 'apply')
+ok(before == host_files('legacy') and verified('legacy') and all('manifest' in snapshot for item in catalog('legacy')['tasks'].values()
+   for snapshot in item['snapshots'].values()), 'legacy local catalogs import unchanged and migrate only on later apply')
+
+# Rejection helper proves all local bytes and metadata are preserved.
+def rejected(dest, source, reason, host='bee'):
+    before = state(dest, git=True)
+    data = report(imported(dest, source, host, code=4))
+    assert reason in {item['reason'] for item in data['rejected']['items']}, data
+    assert state(dest, git=True) == before, (source, reason)
+    return data
+
+# 8: invalid gzip, wrong uncompressed digest, missing referenced blob.
+clone('original', 'reject')
+for name, reason in [('bad-gzip', 'blob-gzip'), ('bad-hash', 'blob-hash'), ('missing-blob', 'source-verify')]:
+    clone('bee', name)
+    pointer = next(iter(catalog(name)['tasks']['demo--01-shared']['snapshots'].values()))['manifest']
+    path = home / name / 'raw' / pointer['blob']
+    if name == 'missing-blob':
+        path.unlink()
+    else:
+        put(path, b'bad gzip' if name == 'bad-gzip' else gzip.compress(b'wrong content'))
+    rejected('reject', name, reason)
+ok(True, 'bad gzip, wrong blob hashes and missing referenced blobs reject before writes')
+
+# 9: traversal ids and generated artifact paths.
+clone('bee', 'unsafe-id')
+value = catalog('unsafe-id')
+record = value['tasks'].pop('demo--01-shared')
+record['id'] = '../../evil'
+value['tasks']['../../evil'] = record
+save_catalog('unsafe-id', value)
+rejected('reject', 'unsafe-id', 'unsafe-id')
+clone('bee', 'unsafe-path')
+value = catalog('unsafe-path')
+value['generated'].append('artifacts/tasks/demo--01-shared/../../../x')
+save_catalog('unsafe-path', value)
+rejected('reject', 'unsafe-path', 'unsafe-path')
+ok(not (home / 'evil').exists() and not (home / 'x').exists(), 'traversal ids and artifact paths are rejected without writes')
+
+# 10: source release policy is not authority for local vault output.
+clone('original', 'secret')
+value = report(imported('secret', 'sec', code=4))
+assert value['withheld_count'] >= 1 and not value['rejected']['count']
+assert all(secret.encode() not in p.read_bytes() for p in (home / 'secret/vault').rglob('*') if p.is_file())
+assert archive.sha(secret_line.encode()) in (home / 'secret/vault/_meta/hosts/sec.md').read_text()
+ok(verified('secret'), 'locally withheld imported text stays out of the vault and is reported by hash')
+
+# 12: usage, chaining, id collisions, apply collision guard and lock busy.
+for host in ('local', 'Bad', 'a--b', '-a', 'a-', 'a' * 33):
+    before = state('reject', git=True)
+    run('reject', 'import', '--host=' + host, '--source-vault', str(home / 'bee/vault'), '--source-raw', str(home / 'bee/raw'), code=2)
+    assert state('reject', git=True) == before
+run('reject', 'import', '--host', 'bee', '--source-vault', str(home / 'reject/vault'), '--source-raw', str(home / 'bee/raw'), code=2)
+rejected('reject', 'A', 'chained-import', host='nested')
+clone('original', 'id-collision')
+value = catalog('id-collision')
+value['projects']['bee--demo'] = dict(value['projects']['demo'], id='bee--demo')
+save_catalog('id-collision', value)
+rejected('id-collision', 'bee', 'id-collision')
+clone('A', 'apply-collision')
+conf = work / 'state/sessions/alpha.conf'
+original_conf = conf.read_bytes()
+put(conf, original_conf.replace(b'PROJECT_NAME=demo', b'PROJECT_NAME=bee--demo'))
+before = hashes(home / 'apply-collision/vault', git=True)
+assert 'collides with an imported host record' in run('apply-collision', 'apply', code=2)
+assert hashes(home / 'apply-collision/vault', git=True) == before
+put(conf, original_conf)
+with (home / 'reject/raw/.lock').open('r+b') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    imported('reject', code=3)
+ok(True, 'usage, chained imports, record collisions, apply collisions and concurrent writers fail safely')
+
+# 13: append-only checks and source-history/artifact integrity.
+clone('bee', 'changed-record')
+value = catalog('changed-record')
+value['tasks']['demo--01-shared']['fields']['title'] = 'changed title'
+save_catalog('changed-record', value)
+rejected('A', 'changed-record', 'existing-differs')
+clone('original', 'existing-file')
+put(home / 'existing-file/vault/tasks/bee--demo--01-shared.md', 'uncatalogued local data\n')
+rejected('existing-file', 'bee', 'existing-differs')
+clone('bee', 'guard-collision')
+value = catalog('guard-collision')
+for sid in (secret, 'withheld-' + archive.sha(secret.encode())[:12]):
+    value['sessions'][sid] = dict(copy.deepcopy(value['sessions']['alpha']), id=sid)
+save_catalog('guard-collision', value)
+rejected('reject', 'guard-collision', 'id-collision')
+clone('bee', 'history-corrupt')
+path = next((home / 'history-corrupt/raw/sources').glob('*.json'))
+value = json.loads(path.read_bytes())
+value['generations'][0]['prefix_sha256'] = '0' * 64
+put(path, archive.json_bytes(value))
+rejected('reject', 'history-corrupt', 'source-verify')
+clone('bee', 'artifact-corrupt')
+path = next((home / 'artifact-corrupt/vault/artifacts/tasks/demo--01-shared').glob('*/files/brief.md'))
+put(path, 'modified artifact\n')
+rejected('reject', 'artifact-corrupt', 'artifact-hash')
+ok(True, 'changed records/files, guarded-id collisions, broken histories and edited artifacts reject before writes')
+
+# 15: syntax checks keep caches in the fixture home.
+subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)
+subprocess.run(['python3', '-m', 'py_compile', str(command), str(repo / 'lib/orch_archive.py')], check=True,
+               env=dict(os.environ, PYTHONPYCACHEPREFIX=str(home / 'compile-cache')))
+ok(True, 'shell and Python syntax checks pass')
+print(f'PASS: {groups} import test groups; SKIPPED: {len(skipped)}')
 PY

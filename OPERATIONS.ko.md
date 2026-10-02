@@ -1031,6 +1031,7 @@ orch-archive plan --json --top 20
 orch-archive plan --json --measure-thumbnails   # thumbnail을 메모리에서 인코딩해 측정; 파일은 쓰지 않음
 orch-archive apply                 # 로컬 저장 및 vault 변경 commit
 orch-archive apply --no-commit
+orch-archive import --host render --source-vault /copies/render-vault --source-raw /copies/render-raw
 orch-archive verify
 orch-archive show cc-orchestra--38-orch-archive
 ```
@@ -1113,6 +1114,48 @@ thumbnail의 멱등성은 한 머신 안에서만 보장한다. 원본(해시·�
 graph에서 제외한다. frontmatter와 `.base`는 Python 표준 라이브러리로 검증 가능한
 JSON-compatible YAML flow 형식이다. Obsidian 렌더링은 시각적으로 검증하지 않았다.
 Bases에는 Obsidian >= 1.9.0이 필요하다.
+
+### 다른 호스트의 아카이브 가져오기
+
+먼저 `apply`로 로컬 catalog를 만든 뒤 다른 호스트의 vault와 raw 저장소의 읽기 전용
+복사본을 `import`에 지정한다. 두 원본 디렉터리는 서로 겹치거나 로컬 저장 경로와
+겹칠 수 없다. 호스트 이름은 소문자·숫자와 구간 사이의 단일 하이픈으로 이루어진
+1–32자이다(`[a-z0-9]+(?:-[a-z0-9]+)*`). `local`은 예약어이다.
+
+프로젝트·작업·세션의 id, 경로, 링크에는 `<host>--` 접두사를 붙이며 frontmatter의
+`host`와 `host/<host>` 태그도 추가한다. 모델 id는 유지하고 모든 호스트의 작업을
+모아서 표시한다. `_meta/hosts/<host>.md`에는 원본 수량, catalog 해시, 로컬 정책으로
+보류한 항목을 기록한다. 입력 blob의 gzip 무결성과 압축 전 SHA-256을 검증하고 새
+blob만 결정적으로 재압축한다. 기존 blob은 다시 쓰지 않는다. 원본 이력은
+`sources/<host>/`에 저장하므로 호스트별 inode/device watermark가 섞이지 않는다.
+
+기존 로컬 파일과 catalog 레코드는 유지한다. 모델 노트, index, dashboard, graph 설정과
+catalog 등 공유 페이지는 기존 내용을 포함하는 상위 집합으로만 다시 생성한다.
+가져온 텍스트는 로컬 allow-list로 다시 판단한다. 보류 텍스트는 placeholder로 바꾸거나
+artifact 복사를 생략하고, 원본 raw 내용은 raw 저장소에 유지한다. `--dry-run --json`은
+디렉터리·잠금·파일을 만들지 않고 추가 항목과 충돌을 보고한다. `--top N`은 보고서의
+표본 수를 제한하고 `--no-commit`은 vault commit을 생략한다. 변경 없는 재실행은 내용과
+commit을 추가하지 않는다. 호스트를 가져오는 순서가 달라도 vault/raw 바이트는 같다.
+이후 로컬 `apply`도 가져온 레코드를 동결 상태로 보존한다.
+
+종료 코드: `0` 성공, `4` 구조 오류로 거부(아카이브 내용은 쓰지 않음) 또는 로컬 정책에
+따른 보류(안전한 결과는 저장), `2` 사용법·정책 오류, `3` 잠금 사용 중, `1` 최종 secret
+검사 실패이다. 구조 오류는 내용을 쓰기 전에 보고하며, dry-run이 아닌 경우 raw 잠금
+파일은 만들어질 수 있다.
+
+현재 제한:
+
+- 연쇄 import는 거부한다. 입력은 단일 호스트의 version-1 catalog여야 한다.
+- 같은 호스트는 원본이 그대로일 때만 다시 가져올 수 있다. 기존 파일·레코드를 바꿀
+  변경은 거부한다. 명시적인 refresh 모드가 생기기 전에는 새 호스트 이름을 사용한다.
+- 입력 vault/raw는 노트 링크와 원본 이력을 포함한 `verify`를 통과해야 한다.
+- 현재 root manifest에 없는 과거 root artifact는 manifest 해시 검증 없이 복사하며
+  `artifacts_unverified`로 집계한다.
+- 쓰는 도중 중단되면 일부만 저장될 수 있다. 재실행할 수 있지만 파일 전체를 아우르는
+  transaction은 없다.
+- import 이후 `show`의 짧은 작업 이름이 모호해질 수 있다. 전체 `<host>--…` id를 쓴다.
+- 가져온 노트는 이 호스트의 thumbnail/embed 정책으로 렌더링한다.
+- 로컬에서 발견한 프로젝트·세션 id가 가져온 id와 같으면 `apply`가 중단된다.
 
 ### 남은 제한 사항 (재검증 안 됨)
 

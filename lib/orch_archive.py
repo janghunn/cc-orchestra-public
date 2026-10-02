@@ -56,6 +56,11 @@ THUMB_RECIPE = 2
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_COLOR_DEPTHS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
 FFMPEG_TIMEOUT = 120
+HOST_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+HOST_MAX = 32
+RESERVED_HOSTS = {"local"}
+RELATION_KEYS = ("predecessors", "successors", "supersedes", "superseded_by", "overlaps", "mentions")
+UNSAFE_ID = r"[\\/\[\]|#\x00-\x1f]"
 _WRITE_BASES = set()
 
 
@@ -1434,6 +1439,8 @@ class Archive:
         self.thread_owners = collections.defaultdict(set)
         self.root_reports = []
         for task in self.catalog["tasks"].values():
+            if task.get("host"):
+                continue
             for sid, snap in task["snapshots"].items():
                 old_entries = snap.pop("entries", None)
                 if old_entries is not None:
@@ -1446,6 +1453,17 @@ class Archive:
                     self.raw.existing(snap["manifest"], "manifests")
             for location in task["locations"].values():
                 location["present"] = False
+
+    @classmethod
+    def renderer(cls, policy, guard, catalog):
+        renderer = cls.__new__(cls)
+        renderer.p, renderer.guard, renderer.catalog = policy, guard, catalog
+        renderer.files = {}
+        return renderer
+
+    def local_record(self, kind, identifier):
+        if self.catalog[kind].get(identifier, {}).get("host"):
+            raise ArchiveError(f"apply: local {kind[:-1]} id {identifier} collides with an imported host record")
 
     def captured(self, path, keep):
         key = str(path.resolve())
@@ -1726,6 +1744,7 @@ class Archive:
     def build(self):
         for root, info in sorted(self.d.roots.items()):
             project = info["project"]
+            self.local_record("projects", project)
             project_record = self.catalog["projects"].setdefault(project, {"id": project, "roots": [], "registry_rows": [], "raw": []})
             safe_root = self.guard.value(str(root), project, "root", "path")
             if safe_root not in project_record["roots"]:
@@ -1768,6 +1787,7 @@ class Archive:
             unmatched = list(rows)
             for path in task_paths:
                 task_id = project + "--" + self.guard.identifier(path.name, project, slugify=False)
+                self.local_record("tasks", task_id)
                 task = self.catalog["tasks"].setdefault(task_id, {"id": task_id, "project": project,
                     "task_dir": self.guard.value(path.name, task_id, "task_dir", "path"), "locations": {}, "snapshots": {}, "raw": []})
                 prefix = f"artifacts/tasks/{task_id}"
@@ -1824,9 +1844,12 @@ class Archive:
                 self.thread_owners[thread].add(("sessions", sid))
             record = self.guard.tree(session, sid, "conf")
             record["raw"] = self.catalog["sessions"].get(sid, {}).get("raw", [])
+            self.local_record("sessions", sid)
             self.catalog["sessions"][sid] = record
         self.link_sessions()
         for project in self.catalog["projects"].values():
+            if project.get("host"):
+                continue
             for pointer in project.get("manifests", []):
                 self.raw.existing(pointer, "manifests")
         if self.p["INCLUDE_CLAUDE_TRANSCRIPTS"]:
@@ -1840,6 +1863,8 @@ class Archive:
 
     def link_sessions(self):
         for task in self.catalog["tasks"].values():
+            if task.get("host"):
+                continue
             present = [loc for loc in task["locations"].values() if loc["present"]]
             linked = set() if present else set(task.get("sessions", []))
             for loc in present:
@@ -1858,6 +1883,7 @@ class Archive:
         if sessions:
             return "sessions", sessions[0]
         project = self.d.project(base / ".orchestra")
+        self.local_record("projects", project)
         self.catalog["projects"].setdefault(project, {"id": project, "roots": [], "registry_rows": [], "raw": []})
         return "projects", project
 
@@ -1967,6 +1993,10 @@ class Archive:
 
     def primary_fields(self):
         for task in self.catalog["tasks"].values():
+            if task.get("host"):
+                for model in task["fields"]["models"]:
+                    self.catalog["models"].setdefault(model, {"id": model})
+                continue
             present = [loc for loc in task["locations"].values() if loc["present"]]
             if present:
                 primary = sorted(present, key=lambda loc: (
@@ -1993,10 +2023,9 @@ class Archive:
 
     def relations(self):
         evidence = r"build(s)? on|based on|follow-?up|follows|depends on|prerequisite|predecessor|successor|continues|spin(s|ned)? off|spun off|후속|선행"
-        tasks = self.catalog["tasks"]
-        relation_keys = ("predecessors", "successors", "supersedes", "superseded_by", "overlaps", "mentions")
+        tasks = {tid: task for tid, task in self.catalog["tasks"].items() if not task.get("host")}
         for task in tasks.values():
-            for key in relation_keys:
+            for key in RELATION_KEYS:
                 task[key] = set()
         for identifier, task in sorted(tasks.items()):
             unresolved = set(task["fields"]["unresolved_refs"])
@@ -2035,7 +2064,7 @@ class Archive:
                     task["mentions"].add(other["id"])
             task["fields"]["unresolved_refs"] = sorted(unresolved)
         for task in tasks.values():
-            for key in relation_keys:
+            for key in RELATION_KEYS:
                 task[key] = sorted(task[key])
 
     def render(self):
@@ -2043,37 +2072,61 @@ class Archive:
             self.render_task(identifier, task)
         for kind in ("projects", "sessions", "models"):
             for identifier, record in sorted(self.catalog[kind].items()):
-                pointers = record.get("raw", [])
-                index = self.raw_index(kind, identifier, pointers)
-                linked = [tid for tid, task in sorted(self.catalog["tasks"].items()) if
-                          (kind == "projects" and task["project"] == identifier) or
-                          (kind == "sessions" and identifier in task["sessions"]) or
-                          (kind == "models" and identifier in task["fields"]["models"])]
-                fields = {"id": identifier, "type": kind[:-1], "sources": record.get("sources", record.get("roots", [])),
-                          "tasks": [link("tasks", tid) for tid in linked], "raw_index": index,
-                          "transcript_count": len({p["source"] for p in pointers}), "transcript_bytes": sum(p["length"] for p in pointers),
-                          "tags": ["type/" + kind[:-1]]}
-                if kind == "sessions":
-                    fields.update(backend=record["backend"], backend_source=record["backend_source"],
-                                  created_at=record["fields"].get("CREATED_AT", "unknown"), conf=record["fields"], parse_error=record["parse_error"])
-                if kind == "projects":
-                    fields["manifests"] = record.get("manifests", [])
-                body = "# " + kind[:-1].title() + "\n\n" + fenced(json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2))
-                if kind == "sessions":
-                    body += "\n\n## Recorded conf values\n\n" + fenced(history_values(record["fields"]))
-                if kind == "projects":
-                    body += "\n\n## Unmatched registry rows\n\n" + fenced(history_rows(record.get("registry_rows", [])))
-                body += "\n\n## Tasks\n\n" + "\n".join("- " + link("tasks", tid) for tid in linked) + "\n"
-                self.files[f"{kind}/{identifier}.md"] = note(fields, body)
+                self.render_record(kind, identifier, record)
+        for host, record in sorted(self.catalog.get("hosts", {}).items()):
+            self.render_host(host, record)
+        self.render_shared()
+
+    def render_record(self, kind, identifier, record):
+        pointers = record.get("raw", [])
+        index = self.raw_index(kind, identifier, pointers)
+        linked = [tid for tid, task in sorted(self.catalog["tasks"].items()) if
+                  (kind == "projects" and task["project"] == identifier) or
+                  (kind == "sessions" and identifier in task["sessions"]) or
+                  (kind == "models" and identifier in task["fields"]["models"])]
+        fields = {"id": identifier, "type": kind[:-1], "sources": record.get("sources", record.get("roots", [])),
+                  "tasks": [link("tasks", tid) for tid in linked], "raw_index": index,
+                  "transcript_count": len({p["source"] for p in pointers}), "transcript_bytes": sum(p["length"] for p in pointers),
+                  "tags": ["type/" + kind[:-1]]}
+        if kind == "sessions":
+            fields.update(backend=record["backend"], backend_source=record["backend_source"],
+                          created_at=record["fields"].get("CREATED_AT", "unknown"), conf=record["fields"], parse_error=record["parse_error"])
+        if kind == "projects":
+            fields["manifests"] = record.get("manifests", [])
+        if record.get("host"):
+            fields["host"] = record["host"]
+            fields["tags"].append("host/" + record["host"])
+        body = "# " + kind[:-1].title() + "\n\n" + fenced(json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2))
+        if kind == "sessions":
+            body += "\n\n## Recorded conf values\n\n" + fenced(history_values(record["fields"]))
+        if kind == "projects":
+            body += "\n\n## Unmatched registry rows\n\n" + fenced(history_rows(record.get("registry_rows", [])))
+        body += "\n\n## Tasks\n\n" + "\n".join("- " + link("tasks", tid) for tid in linked) + "\n"
+        self.files[f"{kind}/{identifier}.md"] = note(fields, body)
+
+    def render_host(self, host, record):
+        projects = sorted(pid for pid, project in self.catalog["projects"].items() if project.get("host") == host)
+        self.files[f"_meta/hosts/{host}.md"] = note(
+            {"id": host, "type": "host", "tags": ["type/host"]},
+            "# Host\n\n" + fenced(json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2)) +
+            "\n\n## Projects\n\n" + "\n".join("- " + link("projects", pid) for pid in projects) + "\n")
+
+    def render_shared(self):
         index_links = [link(kind, identifier) for kind in ("projects", "sessions", "models") for identifier in sorted(self.catalog[kind])]
         index_links += ["[[dashboards/Tasks.base]]", "[[dashboards/Sessions.base]]", "[[dashboards/Open tasks.base]]", "[[_meta/report]]", "[[_meta/withheld]]"]
+        index_links += [f"[[_meta/hosts/{host}]]" for host in sorted(self.catalog.get("hosts", {}))]
         self.files["index.md"] = note({"id": "index", "type": "index"}, "# Orchestra archive\n\n" + "\n".join("- " + value for value in index_links) + "\n")
         palette = [14034728, 15109176, 7449760, 5089607, 10053324, 4871631, 9858609]
         queries = ["tag:#risk/" + risk for risk in ("critical", "normal", "low", "trivial")] + ["path:models", "path:sessions", "path:projects"]
-        queries += ["tag:#project/" + project for project in sorted(self.catalog["projects"])]
+        queries += ["tag:#project/" + project for project, record in sorted(self.catalog["projects"].items()) if not record.get("host")]
+        colors = [{"query": query, "color": {"a": 1, "rgb": palette[i % len(palette)]}} for i, query in enumerate(queries)]
+        for project, record in sorted(self.catalog["projects"].items()):
+            if record.get("host"):
+                query = "tag:#project/" + project
+                colors.append({"query": query, "color": {"a": 1, "rgb": palette[int(sha(query.encode())[:8], 16) % len(palette)]}})
         self.files[".obsidian/graph.json"] = json_bytes({"search": "-path:artifacts -path:_meta -path:dashboards", "showTags": False,
                 "showAttachments": False, "showOrphans": True, "hideUnresolved": False,
-                "colorGroups": [{"query": query, "color": {"a": 1, "rgb": palette[i % len(palette)]}} for i, query in enumerate(queries)]})
+                "colorGroups": colors})
         for name, folder in (("Tasks", "tasks"), ("Open tasks", "tasks"), ("Sessions", "sessions")):
             filters = [f'file.inFolder("{folder}")']
             if name == "Open tasks":
@@ -2104,6 +2157,9 @@ class Archive:
                       withheld=sum(snap["counts"].get("withheld", 0) for snap in task["snapshots"].values()),
                       tags=["type/task", "risk/" + fields["risk"], "status/" + fields["status"], "project/" + task["project"]] +
                            ["model/" + model for model in task["fields"]["models"]])
+        if task.get("host"):
+            fields["host"] = task["host"]
+            fields["tags"].append("host/" + task["host"])
         body = "# Task\n\n" + fenced(task["fields"]["title"]) + "\n\n## Fields\n\n"
         body += "| Property | Recorded value |\n| --- | --- |\n"
         for key in ("id", "project", "snapshots", "withheld"):
@@ -2116,7 +2172,7 @@ class Archive:
         body += "\n\n## Status mentions\n\n" + fenced(mentions)
         body += "\n\n## Registry rows\n\n" + fenced(history_rows(task["registry_rows"]))
         body += "\n\n## Relations\n\n" + link("projects", task["project"]) + "\n"
-        for key in ("predecessors", "successors", "supersedes", "superseded_by", "overlaps", "mentions"):
+        for key in RELATION_KEYS:
             fields[key] = [link("tasks", tid) for tid in task[key]]
             body += "\n" + key.replace("_", " ").title() + ": " + ", ".join(fields[key]) + "\n"
         body += "\n## Snapshots\n\n| Snapshot | Current | Files | Bytes | Dispositions |\n| --- | --- | --- | --- | --- |\n"
@@ -2370,14 +2426,12 @@ def pointer_values(value):
             yield from pointer_values(child)
 
 
-def verify(policy):
-    vault, raw = policy["VAULT_DIR"], policy["RAW_DIR"]
+def verify_problems(vault, raw):
     problems, links, pointers, notes = [], 0, 0, 0
     try:
         catalog = json.loads((vault / "_meta/catalog.json").read_text())
     except (OSError, ValueError):
-        print("catalog: missing or invalid")
-        return 1
+        return ["catalog: missing or invalid"], notes, links, pointers
     checked = set()
     manifest_blobs = {(pointer["blob"], pointer["sha256"])
                       for record in catalog.get("projects", {}).values() for pointer in record.get("manifests", [])}
@@ -2476,11 +2530,565 @@ def verify(policy):
                         problems.append(f"{path.name}: generation length mismatch")
             except (OSError, ValueError, KeyError, EOFError, TypeError, zlib.error):
                 problems.append(f"{path.name}: invalid raw generation")
+    return sorted(set(problems)), notes, links, pointers
+
+
+def verify(policy):
+    problems, notes, links, pointers = verify_problems(policy["VAULT_DIR"], policy["RAW_DIR"])
     if problems:
-        print("\n".join(sorted(set(problems))))
+        print("\n".join(problems))
         return 1
     print(f"verify: OK ({notes} notes, {links} links, {pointers} raw pointers)")
     return 0
+
+
+def shared_superset(rel, old_bytes, new_bytes):
+    """Shared pages may only gain list entries/body lines; scalars stay fixed."""
+    def subsequence(old, new):
+        remaining = iter(new)
+        return all(any(item == candidate for candidate in remaining) for item in old)
+
+    try:
+        if rel.endswith(".md"):
+            old, old_body = frontmatter(old_bytes.decode("utf-8"))
+            new, new_body = frontmatter(new_bytes.decode("utf-8"))
+            return (old.keys() == new.keys() and all(
+                isinstance(new[key], list) and subsequence(value, new[key]) if isinstance(value, list)
+                else value == new[key] for key, value in old.items()) and
+                collections.Counter(old_body.splitlines()) <= collections.Counter(new_body.splitlines()))
+        if rel == ".obsidian/graph.json":
+            old, new = json.loads(old_bytes), json.loads(new_bytes)
+            return (old.keys() == new.keys() and all(value == new[key] for key, value in old.items() if key != "colorGroups")
+                    and subsequence(old["colorGroups"], new["colorGroups"]))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return old_bytes == new_bytes
+
+
+class Importer:
+    """Prepare and validate an append-only merge before writing any archive content."""
+    KINDS = ("tasks", "sessions", "projects", "models")
+    MALFORMED = (KeyError, TypeError, AttributeError, ValueError)
+
+    def __init__(self, policy, args, source_vault, source_raw):
+        self.p, self.args, self.host = policy, args, args.host
+        self.vault, self.raw = policy["VAULT_DIR"], policy["RAW_DIR"]
+        self.src_vault, self.src_raw = source_vault, source_raw
+        self.local = json.loads((self.vault / "_meta/catalog.json").read_bytes())
+        self.guard = Guard(policy)
+        self.guard.seed_released(self.local)
+        self.rejected, self.renamed = [], []
+        self.incoming, self.maps, self.records = {}, {}, {}
+        self.blobs, self.sources, self.artifacts, self.thumbnail_refs = {}, {}, {}, {}
+        self.new_blobs, self.new_sources = [], []
+        self.files, self.new_files, self.changed_files = {}, [], []
+        self.models = set()
+        self.artifacts_withheld = self.artifacts_unverified = 0
+        self.cat_bytes = (self.src_vault / "_meta/catalog.json").read_bytes()
+        try:
+            self.incoming = json.loads(self.cat_bytes)
+        except ValueError:
+            self.reject("catalog", "invalid incoming catalog")
+
+    def reject(self, reason, path):
+        self.rejected.append({"reason": reason, "path": self.guard.value(str(path), "import", "rejected", "path")})
+
+    def valid_id(self, identifier):
+        return (isinstance(identifier, str) and identifier not in {"", ".", ".."} and
+                not re.search(UNSAFE_ID, identifier) and
+                len((self.host + "--" + identifier + ".md").encode()) <= 255)
+
+    def validate_catalog(self):
+        incoming = self.incoming
+        if (not isinstance(incoming, dict) or any(not isinstance(incoming.get(kind), dict) for kind in self.KINDS)
+                or not isinstance(incoming.get("generated"), list)):
+            self.reject("catalog", "expected archive catalog maps and generated list")
+            return
+        if incoming.get("version") != 1 or "hosts" in incoming:
+            self.reject("chained-import", "incoming catalog is not single-host version 1")
+        for kind in self.KINDS:
+            for identifier, record in sorted(incoming[kind].items()):
+                if not self.valid_id(identifier):
+                    self.reject("unsafe-id", identifier)
+                if not isinstance(record, dict):
+                    self.reject("malformed-record", f"{kind}/{identifier}")
+                    continue
+                if "host" in record:
+                    self.reject("chained-import", f"{kind}/{identifier}")
+                if record.get("id") != identifier:
+                    self.reject("id-mismatch", f"{kind}/{identifier}")
+                if kind != "tasks":
+                    continue
+                try:
+                    if record["project"] not in incoming["projects"]:
+                        self.reject("dangling-ref", f"{identifier}: project")
+                    for key, targets in (("sessions", incoming["sessions"]), *[(key, incoming["tasks"]) for key in RELATION_KEYS]):
+                        if not isinstance(record.get(key, []), list):
+                            raise TypeError()
+                        for target in record.get(key, []):
+                            if target not in targets:
+                                self.reject("dangling-ref", f"{identifier}: {key}: {target}")
+                    for snapshot in record["snapshots"].values():
+                        if "manifest" not in snapshot:
+                            self.reject("legacy-catalog", identifier)
+                    if not isinstance(record["fields"]["models"], list):
+                        raise TypeError()
+                    self.models.update(record["fields"]["models"])
+                except self.MALFORMED:
+                    self.reject("malformed-record", f"{kind}/{identifier}")
+        for rel in incoming["generated"]:
+            if not isinstance(rel, str):
+                self.reject("catalog", "non-string generated path")
+            else:
+                self.artifact_parts(rel)
+        self.models.update(incoming["models"])
+        for model in sorted(self.models, key=str):
+            if not self.valid_id(model):
+                self.reject("unsafe-id", model)
+            elif self.guard.identifier(model, "import", slugify=False) != model:
+                self.reject("model-withheld", model)
+
+    def map_ids(self):
+        for kind in ("tasks", "sessions", "projects"):
+            mapping = self.maps[kind] = {}
+            for identifier in sorted(self.incoming[kind]):
+                new = self.host + "--" + self.guard.identifier(identifier, "import", slugify=False)
+                if new in mapping.values():
+                    self.reject("id-collision", f"{kind}/{new}")
+                mapping[identifier] = new
+                existing = self.local[kind].get(new)
+                if existing is not None and existing.get("host") != self.host:
+                    self.reject("id-collision", f"{kind}/{new}")
+                if identifier in self.local[kind] and not self.local[kind][identifier].get("host"):
+                    self.renamed.append({"kind": kind, "from": self.guard.value(identifier, "import", "renamed", "path"), "to": new})
+
+    def destination(self, base, rel):
+        path = base / rel
+        if not under(path, base) or path.is_symlink():
+            self.reject("unsafe-path", rel)
+            return None
+        if path.exists() and not path.is_file():
+            self.reject("not-regular", rel)
+            return None
+        return path
+
+    def unchanged_destination(self, base, rel, data):
+        path = self.destination(base, rel)
+        if path is not None and path.exists() and path.read_bytes() != data:
+            self.reject("existing-differs", rel)
+        return path
+
+    def scan_raw(self):
+        blob_root = self.src_raw / "blobs"
+        if blob_root.exists():
+            if blob_root.is_symlink() or not blob_root.is_dir():
+                self.reject("blob-name", "blobs")
+            else:
+                for directory in sorted(blob_root.iterdir()):
+                    if directory.name.startswith("."):
+                        continue
+                    if directory.is_symlink() or not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{2}", directory.name):
+                        self.reject("blob-name", str(directory.relative_to(self.src_raw)))
+                        continue
+                    for path in sorted(directory.iterdir()):
+                        if path.name.startswith("."):
+                            continue
+                        rel = str(path.relative_to(self.src_raw))
+                        if (path.is_symlink() or not path.is_file() or not re.fullmatch(r"[0-9a-f]{64}\.gz", path.name)
+                                or not path.name.startswith(directory.name)):
+                            self.reject("blob-name", rel)
+                            continue
+                        digest, length = hashlib.sha256(), 0
+                        try:
+                            with gzip.open(path, "rb") as stream:
+                                while chunk := stream.read(1024 * 1024):
+                                    digest.update(chunk)
+                                    length += len(chunk)
+                        except (OSError, EOFError, zlib.error):
+                            self.reject("blob-gzip", rel)
+                            continue
+                        if digest.hexdigest() != path.stem:
+                            self.reject("blob-hash", rel)
+                            continue
+                        self.blobs[path.stem] = length
+                        target = self.destination(self.raw, rel)
+                        if target is not None and not target.exists():
+                            self.new_blobs.append(path.stem)
+        source_root = self.src_raw / "sources"
+        if source_root.exists():
+            if source_root.is_symlink() or not source_root.is_dir():
+                self.reject("source-history", "sources")
+            else:
+                for path in sorted(source_root.iterdir()):
+                    if path.name.startswith("."):
+                        continue
+                    if path.is_symlink() or not path.is_file() or not re.fullmatch(r"[0-9a-f]{24}\.json", path.name):
+                        self.reject("source-history", str(path.relative_to(self.src_raw)))
+                        continue
+                    data = path.read_bytes()
+                    try:
+                        source = json.loads(data)
+                        if not isinstance(source, dict) or not isinstance(source["generations"], list):
+                            raise ValueError()
+                        for generation in source["generations"]:
+                            if (not isinstance(generation, dict) or not isinstance(generation["chunks"], list) or
+                                    generation.get("tail") is not None and not isinstance(generation["tail"], dict)):
+                                raise ValueError()
+                    except self.MALFORMED:
+                        self.reject("source-history", path.name)
+                        continue
+                    self.sources[path.name] = data
+                    rel = f"sources/{self.host}/{path.name}"
+                    target = self.unchanged_destination(self.raw, rel, data)
+                    if target is not None and not target.exists():
+                        self.new_sources.append(path.name)
+        try:
+            problems, _, _, _ = verify_problems(self.src_vault, self.src_raw)
+            for problem in problems:
+                self.reject("source-verify", problem)
+        except self.MALFORMED:
+            self.reject("source-verify", "malformed source catalog or history")
+
+    def build_records(self):
+        for kind in ("tasks", "sessions", "projects"):
+            self.records[kind] = {}
+            for identifier, original in sorted(self.incoming[kind].items()):
+                new = self.maps[kind][identifier]
+                try:
+                    record = copy.deepcopy(original)
+                    record.update(id=new, host=self.host)
+                    if kind == "tasks":
+                        record["project"] = self.maps["projects"][record["project"]]
+                        record["sessions"] = sorted(self.maps["sessions"][sid] for sid in record["sessions"])
+                        for key in RELATION_KEYS:
+                            record[key] = sorted(self.maps["tasks"][tid] for tid in record.get(key, []))
+                        for key, thumbnail in record.get("thumbnails", {}).items():
+                            rel = f"artifacts/tasks/{identifier}/thumbs/{key}.jpg"
+                            if thumbnail["path"] != rel or not re.fullmatch(r"[0-9a-f]{24}", key):
+                                self.reject("unsafe-path", thumbnail["path"])
+                                continue
+                            self.thumbnail_refs[rel] = copy.deepcopy(thumbnail)
+                            thumbnail["path"] = f"artifacts/tasks/{new}/thumbs/{key}.jpg"
+                    elif kind == "projects":
+                        for thumbnails in record.get("thumbnails", {}).values():
+                            for key, thumbnail in thumbnails.items():
+                                rel = thumbnail["path"]
+                                pattern = rf"artifacts/roots/{re.escape(identifier)}/[0-9a-f]{{12}}/thumbs/{re.escape(key)}\.jpg"
+                                if not re.fullmatch(pattern, rel) or not re.fullmatch(r"[0-9a-f]{24}", key):
+                                    self.reject("unsafe-path", rel)
+                                    continue
+                                self.thumbnail_refs[rel] = copy.deepcopy(thumbnail)
+                                thumbnail["path"] = rel.replace(f"artifacts/roots/{identifier}/", f"artifacts/roots/{new}/", 1)
+                    record = self.guard.tree(record, new, "import")
+                    self.records[kind][new] = record
+                    if new in self.local[kind] and self.local[kind][new].get("host") == self.host and self.local[kind][new] != record:
+                        self.reject("existing-differs", f"{kind}/{new}")
+                except self.MALFORMED:
+                    self.reject("malformed-record", f"{kind}/{identifier}")
+
+    def manifest_entries(self, pointer):
+        # Raw scan and verify have already checked this pointer's uncompressed digest/length.
+        data = gzip.decompress((self.src_raw / pointer["blob"]).read_bytes())
+        return json.loads(data)["entries"]
+
+    def artifact_hash(self, kind, identifier, snapshot, relpath, digest):
+        if kind == "tasks":
+            snapshots = self.incoming[kind][identifier]["snapshots"]
+            if snapshot not in snapshots:
+                return False
+            entries = self.manifest_entries(snapshots[snapshot]["manifest"])
+            return any(entry.get("relpath") == relpath and entry.get("kind") == "vault" and
+                       entry.get("sha256") == digest for entry in entries)
+        for pointer in self.incoming["projects"][identifier].get("manifests", []):
+            if sha(pointer["root"].encode())[:12] == snapshot:
+                matches = [entry for entry in self.manifest_entries(pointer) if entry.get("relpath") == relpath]
+                if matches:
+                    return any(entry.get("kind") == "vault" and entry.get("sha256") == digest for entry in matches)
+        self.artifacts_unverified += 1
+        return True
+
+    def artifact_parts(self, rel):
+        if not rel.startswith("artifacts/"):
+            return None
+        parts = rel.split("/")
+        if any(part in {"", ".", ".."} or "\\" in part or "\0" in part for part in parts) or len(parts) < 4:
+            self.reject("unsafe-path", rel)
+            return None
+        kind, identifier = parts[1:3]
+        record_kind = "projects" if kind == "roots" else kind
+        if record_kind not in self.KINDS or identifier not in self.incoming[record_kind]:
+            self.reject("unsafe-path", rel)
+            return None
+        if len(parts) == 4 and parts[3] == "raw.json" and kind in self.KINDS:
+            return None
+        thumbnail = bool(re.fullmatch(THUMBNAIL_PATH, rel))
+        if not (thumbnail or re.fullmatch(COPIED_ARTIFACT_PATH, rel)):
+            self.reject("unsafe-path", rel)
+            return None
+        return parts, kind, record_kind, identifier, thumbnail
+
+    def scan_artifacts(self):
+        paths = set(self.incoming["generated"]) | set(self.thumbnail_refs)
+        for rel in sorted(paths):
+            parsed = self.artifact_parts(rel)
+            if parsed is None:
+                continue
+            parts, kind, record_kind, identifier, thumbnail = parsed
+            new_owner = self.maps[record_kind][identifier]
+            dest = "/".join(parts[:2] + [new_owner] + parts[3:])
+            path = self.src_vault / rel
+            try:
+                if not under(path, self.src_vault) or not stat.S_ISREG(path.lstat().st_mode):
+                    self.reject("not-regular", rel)
+                    continue
+                data = path.read_bytes()
+                digest = sha(data)
+                if thumbnail:
+                    reference = self.thumbnail_refs.get(rel)
+                    if (not data.startswith(b"\xff\xd8") or reference is not None and
+                            (reference["sha256"] != digest or reference["bytes"] != len(data))):
+                        self.reject("artifact-thumbnail", rel)
+                        continue
+                else:
+                    if not self.artifact_hash(kind, identifier, parts[3], "/".join(parts[5:]), digest):
+                        self.reject("artifact-hash", rel)
+                        continue
+                    try:
+                        data.decode("utf-8")
+                    except UnicodeError:
+                        self.reject("artifact-encoding", rel)
+                        continue
+                    if self.guard.file(data, new_owner, dest):
+                        self.artifacts_withheld += 1
+                        continue
+                    self.guard.check(data, dest, artifact=True)
+                self.unchanged_destination(self.vault, dest, data)
+                # Retain metadata only, even for large sets of copied artifacts.
+                self.artifacts[dest] = (path, digest, len(data))
+            except OSError:
+                self.reject("not-regular", rel)
+            except self.MALFORMED:
+                self.reject("malformed-record", rel)
+
+    def withheld(self):
+        return sorted(self.guard.items.values(), key=lambda row: (row["id"], row["kind"], row["owner"], row["context"]))
+
+    @staticmethod
+    def shared(rel):
+        return rel in {"index.md", ".obsidian/graph.json", ".gitignore", "_meta/catalog.json"} or bool(re.fullmatch(
+            r"(?:dashboards/[^/]+\.base|models/[^/]+\.md|artifacts/models/[^/]+/raw\.json)", rel))
+
+    def own_path(self, rel):
+        host = re.escape(self.host)
+        return rel == f"_meta/hosts/{self.host}.md" or bool(re.fullmatch(
+            rf"(?:(?:tasks|projects|sessions)/{host}--[^/]+\.md|artifacts/(?:tasks|projects|sessions|roots)/{host}--[^/]+/.+)", rel))
+
+    def render(self):
+        union = self.union = copy.deepcopy(self.local)
+        for kind, records in self.records.items():
+            union[kind].update(records)
+        for model in sorted(self.models):
+            union["models"].setdefault(model, {"id": model})
+        host_record = dict(id=self.host, source_catalog_sha256=sha(self.cat_bytes), **self.counts(), withheld=self.withheld())
+        previous = union.setdefault("hosts", {}).get(self.host)
+        if previous is not None and previous != host_record:
+            self.reject("existing-differs", f"hosts/{self.host}")
+            return
+        union["hosts"][self.host] = host_record
+        union["version"] = 2
+        renderer = Archive.renderer(self.p, self.guard, union)
+        for kind in ("tasks", "projects", "sessions", "models"):
+            for identifier, record in sorted(union[kind].items()):
+                if kind != "models" and record.get("host") != self.host:
+                    continue
+                try:
+                    if kind == "tasks":
+                        renderer.render_task(identifier, record)
+                    else:
+                        renderer.render_record(kind, identifier, record)
+                except self.MALFORMED:
+                    self.reject("malformed-record", f"{kind}/{identifier}")
+        try:
+            renderer.render_host(self.host, host_record)
+            renderer.render_shared()
+        except self.MALFORMED:
+            self.reject("malformed-record", "shared pages")
+        self.files = renderer.files
+        union["generated"] = sorted(set(self.local["generated"]) | set(self.files) | set(self.artifacts) | {"_meta/catalog.json"})
+        self.files["_meta/catalog.json"] = json_bytes(union, compact=True)
+        for kind in (*self.KINDS, "hosts"):
+            if any(union[kind].get(key) != record for key, record in self.local.get(kind, {}).items()):
+                raise ArchiveError("import: existing catalog record changed")
+        if not set(self.local["generated"]) <= set(union["generated"]):
+            raise ArchiveError("import: generated paths removed")
+        for rel in sorted(set(self.files) | set(self.artifacts)):
+            if not (self.shared(rel) or self.own_path(rel)):
+                raise ArchiveError("import: write target outside host namespace")
+            path = self.destination(self.vault, rel)
+            if path is None:
+                continue
+            data = self.files[rel] if rel in self.files else self.artifact_data(rel)
+            if not path.exists():
+                self.new_files.append(rel)
+            elif path.read_bytes() != data:
+                self.changed_files.append(rel)
+                if not self.shared(rel):
+                    self.reject("existing-differs", rel)
+                elif rel != "_meta/catalog.json" and not shared_superset(rel, path.read_bytes(), data):
+                    self.reject("shared-page", f"{rel}: run apply first to refresh shared pages")
+            if not re.fullmatch(THUMBNAIL_PATH, rel):
+                self.guard.check(data, rel, artifact=rel in self.artifacts)
+
+    def artifact_data(self, rel):
+        path, digest, length = self.artifacts[rel]
+        data = path.read_bytes()
+        if len(data) != length or sha(data) != digest:
+            raise ArchiveError("import: source changed during import", 4)
+        if not re.fullmatch(THUMBNAIL_PATH, rel):
+            self.guard.check(data, rel, artifact=True)
+        return data
+
+    def counts(self):
+        return {**{kind: len(self.incoming[kind]) if isinstance(self.incoming.get(kind), dict) else 0
+                   for kind in ("tasks", "sessions", "projects")},
+                "models": len(self.models), "blobs": len(self.blobs), "sources": len(self.sources),
+                "artifacts": sum(not re.fullmatch(THUMBNAIL_PATH, rel) for rel in self.artifacts),
+                "thumbnails": sum(bool(re.fullmatch(THUMBNAIL_PATH, rel)) for rel in self.artifacts),
+                "artifacts_unverified": self.artifacts_unverified, "artifacts_withheld": self.artifacts_withheld}
+
+    def report(self):
+        top = self.args.top
+        # Reports are guarded too; even a rejected catalog must not disclose its ids.
+        incoming = self.counts() if isinstance(self.incoming, dict) else {}
+        new_artifacts = [rel for rel in self.artifacts if not (self.vault / rel).exists()]
+        adds = {kind: sorted(set(self.records.get(kind, {})) - set(self.local[kind])) for kind in ("tasks", "sessions", "projects")}
+        adds.update(models=sorted(self.models - set(self.local["models"]), key=str),
+                    artifacts=sum(not re.fullmatch(THUMBNAIL_PATH, rel) for rel in new_artifacts),
+                    thumbnails=sum(bool(re.fullmatch(THUMBNAIL_PATH, rel)) for rel in new_artifacts),
+                    blobs=len(self.new_blobs), sources=len(self.new_sources))
+        renamed = sorted(self.renamed, key=lambda row: (row["kind"], row["from"], row["to"]))
+        rejected = sorted(self.rejected, key=lambda row: (row["reason"], row["path"]))
+        report = {"host": self.host, "dry_run": self.args.dry_run, "source_catalog_sha256": sha(self.cat_bytes),
+                  "incoming": incoming, "adds": adds,
+                  "collisions": {"count": len(renamed), "renamed": renamed[:top],
+                                 "models_aggregated": sorted(self.models & set(self.local["models"]))},
+                  "files": {"new_count": len(self.new_files), "changed_count": len(self.changed_files),
+                            "new": self.new_files[:top], "changed": self.changed_files[:top]},
+                  "withheld_count": len(self.guard.items), "withheld": self.withheld()[:top],
+                  "rejected": {"count": len(rejected), "items": rejected[:top]}}
+        return self.guard.tree(report, "import", "report")
+
+    def prepare(self):
+        if not self.rejected:
+            self.validate_catalog()
+        if self.rejected:
+            return
+        self.map_ids()
+        self.scan_raw()
+        self.build_records()
+        # Invalid raw data cannot safely supply artifact manifests.
+        if not self.rejected:
+            self.scan_artifacts()
+        if not self.rejected:
+            self.render()
+
+    def write(self):
+        for digest in self.new_blobs:
+            rel = f"blobs/{digest[:2]}/{digest}.gz"
+
+            def writer(stream):
+                actual = hashlib.sha256()
+                with gzip.open(self.src_raw / rel, "rb") as source, gzip.GzipFile(
+                        fileobj=stream, mode="wb", filename="", mtime=0, compresslevel=self.p["GZIP_LEVEL"]) as packed:
+                    while chunk := source.read(1024 * 1024):
+                        actual.update(chunk)
+                        packed.write(chunk)
+                if actual.hexdigest() != digest:
+                    raise ArchiveError("import: blob changed during import", 4)
+
+            _write_atomic(self.raw, rel, writer)
+        for name in self.new_sources:
+            _write_atomic(self.raw, f"sources/{self.host}/{name}", self.sources[name])
+        written = 0
+        for rel in sorted(set(self.files) | set(self.artifacts), key=lambda rel: (rel == "_meta/catalog.json", rel)):
+            data = self.files[rel] if rel in self.files else self.artifact_data(rel)
+            written += _write_atomic(self.vault, rel, data)
+        commit = "none"
+        if not (self.vault / ".git").exists():
+            git(self.vault, "init", "-q", "-b", "main", "--template=")
+        git_containment(self.vault)
+        if self.p["COMMIT"] and not self.args.no_commit:
+            git(self.vault, "add", "-A")
+            dirty = git(self.vault, "diff", "--cached", "--quiet", check=False)
+            if dirty.returncode == 1:
+                counts = self.counts()
+                git(self.vault, "commit", "-q", "-m", f"archive: import {self.host} ({counts['tasks']} tasks, {counts['sessions']} sessions, {counts['projects']} projects)")
+                commit = git(self.vault, "rev-parse", "HEAD").stdout.strip()
+            elif dirty.returncode:
+                raise ArchiveError("git diff failed")
+        private_files(self.vault)
+        return written, commit
+
+
+def import_host(policy, args):
+    host = args.host
+    if len(host) > HOST_MAX or not re.fullmatch(HOST_PATTERN, host) or host in RESERVED_HOSTS:
+        raise ArchiveError("import: invalid or reserved host name")
+    if args.top < 0:
+        raise ArchiveError("--top must be nonnegative")
+    vault, raw = policy["VAULT_DIR"], policy["RAW_DIR"]
+    source_vault, source_raw = (Path(expand(value)).resolve() for value in (args.source_vault, args.source_raw))
+    for source in (source_vault, source_raw):
+        if not source.is_dir():
+            raise ArchiveError("import: source directory missing")
+        for local in (vault, raw):
+            if under(source, local) or under(local, source):
+                raise ArchiveError("import: source and destination directories overlap")
+    if under(source_vault, source_raw) or under(source_raw, source_vault):
+        raise ArchiveError("import: source directories overlap")
+    catalog = source_vault / "_meta/catalog.json"
+    if not catalog.is_file() or catalog.is_symlink() or not under(catalog, source_vault):
+        raise ArchiveError("import: source catalog is not a regular file")
+    if not (vault / "_meta/catalog.json").is_file():
+        raise ArchiveError("import: local vault has no archive catalog; run apply first")
+    if (vault / ".git").exists():
+        git_containment(vault)
+    with contextlib.ExitStack() as stack:
+        if not args.dry_run:
+            global _WRITE_BASES
+            _WRITE_BASES = {vault, raw}
+            os.umask(0o077)
+            for base in (vault, raw):
+                base.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.chmod(base, 0o700)
+            lock_path = raw / ".lock"
+            if lock_path.is_symlink() or not under(lock_path, raw):
+                raise ArchiveError("raw lock is a symlink or escapes store")
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            lock = stack.enter_context(os.fdopen(lock_fd, "r+b"))
+            os.fchmod(lock.fileno(), 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ArchiveError("archive lock busy", 3) from None
+        importer = Importer(policy, args, source_vault, source_raw)
+        importer.prepare()
+        report = importer.report()
+        if importer.rejected:
+            output_report(report, args.json, "Archive import (copy only; sources unchanged)")
+            print(f"import: host {host}: rejected ({len(importer.rejected)} problems); nothing written")
+            return 4
+        if args.dry_run:
+            output_report(report, args.json, "Archive import (copy only; sources unchanged)")
+            adds, changes = len(importer.new_files), len(importer.changed_files)
+            print(f"import: host {host} (dry run): would write {adds + changes} vault files ({adds} new, {changes} changed), "
+                  f"{len(importer.new_blobs)} new blobs, {len(importer.new_sources)} source histories; nothing written")
+        else:
+            written, commit = importer.write()
+            output_report(report, args.json, "Archive import (copy only; sources unchanged)")
+            print(f"vault: {written} files written; raw: {len(importer.new_blobs)} new blobs, "
+                  f"{len(importer.new_sources)} source histories written; commit: {commit}")
+        return 4 if importer.guard.items else 0
 
 
 def show(policy, identifier):
@@ -2499,11 +3107,11 @@ def show(policy, identifier):
     return 0
 
 
-def output_report(report, as_json):
+def output_report(report, as_json, title="Archive plan (copy only; local vault and raw store)"):
     if as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
-        print("Archive plan (copy only; local vault and raw store)")
+        print(title)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
 
 
@@ -2512,21 +3120,27 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--top", type=int, default=20)
     sub = parser.add_subparsers(dest="command")
-    for command in ("plan", "apply", "verify", "show"):
+    for command in ("plan", "apply", "verify", "show", "import"):
         child = sub.add_parser(command)
-        if command in ("plan", "apply"):
+        if command in ("plan", "apply", "import"):
             child.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
             child.add_argument("--top", type=int, default=argparse.SUPPRESS)
         if command == "plan":
             child.add_argument("--measure-thumbnails", action="store_true")
-        if command == "apply":
+        if command in ("apply", "import"):
             child.add_argument("--no-commit", action="store_true")
+        if command == "import":
+            for option in ("host", "source-vault", "source-raw"):
+                child.add_argument("--" + option, required=True)
+            child.add_argument("--dry-run", action="store_true")
         if command == "show":
             child.add_argument("id")
     args = parser.parse_args(argv)
     spool = None
     try:
         policy = load_policy()
+        if args.command == "import":
+            return import_host(policy, args)
         if args.command == "verify":
             return verify(policy)
         if args.command == "show":
