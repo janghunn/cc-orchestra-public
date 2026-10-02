@@ -1,7 +1,7 @@
 # Real-run provenance and interpretation
 
 The lead ran these commands from the clone root on 2026-10-02 at commit
-`2e59193`:
+`31fcde3`:
 
 ```bash
 export GATE_AB_ROOT=<corpus root>
@@ -9,12 +9,16 @@ unshare -rn python3 eval/diff-triage/build_labels.py --note eval/diff-triage/evi
 /usr/bin/time -v unshare -rn python3 eval/diff-triage/run_eval.py --s3 auto --note eval/diff-triage/evidence/real-run.md
 ```
 
-Label building exited 0. Evaluation exited 0; wall time was `0:01.21` and
-maximum RSS was `31036 KiB`.
+Label building exited 0. Evaluation exited 0; wall time was `0:01.28` and
+maximum RSS was `29696 KiB`.
 Private outputs used the default
 `${CC_ORCH_STATE_DIR:-$HOME/.claude/orchestra-state}/diff-triage`.
 The script-generated aggregates are in [label-counts.md](label-counts.md) and
 [real-run.md](real-run.md).
+
+The first run at `2e59193` gave the same verdict; it was re-run after a gate-review
+fix made scorer inputs independent of git configuration (full blob ids in patch
+index lines), which changes only S0's seeded permutations.
 
 The following corpus SHA-256 hashes were identical before and after the run:
 
@@ -31,7 +35,7 @@ primary diffs. Primary recall@k20 paired comparisons (95% confidence intervals):
 | Comparison | Mean delta | CI |
 |---|---:|---|
 | S2-S1 | -0.0167 | [-0.1722, 0.2056] |
-| S2-S0 | 0.2318 | [0.0621, 0.4090] |
+| S2-S0 | 0.2314 | [0.0678, 0.4019] |
 
 Rule 1 does not apply because there are at least 10 usable primary diffs.
 S2 is the only candidate. Rule 2 does not apply because its mean delta against
