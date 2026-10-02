@@ -1113,7 +1113,7 @@ def png_info(path, full=False):
         if (not 0 < width <= 2**31 - 1 or not 0 < height <= 2**31 - 1 or depth not in PNG_COLOR_DEPTHS.get(color, ())
                 or compression or filtering or interlace not in (0, 1)):
             return "bad-header", None
-        position = 33
+        position, seen_data = 33, False
         while True:
             header = take(8)
             if len(header) < 8:
@@ -1121,6 +1121,10 @@ def png_info(path, full=False):
             length, kind = struct.unpack(">I", header[:4])[0], header[4:]
             if length > 2**31 - 1 or position + 12 + length > size:
                 return "truncated", None
+            # Only one IHDR is allowed, IEND is empty, and IDAT data must precede IEND.
+            if kind == b"IHDR" or (kind == b"IEND" and (length or not seen_data)):
+                return "bad-header", None
+            seen_data = seen_data or kind == b"IDAT"
             if full:
                 crc, remaining = zlib.crc32(kind), length
                 while remaining:
@@ -1336,7 +1340,9 @@ class ImageEncoder:
                                             timeout=FFMPEG_TIMEOUT)
             except (OSError, subprocess.TimeoutExpired):
                 raise ImageDecodeError("ffmpeg") from None
-            if result.returncode != 0 or not result.stdout.startswith(b"\xff\xd8"):
+            # ffmpeg exits 0 with a partial image after "IEND without all image" (also with -xerror and
+            # -err_detect explode on 4.4.2), so anything printed at -loglevel error is a decode failure.
+            if result.returncode != 0 or result.stderr.strip() or not result.stdout.startswith(b"\xff\xd8"):
                 raise ImageDecodeError("ffmpeg")
             size = jpeg_dimensions(result.stdout)
             if size is None:

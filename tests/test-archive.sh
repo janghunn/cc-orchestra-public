@@ -1170,6 +1170,47 @@ if HAVE_PIL:
 else:
     skip('undecodable pixel data is decode-failed', 'Pillow is not available')
 
+# round 3: chunk-order rules and partial decodes -----------------------------------------------------------
+def ihdr(width, height):
+    return chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+
+idat_rows = zlib.compress(b''.join(b'\x00' + bytes(15 * 3) for _ in range(10)))
+duplicate_ihdr = SIGNATURE + ihdr(1, 1) + ihdr(15, 10) + chunk(b'IDAT', idat_rows) + chunk(b'IEND', b'')
+no_idat = SIGNATURE + ihdr(15, 10) + chunk(b'IEND', b'')
+iend_payload = SIGNATURE + ihdr(15, 10) + chunk(b'IDAT', idat_rows) + chunk(b'IEND', b'x')
+order = Scn('chunk-order', {'dup.png': duplicate_ihdr, 'noidat.png': no_idat, 'iend.png': iend_payload}, 'THUMB_MAX_PIXELS=100\n')
+real_encode = archive.ImageEncoder.encode
+order_calls = []
+def order_encode(self, *args, **kwargs):
+    order_calls.append(args)
+    return real_encode(self, *args, **kwargs)
+archive.ImageEncoder.encode = order_encode
+try:
+    order_probe = order.inprocess()
+    order_probe.build()
+finally:
+    archive.ImageEncoder.encode = real_encode
+order_report = order.report('apply', '--json', code=4)
+order_details = {Path(i['path']).name: i['detail'] for i in order_report['source_errors']['items']}
+ok(order_details == {'dup.png': 'bad-header', 'noidat.png': 'bad-header', 'iend.png': 'bad-header'} and not order_calls
+   and order_report['images']['invalid'] == 3 and not order.thumbs() and order_probe.images['invalid'] == 3,
+   'a second IHDR, an IEND without IDAT data or a non-empty IEND is invalid-image/bad-header (exit 4) and never reaches the encoder')
+
+noise = random.Random(1)
+cut_zlib = zlib.compress(b''.join(b'\x00' + bytes(noise.randrange(256) for _ in range(300 * 3)) for _ in range(200)))
+partial = png(300, 200, 2, 8, None, idat=cut_zlib[:len(cut_zlib) // 2])
+for encoder, available in (('pillow', HAVE_PIL), ('ffmpeg', HAVE_FFMPEG)):
+    description = f'{encoder}: a PNG whose zlib stream is cut short (valid chunk CRCs) is decode-failed, not a partial thumbnail'
+    if not available:
+        skip(description, f'{encoder} is not available')
+        continue
+    cut = Scn('cut-' + encoder, {'cut.png': partial, 'good.png': FILES['gray16.png']}, f'THUMB_ENCODER={encoder}\n')
+    cut_report = cut.report('apply', '--json', code=4)
+    cut_rows = {r['relpath']: r for r in cut.snapshot_rows()}
+    ok(cut_rows['cut.png']['disposition'] == 'metadata-only' and cut_rows['cut.png']['reason'] == 'decode-failed'
+       and cut_rows['good.png']['disposition'] == 'thumbnail' and len(cut.thumbs()) == 1
+       and [i['detail'] for i in cut_report['source_errors']['items']] == ['decode-failed'], description)
+
 # (e) pixel cap -------------------------------------------------------------------------------------------
 bomb = Scn('bomb', {'bomb.png': bomb_png(), 'small.png': FILES['gray16.png']}, 'THUMB_MAX_PIXELS=100000000\n')
 real_encode = archive.ImageEncoder.encode
