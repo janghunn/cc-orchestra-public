@@ -1135,3 +1135,6 @@ Unpriced calls lack surviving token data; coverage counts calls with tokens and 
 Fast multipliers are unknown by default (Standard-rate estimates); per-request long-context surcharges are not applied.
 Attribution uses event-file mtimes and wrapper log order. Same-mode runs in one root with crossing intervals can be swapped when no other wrapper call starts between their completions.
 Copied or touched task directories can give event files newer mtimes and attribute their tokens to newer calls.
+Token-to-call matching is an estimate: `codex.log` has no event-file or run identifier.
+`codex-run` writes the event file before its `codex.log` line; another call appending between these writes can cause the completing call to be priced under the other call's model.
+Exact matching needs a deferred `codex-run` log change; `orch-jev` parses the line with a full-line regex.
