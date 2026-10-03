@@ -2741,7 +2741,10 @@ class Importer:
     def reject_special_sources(self):
         # Source verification opens files; a FIFO would block while the raw lock is held.
         for root in (self.src_vault, self.src_raw):
-            for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            def reject_unlistable(error):
+                self.reject("not-regular", str(Path(error.filename or root).relative_to(root)))
+
+            for directory, dirnames, filenames in os.walk(root, followlinks=False, onerror=reject_unlistable):
                 dirnames.sort()
                 for name in sorted(dirnames + filenames):
                     path = Path(directory) / name

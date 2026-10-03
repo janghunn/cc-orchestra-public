@@ -2415,6 +2415,25 @@ for kind in ('fifo', 'socket', 'symlink'):
             path.unlink(missing_ok=True)
 ok(True, 'F7: special source artifacts, notes and direct/nested histories reject promptly without writes or held locks')
 
+if os.geteuid() == 0:
+    note = 'F7 unlistable source directory: root bypasses permission bits'
+    skipped.append(note)
+    print(f'skip - {note}', flush=True)
+else:
+    source = clone('bee', 'special-unlistable')
+    rel = next(rel for rel in catalog(source)['generated'] if
+               re.fullmatch(r'artifacts/tasks/demo--01-shared/[0-9a-f]{12}/files/brief\.md', rel))
+    path = home / source / 'vault' / rel
+    path.unlink()
+    try:
+        os.mkfifo(path)
+        path.parent.chmod(0o111)
+        bounded_rejected('reject', source, 'not-regular')
+    finally:
+        path.parent.chmod(0o755)
+        path.unlink(missing_ok=True)
+    ok(True, 'F7: an unlistable source directory containing a FIFO rejects without writes or a held lock')
+
 clone('original', 'after-fifo')
 imported('after-fifo')
 ok(verified('after-fifo'), 'F7: a normal import and verification succeed after FIFO rejections')
