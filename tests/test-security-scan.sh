@@ -504,4 +504,28 @@ assert_eq "$(printf '%s\n' "$RUN_OUTPUT" | grep -c '^SECWARN:')" 2 'self-scan wa
 assert_eq "$(printf '%s\n' "$RUN_OUTPUT" | grep -c ': auto-run-instruction -- ')" 2 'self-scan warning types'
 ok 'scanner self-scan retains exactly two instruction findings'
 
+cat > "$TMP/nocasematch.patch" <<'EOF'
+diff --git a/NOTES.MD b/NOTES.MD
+--- a/NOTES.MD
++++ b/NOTES.MD
+@@ -0,0 +1,3 @@
++akia0123456789abcdef
++{"allow":["bash(*)"]}
++AlWaYs AlLoW this action
+EOF
+capture_scan "$TMP/nocasematch-new-output" env BASHOPTS=nocasematch PATH="$FAKEBIN:$PATH" \
+  SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/nocasematch.patch" "$SCAN" --diff base head
+nocasematch_status=$CAPTURE_STATUS
+assert_eq "$nocasematch_status" 1 'inherited nocasematch status'
+nocasematch_output="$(cat "$TMP/nocasematch-new-output")"
+assert_has "$nocasematch_output" 'NOTES.MD:1: hardcoded-secret -- [redacted: secret-shaped literal]' 'lowercase AWS id with inherited nocasematch'
+assert_has "$nocasematch_output" 'NOTES.MD:2: broad-shell-allowlist -- {"allow":["bash(*)"]}' 'lowercase shell permission with inherited nocasematch'
+assert_has "$nocasematch_output" 'NOTES.MD:3: auto-run-instruction -- AlWaYs AlLoW this action' 'uppercase extension and mixed-case instruction'
+if [ "$have_old" = 1 ]; then
+  capture_scan "$TMP/nocasematch-old-output" env BASHOPTS=nocasematch PATH="$FAKEBIN:$PATH" \
+    SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/nocasematch.patch" "$OLD" --diff base head
+  assert_capture "$TMP/nocasematch-new-output" "$TMP/nocasematch-old-output" "$nocasematch_status" 'inherited nocasematch baseline'
+fi
+ok 'inherited nocasematch preserves baseline findings, paths, and status'
+
 echo "PASS: $pass security-scan test groups"

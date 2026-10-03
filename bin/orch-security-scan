@@ -156,6 +156,8 @@ decode_path() {
 }
 
 scan_patch_fast() {
+  # Inherited nocasematch changes every Bash match the helper mirrors, so use the original loop.
+  shopt -q nocasematch && return 1
   local patch="$1" output record idx number hdr total last previous_idx=-1 previous_hdr=-2
   local file="" decoded_path
   local -a lines records
