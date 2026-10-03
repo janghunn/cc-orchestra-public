@@ -155,9 +155,21 @@ decode_path() {
   done
 }
 
-scan_patch_fast() {
-  # Inherited nocasematch changes every Bash match the helper mirrors, so use the original loop.
+fast_path_shell_ok() {
+  # The helper mirrors the original loop's Bash matches; inherited nocasematch or a compat
+  # level (BASHOPTS, BASH_COMPAT) can change them, so those shells use the original loop.
+  local option header='@@ -1,2 +34,5 @@ probe'
   shopt -q nocasematch && return 1
+  [ -z "${BASH_COMPAT:-}" ] || return 1
+  for option in compat31 compat32 compat40 compat41 compat42 compat43 compat44; do
+    shopt -q "$option" 2>/dev/null && return 1
+  done
+  # Probe the exact hunk-header match the original loop uses.
+  [[ "$header" =~ ^@@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,[0-9]+)?\ @@ ]] && [ "${BASH_REMATCH[2]}" = 34 ]
+}
+
+scan_patch_fast() {
+  fast_path_shell_ok || return 1
   local patch="$1" output record idx number hdr total last previous_idx=-1 previous_hdr=-2
   local file="" decoded_path
   local -a lines records

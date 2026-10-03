@@ -528,4 +528,23 @@ if [ "$have_old" = 1 ]; then
 fi
 ok 'inherited nocasematch preserves baseline findings, paths, and status'
 
+for compat_setting in BASH_COMPAT=3.1 BASHOPTS=compat31 BASH_COMPAT=4.2; do
+  for fixture in edge large; do
+    : > "$SECURITY_TEST_HELPER_LOG"
+    capture_scan "$TMP/compat-new-output" env "$compat_setting" PATH="$PYBIN:$FAKEBIN:$PATH" \
+      SECURITY_TEST_HELPER_MODE=log SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" \
+      "$SCAN" --diff base head
+    compat_status=$CAPTURE_STATUS
+    if [ "$compat_setting" = BASH_COMPAT=3.1 ]; then
+      assert_not_has "$(cat "$SECURITY_TEST_HELPER_LOG")" 'END ' "$compat_setting $fixture bypasses Python helper"
+    fi
+    if [ "$have_old" = 1 ]; then
+      capture_scan "$TMP/compat-old-output" env "$compat_setting" PATH="$FAKEBIN:$PATH" \
+        SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" "$OLD" --diff base head
+      assert_capture "$TMP/compat-new-output" "$TMP/compat-old-output" "$compat_status" "$compat_setting $fixture baseline"
+    fi
+  done
+done
+ok 'inherited Bash compatibility preserves baseline output and status without invoking the helper'
+
 echo "PASS: $pass security-scan test groups"
