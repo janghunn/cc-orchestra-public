@@ -11,6 +11,77 @@ instruction_pattern='always allow|auto-approve|auto approve|without confirmation
 # Only JSON permission strings, including deny entries; installer pipes are out of scope.
 shell_pattern='"Bash\((\*|bash:\*|sh:\*|zsh:\*|\*:\*)\)"'
 
+IFS= read -r -d '' candidate_filter_py <<'PY' || :
+import locale
+import os
+import re
+import sys
+
+# Rule changes must fall back until this superset filter has been reviewed.
+if os.fsencode(sys.argv[1]) != rb"""(^|[^[:alnum:]_])(key|token|secret|password|api[_-]?key)["']?[[:space:]]*[:=][[:space:]]*["'][a-z0-9_/+=-]{20,}["']""":
+    sys.exit(3)
+if os.fsencode(sys.argv[3]) != rb'"Bash\((\*|bash:\*|sh:\*|zsh:\*|\*:\*)\)"':
+    sys.exit(3)
+phrases = os.fsencode(sys.argv[2]).split(b"|")
+if not all(re.fullmatch(rb"[a-z]+([ -][a-z]+)*", phrase) for phrase in phrases):
+    sys.exit(3)
+
+try:
+    locale.setlocale(locale.LC_CTYPE, "")
+    utf8_locale = locale.nl_langinfo(locale.CODESET).upper().replace("-", "") == "UTF8"
+except Exception:
+    utf8_locale = False
+
+
+def candidate(content):
+    lo = content.lower()
+    # Every rule requires these literals: the assignment also needs punctuation
+    # and a quote. In UTF-8 only U+0130/U+212A lowercase into ASCII; in C/ASCII
+    # Bash lowers ASCII only. Other single-byte locales use the conservative
+    # non-ASCII branch below, as does an undeterminable codeset.
+    return (
+        b"AKIA" in content
+        or b'"Bash(' in content
+        or any(phrase in lo for phrase in phrases)
+        or (any(word in lo for word in (b"key", b"token", b"secret", b"password"))
+            and (b":" in content or b"=" in content)
+            and (b'"' in content or b"'" in content))
+        or b"\xe2\x84\xaa" in content or b"\xc4\xb0" in content
+        or (not utf8_locale and any(byte >= 0x80 for byte in content))
+    )
+
+
+data = sys.stdin.buffer.read()
+lines = data.split(b"\n")
+if data.endswith(b"\n"):
+    lines.pop()
+hdr = -1
+number = 0
+in_hunk = False
+for idx, line in enumerate(lines):
+    if line.startswith(b"diff --git "):
+        hdr = -1
+        in_hunk = False
+    else:
+        hunk = re.match(rb"@@ -[0-9]+(,[0-9]+)? \+([0-9]+)(,[0-9]+)? @@", line)
+        if hunk:
+            coordinate = hunk[2]
+            if len(coordinate) > 15 or (len(coordinate) > 1 and coordinate.startswith(b"0")):
+                sys.exit(3)
+            number = int(coordinate)
+            in_hunk = True
+        elif not in_hunk and line.startswith(b"+++ "):
+            hdr = idx
+        elif in_hunk:
+            if line.startswith(b"+"):
+                if hdr != -1 and candidate(line[1:]):
+                    print(idx, number, hdr)
+                number += 1
+            elif line.startswith(b" "):
+                number += 1
+print("END", len(lines))
+PY
+
 scannable() {
   # Extension set plus Python and any file directly inside a bin/ directory (repo-root bin/*
   # scripts are extensionless). Diff-mode paths are repo-relative.
@@ -23,6 +94,7 @@ warn() {
   findings=$((findings + 1))
 }
 
+# The pre-filter in scan_patch_fast must remain a superset of these rules and the AKIA literal.
 scan_line() {
   local file="$1" number="$2" line="$3" lower="${3,,}"
   local excerpt="$line"
@@ -83,14 +155,50 @@ decode_path() {
   done
 }
 
-scan_diff() {
-  local repo="$1" base="$2" head="$3" patch line file="" number=0 in_hunk=0 decoded_path
-  shift 3
-  if ! patch="$(git -C "$repo" -c core.quotePath=false diff --no-ext-diff --no-textconv \
-      --no-color --src-prefix=a/ --dst-prefix=b/ -U0 "$base" "$head" "$@" 2>/dev/null)"; then
-    echo 'SECURITY SCAN: git diff unavailable; skipping'
-    return 0
+scan_patch_fast() {
+  local patch="$1" output record idx number hdr total last previous_idx=-1 previous_hdr=-2
+  local file="" decoded_path
+  local -a lines records
+  if ! output="$(python3 -c "$candidate_filter_py" "$secret_pattern" "$instruction_pattern" \
+      "$shell_pattern" <<< "$patch" 2>/dev/null)"; then
+    return 1
   fi
+  mapfile -t lines <<< "$patch"
+  mapfile -t records <<< "$output"
+  total=${#lines[@]}
+  last=$((${#records[@]} - 1))
+  [[ "${records[last]}" == "END $total" ]] || return 1
+  unset 'records[last]'
+  # Validate the entire protocol before any warnings or findings are emitted.
+  for record in "${records[@]}"; do
+    [[ "$record" =~ ^(0|[1-9][0-9]*)\ (0|[1-9][0-9]*)\ (-1|0|[1-9][0-9]*)$ ]] || return 1
+    idx=${BASH_REMATCH[1]}; number=${BASH_REMATCH[2]}; hdr=${BASH_REMATCH[3]}
+    # Bound digit counts before arithmetic so malformed indices cannot overflow.
+    (( ${#idx} <= ${#total} )) && (( idx > previous_idx && idx < total )) || return 1
+    [[ "${lines[idx]}" == +* ]] || return 1
+    if [ "$hdr" != -1 ]; then
+      (( ${#hdr} <= ${#total} )) && (( hdr < total )) || return 1
+      [[ "${lines[hdr]}" == '+++ '* ]] || return 1
+    fi
+    previous_idx=$idx
+  done
+  for record in "${records[@]}"; do
+    read -r idx number hdr <<< "$record"
+    if [ "$hdr" != "$previous_hdr" ]; then
+      file=""
+      if [ "$hdr" != -1 ]; then
+        decode_path "${lines[hdr]#+++ }"
+        file="${decoded_path#b/}"
+      fi
+      previous_hdr=$hdr
+    fi
+    if scannable "$file"; then scan_line "$file" "$number" "${lines[idx]:1}"; fi
+  done
+  return 0
+}
+
+scan_patch_slow() {
+  local patch="$1" line file="" number=0 in_hunk=0 decoded_path
   while IFS= read -r line; do
     if [[ "$line" == 'diff --git '* ]]; then
       file=""; in_hunk=0
@@ -109,6 +217,19 @@ scan_diff() {
       esac
     fi
   done <<< "$patch"
+}
+
+scan_diff() {
+  local repo="$1" base="$2" head="$3" patch
+  shift 3
+  if ! patch="$(git -C "$repo" -c core.quotePath=false diff --no-ext-diff --no-textconv \
+      --no-color --src-prefix=a/ --dst-prefix=b/ -U0 "$base" "$head" "$@" 2>/dev/null)"; then
+    echo 'SECURITY SCAN: git diff unavailable; skipping'
+    return 0
+  fi
+  if ! scan_patch_fast "$patch"; then
+    scan_patch_slow "$patch"
+  fi
 }
 
 scan_repo() {

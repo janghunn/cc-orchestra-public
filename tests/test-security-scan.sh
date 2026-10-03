@@ -322,4 +322,186 @@ assert_eq "$RUN_STATUS" 0 'existing warning exit'
 assert_eq "${RUN_OUTPUT##*$'\n'}" 'CHECK: WARN (1 warning(s))' 'existing warning count'
 ok 'advisory findings preserve PASS, FAIL, WARN, and gate counts under both flags'
 
+# Compare bytes and status against the pinned pre-filter baseline when its object
+# is available (a shallow CI checkout may not contain that historical commit).
+OLD="$TMP/old-scan"
+have_old=0
+if git -C "$ROOT" show bb836825db83205e21d9fe763bfb6e472f384796:bin/orch-security-scan > "$OLD" 2>/dev/null; then
+  chmod +x "$OLD"
+  have_old=1
+else
+  echo 'NOTE: baseline scanner unavailable; skipping old-vs-new comparison'
+fi
+REAL_PYTHON="$(command -v python3)"
+export SECURITY_TEST_REAL_PYTHON="$REAL_PYTHON"
+"$REAL_PYTHON" - "$TMP" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+paths = [
+    b"docs/plain.md", b"settings.json", b"service.conf", b"scripts/tool.sh",
+    b"lib/tool.py", b"bin/direct", b"tools/bin/direct", b"bin/sub/nested",
+    b"ignored.txt", b"ignored.js", b'"b/space name.md"',
+    b'"b/tab\\tquote\\"\\303\\251.md"',
+]
+phrases = [
+    b"Always Allow", b"AUTO-APPROVE", b"Auto Approve", b"Without Confirmation",
+    b"WITHOUT ASKING", b"No Need To Ask", b"Never Prompt", b"Skip The Confirmation",
+    b"Auto-Run", b"AUTO RUN", b"No Confirmation Needed",
+]
+patch = []
+for file_number in range(72):
+    path = paths[file_number % len(paths)]
+    if path.startswith(b'"'):
+        path = path[:3] + str(file_number).encode() + b"-" + path[3:]
+    else:
+        parent, _, name = path.rpartition(b"/")
+        path = b"b/" + (parent + b"/" if parent else b"") + str(file_number).encode() + b"-" + name
+    patch.extend([b"diff --git a/fixture " + path, b"--- a/fixture", b"+++ " + path])
+    for hunk_number, start in enumerate((1, 81, 191)):
+        patch.append(b"@@ -0,0 +%d,30 @@" % start)
+        for line_number in range(30):
+            content = {
+                0: "한국어와 café, Ελληνικά: ordinary documentation".encode(),
+                1: b'token = "changeme_replace_this_value"',
+                2: b'{"api_key":"AbCdEf0123456789AbCdEf012345"}',
+                3: b"PASSWORD = 'AbCdEf0123456789AbCdEf012345'",
+                4: b"example AKIA0123456789ABCDEF",
+                5: phrases[(file_number + hunk_number) % len(phrases)],
+                6: b"Never Prompt " + b"x" * 181 + "한é글".encode() * 30,
+                7: b"Always allow a CRLF line\r",
+                8: b'{"permissions":{"allow":["Bash(*)"]}}',
+                9: b'key = "1234567890123456789"',
+            }.get(line_number, b"ordinary added content %d" % line_number)
+            patch.append(b"+" + content)
+root.joinpath("large.patch").write_bytes(b"\n".join(patch) + b"\n")
+
+edge = [
+    b"diff --git a/deleted.md b/deleted.md", b"--- a/deleted.md", b"+++ /dev/null",
+    b"@@ -1 +0,0 @@", b"-Always allow deleted content",
+    b"diff --git a/x.png b/x.png", b"Binary files a/x.png and b/x.png differ",
+    b'diff --git "a/tab\\tquote\\"\\303\\251.md" "b/tab\\tquote\\"\\303\\251.md"',
+    b'--- "a/tab\\tquote\\"\\303\\251.md"', b'+++ "b/tab\\tquote\\"\\303\\251.md"',
+    b"@@ -1,2 +7,6 @@ invalid function context \xff", b"-deleted content",
+    b"+++Always allow content starting with two pluses",
+    '+KEY = "AbCdEf0123456789AbCdEf012345"'.encode(),
+    "+WİTHOUT ASKİNG".encode(), b"+Never prompt with invalid bytes \xff\xfe",
+    b" unchanged context", b'+{"allow":["Bash(*)"]}\r',
+    b"\\ No newline at end of file", b"@@ -30 +100 @@", b"-old content",
+    b"+Always allow " + b"x" * 180 + "한국어".encode() * 40,
+    b'diff --git "a/bin/\\377" "b/bin/\\377"',
+    b'--- "a/bin/\\377"', b'+++ "b/bin/\\377"', b"@@ -0,0 +1 @@",
+    b"+Always allow an invalid-byte path", b"\\ No newline at end of file",
+    b"diff --git a/space name.md b/space name.md", b"--- a/space name.md",
+    b"+++ b/space name.md\t", b"@@ -0,0 +12 @@", b"+Without confirmation at EOF",
+    b"\\ No newline at end of file",
+]
+root.joinpath("edge.patch").write_bytes(b"\n".join(edge))
+root.joinpath("empty.patch").write_bytes(b"")
+PY
+
+capture_scan() {
+  local destination="$1"
+  shift
+  CAPTURE_STATUS=0
+  "$@" > "$destination" 2>&1 || CAPTURE_STATUS=$?
+}
+assert_capture() {
+  local expected="$1" actual="$2" status="$3" description="$4"
+  assert_eq "$CAPTURE_STATUS" "$status" "$description status"
+  cmp -s "$expected" "$actual" || fail "$description output differs"
+}
+declare -A golden_status
+export SECURITY_TEST_GIT_MODE=patch
+for scan_locale in default C C.UTF-8; do
+  locale_env=()
+  [ "$scan_locale" = default ] || locale_env+=(LC_ALL="$scan_locale")
+  for fixture in large edge empty; do
+    golden="$TMP/golden-$scan_locale-$fixture"
+    capture_scan "$golden" env "${locale_env[@]}" PATH="$FAKEBIN:$PATH" \
+      SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" "$SCAN" --diff base head
+    golden_status[$scan_locale/$fixture]=$CAPTURE_STATUS
+    if [ "$fixture" = large ]; then
+      [ "$(grep -c '^SECWARN:' "$golden")" -ge 100 ] || fail 'large golden comparison must not be vacuous'
+    fi
+    if [ "$have_old" = 1 ]; then
+      capture_scan "$TMP/old-output" env "${locale_env[@]}" PATH="$FAKEBIN:$PATH" \
+        SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" "$OLD" --diff base head
+      assert_capture "$golden" "$TMP/old-output" "${golden_status[$scan_locale/$fixture]}" "$scan_locale $fixture baseline"
+    fi
+  done
+done
+ok 'synthetic golden output and status across default, C, and C.UTF-8 locales'
+
+if [ "$have_old" = 1 ]; then
+  capture_scan "$TMP/repo-new-output" "$SCAN" "$ROOT"
+  repo_status=$CAPTURE_STATUS
+  capture_scan "$TMP/repo-old-output" "$OLD" "$ROOT"
+  assert_capture "$TMP/repo-new-output" "$TMP/repo-old-output" "$repo_status" 'real repository baseline'
+fi
+ok 'real repository golden output and status'
+
+PYBIN="$TMP/python-shim"
+mkdir -p "$PYBIN"
+export SECURITY_TEST_HELPER_LOG="$TMP/helper-log"
+cat > "$PYBIN/python3" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+case "$SECURITY_TEST_HELPER_MODE" in
+  log) "$SECURITY_TEST_REAL_PYTHON" "$@" | tee "$SECURITY_TEST_HELPER_LOG" ;;
+  end-only) "$SECURITY_TEST_REAL_PYTHON" "$@" | tail -n 1 ;;
+  fail) exit 1 ;;
+  garbage) printf '%s\n' 'invalid helper output' ;;
+  no-end) "$SECURITY_TEST_REAL_PYTHON" "$@" | sed '$d' ;;
+  out-of-range)
+    output="$("$SECURITY_TEST_REAL_PYTHON" "$@")" || exit $?
+    end="${output##*$'\n'}"
+    # A valid record before the bad one must not cause partial findings.
+    printf '%s\n' "${output%%$'\n'*}" "${end#END } 1 2" "$end"
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$PYBIN/python3"
+capture_scan "$TMP/logged-output" env PATH="$PYBIN:$FAKEBIN:$PATH" SECURITY_TEST_HELPER_MODE=log \
+  SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/large.patch" "$SCAN" --diff base head
+assert_capture "$TMP/golden-default-large" "$TMP/logged-output" "${golden_status[default/large]}" 'logged helper'
+assert_eq "$(tail -n 1 "$SECURITY_TEST_HELPER_LOG")" "END $(wc -l < "$TMP/large.patch" | tr -d ' ')" 'helper terminator and patch line count'
+ok 'fast helper completes with the validated patch line count'
+
+# White-box probe of the index protocol, not a supported scanner mode: a valid
+# empty record stream must drive the result instead of invoking the slow loop.
+capture_scan "$TMP/end-only-output" env PATH="$PYBIN:$FAKEBIN:$PATH" SECURITY_TEST_HELPER_MODE=end-only \
+  SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/large.patch" "$SCAN" --diff base head
+assert_eq "$CAPTURE_STATUS" 0 'empty helper record stream status'
+assert_eq "$(grep -c '^SECWARN:' "$TMP/end-only-output" || true)" 0 'empty helper record stream findings'
+ok 'validated helper records drive the scanner result'
+
+for helper_mode in fail garbage no-end out-of-range; do
+  for fixture in large edge; do
+    capture_scan "$TMP/fallback-output" env PATH="$PYBIN:$FAKEBIN:$PATH" SECURITY_TEST_HELPER_MODE="$helper_mode" \
+      SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" "$SCAN" --diff base head
+    assert_capture "$TMP/golden-default-$fixture" "$TMP/fallback-output" "${golden_status[default/$fixture]}" "$helper_mode $fixture fallback"
+  done
+done
+ok 'failed, malformed, truncated, and out-of-range helper output falls back atomically'
+
+sed '/^secret_pattern=/s/{20,}/{19,}/' "$SCAN" > "$TMP/drift-scan"
+chmod +x "$TMP/drift-scan"
+capture_scan "$TMP/drift-output" env PATH="$PYBIN:$FAKEBIN:$PATH" SECURITY_TEST_HELPER_MODE=log \
+  SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/large.patch" "$TMP/drift-scan" --diff base head
+drift_status=$CAPTURE_STATUS
+assert_not_has "$(cat "$SECURITY_TEST_HELPER_LOG")" 'END ' 'changed rule fails helper drift guard'
+capture_scan "$TMP/drift-slow-output" env PATH="$PYBIN:$FAKEBIN:$PATH" SECURITY_TEST_HELPER_MODE=fail \
+  SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/large.patch" "$TMP/drift-scan" --diff base head
+assert_capture "$TMP/drift-output" "$TMP/drift-slow-output" "$drift_status" 'changed rule fallback'
+ok 'rule drift disables the helper and preserves slow scanner output'
+
+run "$SCAN" --files "$SCAN"
+assert_eq "$RUN_STATUS" 1 'self-scan status'
+assert_eq "$(printf '%s\n' "$RUN_OUTPUT" | grep -c '^SECWARN:')" 2 'self-scan warning count'
+assert_eq "$(printf '%s\n' "$RUN_OUTPUT" | grep -c ': auto-run-instruction -- ')" 2 'self-scan warning types'
+ok 'scanner self-scan retains exactly two instruction findings'
+
 echo "PASS: $pass security-scan test groups"
