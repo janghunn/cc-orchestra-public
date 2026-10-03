@@ -1087,7 +1087,8 @@ blobs are recompressed deterministically; existing blobs are never rewritten. So
 histories live under `sources/<host>/`, keeping machine-specific watermarks separate.
 Before source verification, import rejects any entry in the source vault or raw store that
 is not a regular file or directory (FIFO, socket, device or symlink) with `not-regular`.
-Unreadable source directories are also refused as `not-regular`.
+Other unreadable source directories are also refused as `not-regular`; an unreadable `raw/blobs`,
+`raw/sources` or blob shard directory still stops import with exit `2` (permission error, nothing written).
 Source verification is skipped once any entry has been rejected.
 Source histories whose blob pointers leave `blobs/` are also refused before source verification.
 Import also verifies every local blob it reuses and refuses damaged blobs without rewriting
