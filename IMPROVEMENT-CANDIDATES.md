@@ -274,3 +274,4 @@ same convention `INSTINCTS.md` uses.
 
 - 2026-10-02 entries (Jev-video review: orch/44, 45, 47 results and two NEW candidates) are in IMPROVEMENT-CANDIDATES/jev-video-review-2026-10-02.md.
 - 2026-10-05 — weekly hada.io check did not run: `news.hada.io` (both `/` and `/weekly`) returned `EGRESS_BLOCKED` from this session's network egress proxy, so no front-page items were fetched or read and nothing was evaluated this week. Not a "checked, nothing relevant" week — the check itself could not reach the site. Needs a human to confirm whether `news.hada.io` should be allowed through this session's egress policy before the next scheduled run.
+- 2026-10-05 entries (follow-up candidates deferred by tasks 39, 43, 48, 50, 52 and 53, plus the hada.io routine network block) are in IMPROVEMENT-CANDIDATES/followups-2026-10-05.md.
