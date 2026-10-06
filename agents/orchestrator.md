@@ -394,7 +394,8 @@ trusting this paragraph when they disagree.
   most of that is evidence gathering. A summary whose `INVESTIGATION:` line says `self` or
   `Explore` without a reason (codex unavailable, `dispatch=codex-sparing`, trivial lookup) is
   the same kind of flag as an untagged dev lane.
-- **Which way the harness leans is data, not a guess:** `orch-model-guard lanes` reports both
+- **Which way the harness leans is data, not a guess:** run `orch-model-guard lanes` from PATH
+  (the installed runtime facade), which reports both
   providers' buckets and returns `codex-first` | `codex-sparing`; leads record
   what they got on the `DISPATCH:` line. `orch-model-guard status` shows the two weekly
   numbers side by side — that is where you check whether the Codex-first policy is actually

@@ -20,7 +20,8 @@ This instruction explicitly authorizes delegation to the configured orchestra ag
    Use the exact seven-column schema below: the worktree and session guards parse these
    positions. Keep `lead-` in the slot, the full returned agent ID in column 2, the exact Git
    branch name without annotations in column 4, and the task artifact directory in column 5.
-   Use RUNNING while active, then PASS, FAIL, BLOCKED, CLOSED or IDLE as appropriate. Put
+   Use RUNNING while active, then PASS, FAIL, BLOCKED, ACCEPTED, CLOSED or IDLE as appropriate.
+   Only the user causes `ACCEPTED`, after seeing the actual gate results; never infer it. Put
    explanatory prose outside the table; never rename/reorder columns or invent status labels.
 
    | slot | agentId | task | branch | dir | status | last update |

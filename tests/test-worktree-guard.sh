@@ -72,7 +72,7 @@ from pathlib import Path
 repo, mode = Path(sys.argv[1]), sys.argv[2]
 rows = [('lead-charlie', 'cccccccc', 'orch/12-c', 'RUNNING')]
 if mode != 'one':
-    rows.append(('lead-alpha', 'aaaaaaaa', 'orch/10-a', 'ACCEPTED' if mode == 'accepted' else 'PASS' if mode == 'inactive' else mode if mode.startswith('PASS ') else 'RUNNING'))
+    rows.append(('lead-alpha', 'aaaaaaaa', 'orch/10-a', mode[len('status:'):] if mode.startswith('status:') else 'ACCEPTED' if mode == 'accepted' else 'PASS' if mode == 'inactive' else mode if mode.startswith('PASS ') else 'RUNNING'))
 if mode == 'four':
     rows += [('lead-bravo', 'bbbbbbbb', 'orch/11-b', 'WORKING'), ('lead-delta', 'dddddddd', 'orch/13-d', 'WORKING')]
 text = '| slot | agentId | task | branch | dir | status | last update |\n| --- | --- | --- | --- | --- | --- | --- |\n'
@@ -139,7 +139,17 @@ check allow 'PASS row is inactive' "$OWN" 'git commit'
 registry accepted
 check allow 'ACCEPTED row is inactive' "$OWN" 'git commit'
 registry 'PASS (worktree)'
-check deny 'annotated PASS remains conservatively active' "$OWN" 'git commit' lead-charlie R2
+check allow 'annotated PASS row is inactive' "$OWN" 'git commit' lead-charlie R2
+registry 'status:PASS (done)'
+check allow 'PASS (done) row is inactive' "$OWN" 'git commit'
+registry 'status:ACCEPTED (user, 2026-10-05)'
+check allow 'annotated ACCEPTED row is inactive' "$OWN" 'git commit'
+registry 'status:PASS-ish'
+check deny 'PASS-ish row remains active' "$OWN" 'git commit' lead-charlie R2
+registry 'status:RUNNING'
+check deny 'RUNNING row remains active' "$OWN" 'git commit' lead-charlie R2
+registry 'status:CLOSED - merged'
+check allow 'annotated CLOSED row is inactive' "$OWN" 'git commit'
 head_at "$REPO/.git/worktrees/lead-charlie/HEAD" orch/12-c
 registry four
 check allow 'orchestrator integration merge' "$REPO" 'git merge orch/12-c' orchestrator

@@ -439,6 +439,7 @@ This selects the healthy Codex rows (Astra, Fast on) and keeps dispatch `codex-f
 The hook/compact status shows `codex=healthy(pinned; real=watch, …)`; `budget`, `lanes` and the `route codex` reason also mark the pin and real state, which remains recorded in `budget-state`.
 Only `healthy` is accepted: invalid values warn on stderr and leave routing dynamic.
 `CODEX_PRESSURE_PIN_UNTIL` accepts epoch seconds or an absolute local `YYYY-MM-DD[ HH:MM[:SS]]` date/time; at or after expiry the pin is ignored. Invalid or relative dates warn and leave routing dynamic.
+The legacy repo-path `bin/orch-model-guard lanes` honors the same pin with the same validation.
 Explicit `--model`, `--effort`, `--critical` and `--fast` flags still win.
 The review/verify reserve is gone while pinned; exhausted quota fails at the provider with existing exit-code handling. Missing Astra falls back per `model-policy.conf`.
 No `cc-orch --reload` is needed: the policy is read per invocation and excluded from the policy revision. Set `CODEX_PRESSURE_PIN=""` to restore dynamic routing.
@@ -836,8 +837,10 @@ Commands retain `|| true`; timeouts are 10 seconds for
 `/home/janghun/cc-orchestra/hooks/` prefix; adjust it for a different installation location.
 
 `hooks/orch-worktree-guard.sh` examines Bash Git commands against the existing
-`.orchestra/REGISTRY.md`. A lead row is active when its status is nonempty and not exactly
-`PASS`, `FAIL`, `BLOCKED`, `CLOSED`, `IDLE`, or `UNASSIGNED`; `PASS (worktree)` remains active.
+`.orchestra/REGISTRY.md`. A lead row is inactive when its status starts with `PASS`, `FAIL`,
+`BLOCKED`, `ACCEPTED`, `CLOSED`, `IDLE`, or `UNASSIGNED` followed by end-of-string or a character
+outside `[A-Za-z0-9_-]`: `PASS (done)` and `ACCEPTED (user, …)` are inactive, while `PASS-ish`
+remains active; empty statuses are ignored.
 Identity first uses an active row's `agentId`: exact equality or a prefix with at least eight
 characters. Otherwise it recognizes `(route-)?lead-(alpha|bravo|charlie|delta)` with an optional
 `light`, `normal`, `critical`, or `critical-xhigh` suffix, or `dev(-opus)?-<positive integer>`.

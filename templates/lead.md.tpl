@@ -153,8 +153,8 @@ Dispatch rules:
   6. *Sparing* — `orch-model-guard lanes` says `dispatch=codex-sparing`: Codex's own weekly
      bucket is nearly spent and what remains is reserved for the Tier 4 review gate, which is
      mandatory on every task while implementation has a working substitute.
-- **Check the pressure before you dispatch** — `orch-model-guard lanes` (4 lines, ~2s), and
-  always before 3+ parallel units. Its first line decides the shape of the whole task:
+- **Check the pressure before you dispatch** — run `orch-model-guard lanes` from PATH (the installed
+  runtime facade; 4 lines, ~2s), always before 3+ parallel units. Its first line decides the shape of the whole task:
 
   | `dispatch=` | implement | investigate (Phase A) | gates (Phase E) |
   |---|---|---|---|

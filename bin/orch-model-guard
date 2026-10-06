@@ -302,15 +302,33 @@ cmd_lanes() {
   if refresh_codex_usage; then cx="$CODEX_PCT"; else cx="$(st codex_pct)"; csrc="state"; fi
   case "$cx" in ''|*[!0-9]*) cx=""; csrc="unknown" ;; esac
 
-  local hint="codex-first" why
+  local CODEX_PIN_ACTIVE=0 CODEX_PIN_NOTE="" CODEX_PIN_WARNED=0
+  if [ -r "$REPO_DIR/lib/orch-budget-metrics.sh" ]; then
+    # Share runtime pin validation without replacing legacy usage/state helpers.
+    # shellcheck source=/dev/null
+    [ ! -r "$REPO_DIR/budget-policy.conf" ] || . "$REPO_DIR/budget-policy.conf"
+    # shellcheck source=/dev/null
+    . "$REPO_DIR/lib/orch-budget-metrics.sh"
+    if ! declare -F now_epoch >/dev/null; then
+      now_epoch() { printf '%s\n' "${CC_ORCH_NOW_EPOCH:-$(date +%s)}"; }
+    fi
+    : "${CODEX_STATE:=unknown}" "${CODEX_RANK:=-1}"
+    resolve_codex_pin
+  fi
+
+  local hint="codex-first" why pin_pressure=""
   why="default policy — Codex owns heavy work; serialize instead of Claude spill"
-  if [ -n "$cx" ] && [ "$cx" -ge "$LANES_CODEX_SPARE_PCT" ]; then
+  if [ "$CODEX_PIN_ACTIVE" != 1 ] && [ -n "$cx" ] && [ "$cx" -ge "$LANES_CODEX_SPARE_PCT" ]; then
     hint="codex-sparing"; why="codex week at ${cx}% (>= ${LANES_CODEX_SPARE_PCT}) — reserve the rest for the Tier 4 gate"
+  fi
+  if [ "$CODEX_PIN_ACTIVE" = 1 ]; then
+    pin_pressure=" pressure=healthy(pinned; real=week ${cx:-?}%)"
+    why+="; Codex pressure pinned to healthy by CODEX_PRESSURE_PIN (real week=${cx:-?}%), so Codex pressure cannot trigger codex-sparing"
   fi
 
   echo "dispatch=$hint"
   echo "claude: session=${session:-?}% week_all=${all:-?}% week_fable=${fable:-?}%  ($src)"
-  echo "codex:  week=${cx:-?}% resets=$(codex_resets_human "${CODEX_RESETS:-$(st codex_resets_at)}")  ($csrc${CODEX_ASOF:+, asof $CODEX_ASOF})"
+  echo "codex:  week=${cx:-?}%${pin_pressure} resets=$(codex_resets_human "${CODEX_RESETS:-$(st codex_resets_at)}")  ($csrc${CODEX_ASOF:+, asof $CODEX_ASOF})"
   echo "reason: $why"
 }
 

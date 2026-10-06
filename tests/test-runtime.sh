@@ -490,6 +490,94 @@ assert_eq "$(pin_guard lanes | sed -n '1p')" dispatch=codex-sparing "empty pin h
 set_codex_pin ""
 ok "Codex pressure pin preserves real metrics, visibility, expiry and explicit overrides"
 
+# Exercise both real entry points with an offline snapshot and independent budget cache.
+(
+  PARITY_DIR="$(mktemp -d "$TMP/lanes-parity.XXXXXX")"
+  PARITY_HARNESS="$PARITY_DIR/harness"
+  PARITY_NOW="$(date +%s)"
+  mkdir -p "$PARITY_HARNESS/bin" "$PARITY_HARNESS/lib" "$PARITY_DIR/state" \
+    "$PARITY_DIR/codex/sessions" "$PARITY_DIR/home" "$PARITY_DIR/agents"
+  cp "$ROOT/bin/orch-model-guard" "$ROOT/bin/orch-model-guard-runtime" "$PARITY_HARNESS/bin/"
+  cp "$ROOT/model-policy.conf" "$ROOT/budget-policy.conf" "$PARITY_HARNESS/"
+  cp "$ROOT/lib/orch-budget-state.sh" "$ROOT/lib/orch-budget-metrics.sh" \
+    "$ROOT/lib/orch-budget-commands.sh" "$PARITY_HARNESS/lib/"
+  printf '#!/bin/sh\nexit 1\n' > "$PARITY_DIR/claude"
+  chmod +x "$PARITY_DIR/claude"
+  cat > "$PARITY_DIR/state/last-usage.txt" <<'PANEL'
+Current session: 10% used
+Current week (all models): 10% used
+Current week (Fable): 10% used
+PANEL
+  unset CODEX_PRESSURE_PIN CODEX_PRESSURE_PIN_UNTIL
+  parity_guard() {
+    local entry="$1"; shift
+    HOME="$PARITY_DIR/home" CC_ORCH_STATE_DIR="$PARITY_DIR/state" \
+      CC_ORCH_AGENTS_DIR="$PARITY_DIR/agents" CODEX_HOME="$PARITY_DIR/codex" \
+      CLAUDE_BIN="$PARITY_DIR/claude" CC_ORCH_NOW_EPOCH="$PARITY_NOW" \
+      CC_ORCH_BACKEND=claude TZ=UTC "$PARITY_HARNESS/bin/$entry" "$@"
+  }
+  parity_case() {
+    local pin_case="$1" pct="$2" pin="" until="" expected=codex-first legacy runtime
+    case "$pin_case" in
+      unset) ;;
+      healthy) pin=healthy ;;
+      invalid) pin=watch ;;
+      expired) pin=healthy; until=$((PARITY_NOW-1)) ;;
+      future) pin=healthy; until=$((PARITY_NOW+86400)) ;;
+      invalid-until) pin=healthy; until=not-a-date ;;
+    esac
+    grep -v '^CODEX_PRESSURE_PIN' "$ROOT/budget-policy.conf" > "$PARITY_HARNESS/budget-policy.conf"
+    if [ "$pin_case" != unset ]; then
+      printf '\nCODEX_PRESSURE_PIN=%q\nCODEX_PRESSURE_PIN_UNTIL=%q\n' "$pin" "$until" \
+        >> "$PARITY_HARNESS/budget-policy.conf"
+    fi
+    rm -f "$PARITY_DIR/state/budget-state"
+    printf '{"rate_limits":{"primary":{"used_percent":%s,"resets_at":%s}}}\n' \
+      "$pct" "$((PARITY_NOW+518400))" > "$PARITY_DIR/codex/sessions/rollout-parity.jsonl"
+    printf '{"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":%s},"seven_day":{"used_percentage":10,"resets_at":%s}}}\n' \
+      "$((PARITY_NOW+9000))" "$((PARITY_NOW+518400))" | parity_guard orch-model-guard-runtime ingest-claude
+    parity_guard orch-model-guard lanes > "$PARITY_DIR/legacy.out" 2> "$PARITY_DIR/legacy.err"
+    parity_guard orch-model-guard-runtime lanes > "$PARITY_DIR/runtime.out" 2> "$PARITY_DIR/runtime.err"
+    legacy="$(cat "$PARITY_DIR/legacy.out")"; runtime="$(cat "$PARITY_DIR/runtime.out")"
+    if [ "$pct" = 95 ] && [ "$pin_case" != healthy ] && [ "$pin_case" != future ]; then
+      expected=codex-sparing
+    fi
+    assert_eq "$(printf '%s\n' "$legacy" | head -1)" "dispatch=$expected" "$pin_case $pct legacy dispatch"
+    assert_eq "$(printf '%s\n' "$legacy" | head -1)" "$(printf '%s\n' "$runtime" | head -1)" \
+      "$pin_case $pct legacy/runtime dispatch parity"
+    assert_eq "$(wc -l < "$PARITY_DIR/legacy.out")" 4 "$pin_case $pct legacy output shape"
+    assert_has "$legacy" "week=$pct%" "$pin_case legacy real usage"
+    cmp "$PARITY_DIR/legacy.err" "$PARITY_DIR/runtime.err" || fail "$pin_case $pct warning parity"
+    case "$pin_case" in
+      healthy|future)
+        assert_has "$legacy" "pressure=healthy(pinned; real=week $pct%)" "$pin_case legacy pin marker"
+        assert_has "$legacy" "; Codex pressure pinned to healthy by CODEX_PRESSURE_PIN (real week=$pct%), so Codex pressure cannot trigger codex-sparing" \
+          "$pin_case legacy pin reason"
+        ;;
+      *) assert_not_has "$legacy" pinned "$pin_case legacy remains dynamic" ;;
+    esac
+    case "$pin_case" in
+      invalid) assert_has "$(cat "$PARITY_DIR/legacy.err")" "CODEX_PRESSURE_PIN='watch' is not supported" "legacy invalid pin warning" ;;
+      invalid-until) assert_has "$(cat "$PARITY_DIR/legacy.err")" "is not an epoch or date" "legacy invalid expiry warning" ;;
+      *) assert_eq "$(cat "$PARITY_DIR/legacy.err")" "" "$pin_case legacy pin is silent" ;;
+    esac
+  }
+  for pin_case in unset healthy invalid expired; do
+    for pct in 95 10; do parity_case "$pin_case" "$pct"; done
+  done
+  parity_case future 95
+  parity_case invalid-until 95
+
+  # An incomplete old installation must still support legacy lanes under nounset.
+  printf '\nCODEX_PRESSURE_PIN=healthy\nCODEX_PRESSURE_PIN_UNTIL=""\n' >> "$PARITY_HARNESS/budget-policy.conf"
+  rm "$PARITY_HARNESS/lib/orch-budget-metrics.sh"
+  legacy="$(parity_guard orch-model-guard lanes 2> "$PARITY_DIR/legacy.err")"
+  assert_eq "$(printf '%s\n' "$legacy" | head -1)" dispatch=codex-sparing "missing pin library preserves legacy decision"
+  assert_eq "$(cat "$PARITY_DIR/legacy.err")" "" "missing pin library has no nounset error"
+  assert_not_has "$legacy" pinned "missing pin library leaves pin inactive"
+)
+ok "legacy/runtime lanes pin parity, validation, real usage and missing-library fallback"
+
 cat > "$HARNESS/bin/cc-orch" <<'CORE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "${TEST_ARGS:?}"
