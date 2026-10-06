@@ -15,7 +15,9 @@ The policy defaults to the repository's `jev-policy.conf`. Log precedence is
 path is used directly. `--enabled-date` and `--review-date` override the fixed
 defaults `2026-09-22` and `2026-10-06`. Every verdict exits 0; input errors exit 2.
 
-The task's committed analysis plan fixes these choices (A–G):
+The `evidence/` directory holds the aggregate pre-run and run outputs used by the report.
+
+The committed analysis plan ([analysis-plan.md](analysis-plan.md)) fixes these choices (A–G):
 
 - **A — Population:** implement, ok, exact records with finite numeric reasoning
   and confidence, integer duration >= 0, integer exit, integer attempts >= 0,
