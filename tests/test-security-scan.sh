@@ -528,16 +528,59 @@ if [ "$have_old" = 1 ]; then
 fi
 ok 'inherited nocasematch preserves baseline findings, paths, and status'
 
-for compat_setting in BASH_COMPAT=3.1 BASHOPTS=compat31 BASH_COMPAT=4.2; do
+for compat_setting in BASH_COMPAT=3.1 BASH_COMPAT=31 BASHOPTS=compat31; do
   for fixture in edge large; do
     : > "$SECURITY_TEST_HELPER_LOG"
     capture_scan "$TMP/compat-new-output" env "$compat_setting" PATH="$PYBIN:$FAKEBIN:$PATH" \
       SECURITY_TEST_HELPER_MODE=log SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" \
       "$SCAN" --diff base head
-    compat_status=$CAPTURE_STATUS
-    if [ "$compat_setting" = BASH_COMPAT=3.1 ]; then
-      assert_not_has "$(cat "$SECURITY_TEST_HELPER_LOG")" 'END ' "$compat_setting $fixture bypasses Python helper"
+    assert_eq "$CAPTURE_STATUS" 0 "$compat_setting $fixture skip status"
+    compat_output="$(cat "$TMP/compat-new-output")"
+    assert_eq "$(wc -l < "$TMP/compat-new-output" | tr -d ' ')" 1 "$compat_setting $fixture single notice"
+    case "$compat_setting" in
+      BASH_COMPAT=*)
+        assert_eq "$compat_output" "SECURITY SCAN: skipped (BASH_COMPAT=${compat_setting#*=} disables diff parsing)" \
+          "$compat_setting $fixture skip notice"
+        ;;
+      BASHOPTS=compat31)
+        [[ "$compat_output" =~ ^SECURITY\ SCAN:\ skipped\ \(BASH_COMPAT=[^\ ]+\ disables\ diff\ parsing\)$ ]] \
+          || fail "$compat_setting $fixture skip notice"
+        ;;
+    esac
+    assert_not_has "$compat_output" 'SECWARN:' "$compat_setting $fixture no findings"
+    assert_not_has "$(cat "$SECURITY_TEST_HELPER_LOG")" 'END ' "$compat_setting $fixture bypasses Python helper"
+    if [ "$have_old" = 1 ]; then
+      capture_scan "$TMP/compat-old-output" env "$compat_setting" PATH="$FAKEBIN:$PATH" \
+        SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" "$OLD" --diff base head
+      assert_eq "$CAPTURE_STATUS" 0 "$compat_setting $fixture baseline status"
+      assert_eq "$(wc -c < "$TMP/compat-old-output" | tr -d ' ')" 0 "$compat_setting $fixture baseline is empty"
     fi
+  done
+done
+run env BASH_COMPAT=3.1 PATH="$FAKEBIN:$PATH" SECURITY_TEST_GIT_MODE=patch \
+  SECURITY_TEST_PATCH="$TMP/edge.patch" "$SCAN" "$REPO"
+assert_eq "$RUN_STATUS" 0 'compat repository skip status'
+assert_eq "$RUN_OUTPUT" 'SECURITY SCAN: skipped (BASH_COMPAT=3.1 disables diff parsing)' 'compat repository skip notice'
+run env BASH_COMPAT=3.1 "$SCAN" --files "$TMP/aws.conf"
+assert_finding 'hardcoded-secret'
+assert_not_has "$RUN_OUTPUT" 'SECURITY SCAN:' 'compat file scan has no skip notice'
+run env BASH_COMPAT=3.1 PATH="$FAKEBIN:$PATH" SECURITY_TEST_GIT_MODE=diff-error \
+  "$SCAN" --diff base head
+assert_eq "$RUN_STATUS" 0 'compat unavailable diff status'
+assert_eq "$RUN_OUTPUT" 'SECURITY SCAN: git diff unavailable; skipping' 'compat unavailable diff notice'
+ok 'Bash compatibility levels that disable diff parsing report an explicit skip, never a clean result'
+
+for compat_setting in BASH_COMPAT=3.2 BASH_COMPAT=4.0 BASH_COMPAT=4.2 BASH_COMPAT=4.4 \
+    BASH_COMPAT=5.0 BASH_COMPAT=5.1 BASHOPTS=compat32 BASHOPTS=compat44; do
+  for fixture in edge large; do
+    capture_scan "$TMP/compat-new-output" env "$compat_setting" PATH="$PYBIN:$FAKEBIN:$PATH" \
+      SECURITY_TEST_HELPER_MODE=log SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" \
+      "$SCAN" --diff base head
+    compat_status=$CAPTURE_STATUS
+    assert_eq "$compat_status" "${golden_status[default/$fixture]}" "$compat_setting $fixture status"
+    compat_output="$(cat "$TMP/compat-new-output")"
+    assert_not_has "$compat_output" 'SECURITY SCAN: skipped' "$compat_setting $fixture no skip notice"
+    assert_has "$compat_output" 'SECWARN:' "$compat_setting $fixture findings"
     if [ "$have_old" = 1 ]; then
       capture_scan "$TMP/compat-old-output" env "$compat_setting" PATH="$FAKEBIN:$PATH" \
         SECURITY_TEST_GIT_MODE=patch SECURITY_TEST_PATCH="$TMP/$fixture.patch" "$OLD" --diff base head
@@ -545,6 +588,36 @@ for compat_setting in BASH_COMPAT=3.1 BASHOPTS=compat31 BASH_COMPAT=4.2; do
     fi
   done
 done
-ok 'inherited Bash compatibility preserves baseline output and status without invoking the helper'
+ok 'inherited Bash compatibility levels that keep diff parsing preserve baseline output and status'
+
+TASK_COMPAT="$TMP/task-compat"
+mkdir -p "$TASK_COMPAT"
+printf '%s\n' 'RISK: trivial' > "$TASK_COMPAT/brief.md"
+printf '%s\n' '# Plan' 'Verify the advisory scanner.' > "$TASK_COMPAT/plan.md"
+cat > "$TASK_COMPAT/summary.md" <<'EOF'
+CLAUDE PROFILE: light sonnet@medium
+PROMOTIONS: none
+DISPATCH: codex-first
+INVESTIGATION: self
+LANES: codex
+GATES: self-check only (trivial) — bash tests/test-security-scan.sh
+ROUNDS: 1
+EOF
+run env BASH_COMPAT=3.1 PATH="$FAKEBIN:$PATH" SECURITY_TEST_GIT_MODE=patch \
+  SECURITY_TEST_PATCH="$TMP/edge.patch" "$REPO/bin/orch-summary-check" --strict "$TASK_COMPAT"
+assert_eq "$RUN_STATUS" 0 'compat advisory preserves exit status'
+assert_has "$RUN_OUTPUT" 'SECURITY SCAN: skipped (BASH_COMPAT=3.1 disables diff parsing)' 'compat advisory skip notice'
+assert_has "$RUN_OUTPUT" 'SECURITY: skipped or unavailable (advisory only)' 'compat advisory summary'
+assert_not_has "$RUN_OUTPUT" 'SECURITY: clean' 'compat skip is not clean'
+assert_not_has "$RUN_OUTPUT" 'SECWARN:' 'compat skip has no findings'
+assert_eq "${RUN_OUTPUT##*$'\n'}" 'CHECK: PASS (risk=trivial)' 'compat advisory preserves PASS'
+sed '/^ROUNDS:/d' "$TASK_COMPAT/summary.md" > "$TMP/compat-summary.md"
+cp "$TMP/compat-summary.md" "$TASK_COMPAT/summary.md"
+run env BASH_COMPAT=3.1 PATH="$FAKEBIN:$PATH" SECURITY_TEST_GIT_MODE=patch \
+  SECURITY_TEST_PATCH="$TMP/edge.patch" "$REPO/bin/orch-summary-check" --strict "$TASK_COMPAT"
+assert_eq "$RUN_STATUS" 1 'compat advisory preserves strict error exit'
+assert_eq "${RUN_OUTPUT##*$'\n'}" 'CHECK: FAIL (1 error(s), 0 warning(s))' 'compat advisory preserves strict error count'
+assert_has "$RUN_OUTPUT" 'SECURITY: skipped or unavailable (advisory only)' 'compat failing task advisory summary'
+ok 'summary-check keeps its verdict and reports a compat skip as skipped, not clean'
 
 echo "PASS: $pass security-scan test groups"

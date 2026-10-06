@@ -337,6 +337,8 @@ merge base부터 `HEAD`까지 커밋된 변경의 추가 줄을 검사한다. �
 credential 형태의 literal, 확인 절차를 생략하는 지시, 광범위한 Bash 권한 문자열을 검사한다.
 발견 사항은 자문이며 `--strict`에서도 PASS/FAIL과 gate 오류·경고 수에 영향을 주지 않는다.
 Git 기준점을 사용할 수 없으면 skipped로 보고하며 credential이 있는 줄은 출력에서 가린다.
+diff 해석을 막는 Bash 호환 수준(예: 상속된 BASH_COMPAT=3.1)도 skipped로 보고한다:
+SECURITY SCAN: skipped (BASH_COMPAT=<value> disables diff parsing).
 전체 파일 검사는 `bin/orch-security-scan --files <file>...`로 실행한다(발견 없음 0, 발견 있음 1).
 `bin/orch-security-scan` 자체의 pattern 정의와 진단 label 줄에서는 예상된 지시 문구 일치가
 두 건 나온다. 이 결과도 자문이며 scanner 코드에서 예외 처리하지 않는다.

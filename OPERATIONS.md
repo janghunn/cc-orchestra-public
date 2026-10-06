@@ -324,7 +324,9 @@ back to the repository containing the task directory; it never scans the install
 It checks `.md`, `.json`, `.conf`, `.sh`, `.py`, and files directly inside any `bin/` directory for secret-shaped literals, instructions to
 bypass confirmation, and broad Bash permission strings. Findings are warn-only and never change
 PASS/FAIL or gate error/warning counts, including with `--strict`; unavailable Git bases are
-reported as skipped, not clean. Secret-bearing lines are redacted from diagnostics. To scan
+reported as skipped, not clean. A Bash compatibility level that disables diff parsing (for example an
+inherited BASH_COMPAT=3.1) is also reported as skipped: SECURITY SCAN: skipped (BASH_COMPAT=<value>
+disables diff parsing). Secret-bearing lines are redacted from diagnostics. To scan
 full on-disk files, run `bin/orch-security-scan --files <file>...` (exit 0 for
 no findings, 1 for findings).
 Scanning `bin/orch-security-scan` itself produces two expected instruction-phrase findings
