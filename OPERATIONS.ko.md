@@ -536,6 +536,7 @@ Codex-only dispatch는 shadow를 시작하지 않습니다. 활성화하면 `cod
 대상인 최초 `implement` 호출에 detached worker를 시작하고 기다리지 않습니다.
 Jev를 사용할 수 없어도 dispatch, 인자, stdout/stderr, exit code, `codex.log`는 그대로입니다.
 플래그가 꺼져 있으면 shadow process, network 요청, 로그 기록이 없습니다.
+Stage 1 결과는 `do not adopt`였으며, 다시 활성화하려면 새로운 결정이 필요합니다.
 
 키는 위 사이드카와 동일하게 설정하고, `jev-policy.conf`(또는 `CC_ORCH_JEV_POLICY`로
 지정한 정책 파일)에서 `JEV_SHADOW_ENABLED=1`로 바꿉니다. `JEV_ENABLED=1`도 필요합니다.

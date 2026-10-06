@@ -16,6 +16,8 @@ ok() { echo "ok $((++pass)) - $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
 assert_has() { [[ "$1" == *"$2"* ]] || fail "missing '$2' ($3)"; }
+grep -qx 'JEV_SHADOW_ENABLED=0' "$ROOT/jev-policy.conf" || fail "shipped policy must disable shadow"
+ok "shipped policy disables shadow"
 export HOME="$TMP/home" CODEX_HOME="$TMP/codex-home" CC_ORCH_STATE_DIR="$TMP/state"
 export CC_ORCH_JEV_TEMPLATES="$ROOT/templates/jev" CC_ORCH_ALWAYS_FAST_MODE=1
 unset TYPESAFE_API_KEY CC_ORCH_BACKEND CC_ORCH_CODEX_ROUTE CC_ORCH_AUTO_ROUTE
@@ -45,7 +47,8 @@ chmod +x "$HARNESS/bin/"*
 for enabled in 0 1; do
   printf '%s\n' "JEV_SHADOW_ENABLED=$enabled" JEV_SHADOW_TIMEOUT_SECONDS=1 JEV_TIMEOUT_SECONDS=1 > "$TMP/policy-$enabled"
 done
-export CC_ORCH_JEV_POLICY="$TMP/policy-0" TEST_ARGS="$TMP/args"
+cp "$ROOT/jev-policy.conf" "$TMP/policy-shipped"
+export CC_ORCH_JEV_POLICY="$TMP/policy-shipped" TEST_ARGS="$TMP/args"
 printf '# Task\nAdd a fixture.\n' > "$TASK/brief.md"
 printf '# Plan\nRun the fixture.\n' > "$TASK/plan.md"
 BASELINE=0
@@ -120,7 +123,7 @@ while True:
     time.sleep(0.05)
 PY
 }
-# Flag off must not start even an instrumented replacement for the worker.
+# The shipped policy must not start even an instrumented replacement for the worker.
 cp "$HARNESS/bin/orch-jev" "$TMP/orch-jev.real"
 printf '#!/usr/bin/env bash\ntouch "$SHADOW_MARKER"\n' > "$HARNESS/bin/orch-jev"
 export SHADOW_MARKER="$TMP/marker"

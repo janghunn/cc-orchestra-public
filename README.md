@@ -165,8 +165,9 @@ git status --short
 - **실험·평가 단계의 Jev 자문**: [orch-jev](OPERATIONS.ko.md#jev-자문-사이드카-선택-사항-hybrid-모드-전용)의
   `lint-brief`/`risk`/`scan`은 사용자·agent가 명시적으로 호출하는 선택적 자문으로, 작업 파일을 수정하거나
   gate·라우팅을 결정하지 않으며 판단은 사람과 agent가 내린다.
-  별도 Codex 라우팅 shadow는 `jev-policy.conf`의 "Off by default" 주석과 달리 현재
-  `JEV_SHADOW_ENABLED=1`로 켜져 있지만, 제안 모델·effort를 `codex-shadow.jsonl`에 기록할 뿐
+  별도 Codex 라우팅 shadow는 [Stage 1의 `do not adopt` 결과](eval/jev-shadow-stage1/report-2026-10-06.md)에 따라
+  2026-10-06부터 현재 꺼져 있다(`jev-policy.conf`의 `JEV_SHADOW_ENABLED=0`).
+  활성화한 경우에만 제안 모델·effort를 `codex-shadow.jsonl`에 기록하며,
   Jev 사용 가능 여부와 관계없이 실제 dispatch·인자·exit code·`codex.log`에는 영향을 주지 않는다.
 - **provider 간 자동 부하 분산**
   - 기본은 `codex-first`
