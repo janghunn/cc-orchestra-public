@@ -37,3 +37,12 @@ the first gate failure attributable to the model.
 
 While shadow is on, the `brief.md` of each first-run implement call (without its Risk section) is sent to the Jev API
 after the egress guard, capped by `JEV_SHADOW_MAX_BYTES`. Turn it off with `JEV_SHADOW_ENABLED=0`.
+
+## 2026-10-06: Stage 1 result
+
+Stage 1 was run mechanically per the criteria above on the task-start snapshot (324 records, 78 exact-observed
+implement records). Verdict: `do not adopt` (criterion 3: 1.3% confident-mechanical vs the 20% threshold).
+Under the alternative first-to-last-span reading of "14 days", the verdict would be `inconclusive`.
+See [jev-shadow-stage1/report-2026-10-06.md](jev-shadow-stage1/report-2026-10-06.md).
+Turning shadow off as prescribed is a separate change awaiting user approval and has not been made.
+No criterion above was edited.

@@ -1,0 +1,16 @@
+Jev shadow Stage 1 review — criteria from eval/jev-shadow-decision.md
+log: /home/janghun/.claude/orchestra-state/codex-shadow.jsonl
+log sha256: 2e30c4ebbeffedd3c09c05659ae63d34f333350471fc4e57ceed03790789c18c
+policy: /home/janghun/.claude/orchestra-state/worktrees/cc-orchestra/self-hosting-55/jev-policy.conf · JEV_SHADOW_MIN_CONFIDENCE=0.6
+records: 326 · malformed lines: 0
+population: implement 100 · implement+ok 86 · analysed (implement, ok, exact) 80 · excluded (invalid fields) 0 · exact but not ok (not analysed) 2
+criterion 1 sufficiency: days 2026-09-22 -> 2026-10-06 = 14 (>= 14) · records 80 (>= 30) -> met
+  alternative reading: first-to-last record span = 14.11 days (>= 14) -> met
+  timestamps: parseable 326 · skipped 0
+criterion 2 signal: n 80 · spearman(reasoning, duration_ms) = 0.4443 (>= 0.30) · 95% bootstrap interval [0.2333, 0.6272] (10000 resamples, seed 20261006, undefined 0) · excludes 0: yes -> met
+criterion 3 savings potential: mechanical with confidence >= 0.6: 1/80 (1.2%) (>= 20%) -> not met
+criterion 4 no hidden risk: failure-or-retry mechanical 0/1 (0.0%) vs other 0/79 (0.0%) (each group >= 10; mechanical not higher) -> insufficient
+  informational: analysed records with difficulty mechanical regardless of confidence = 5
+verdict: do not adopt
+verdict under the alternative 14-day reading: do not adopt
+limit: the log cannot show whether a cheaper model would have succeeded; a pass never authorises a model switch.
