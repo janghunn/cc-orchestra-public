@@ -192,7 +192,8 @@ Codex-runnable (synthetic data only):
 4. Running analyze.py twice on a synthetic log (`--log`, `--policy` to fixtures) gives byte-identical stdout.
 5. `git diff origin/local/installed-main..HEAD --stat` lists only: `eval/jev-shadow-stage1/{analyze.py,README.md,report-2026-10-06.md}`,
    `tests/test-jev-stage1.sh` (+ optional `tests/test-jev-stage1.py`), `eval/jev-shadow-decision.md`,
-   `.orchestra/55-jev-shadow-stage1/plan.md`. `git diff origin/local/installed-main..HEAD -- jev-policy.conf` empty.
+   `.orchestra/55-jev-shadow-stage1/plan.md`, `.orchestra/55-jev-shadow-stage1/evidence/{pre-run,real-run,real-run-fulllog}.txt`
+   (see the scope amendment in the Running record). `git diff origin/local/installed-main..HEAD -- jev-policy.conf` empty.
    `git diff origin/local/installed-main..HEAD -- eval/jev-shadow-decision.md | grep '^-' | grep -v '^---'` empty and all
    `+` lines come after the original last line.
 6. The commit that first adds `.orchestra/55-jev-shadow-stage1/plan.md` (with section "Analysis plan") is an
