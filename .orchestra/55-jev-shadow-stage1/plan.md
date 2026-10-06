@@ -216,6 +216,9 @@ The real log is outside the Codex sandbox; Codex does not run or grade these.
   "## Analysis plan" section both in that commit (`git show <sha>:.orchestra/55-jev-shadow-stage1/plan.md`) and in
   the working tree; the two hashes must match, and the plan commit must be HEAD or an ancestor of HEAD at run time.
   The real-run output file's mtime must be later than the plan commit's committer date.
+- R4 (acceptance 5, loopback part — added after round-1 Codex verify was INCONCLUSIVE only because the sandbox denies
+  loopback bind): `bash tests/test-jev.sh` from the repo root → exit 0, `OK`, and `JEV-TESTS: 0 test(s) skipped — none`
+  (the lead's baseline before any change showed exactly that).
 - R3 (acceptance 6, as read by the 09:45 amendment): `head -c 240745 <log> | sha256sum` equals the Baseline sha256;
   `sha256sum` + `stat -c %y` of the log taken immediately before and after the verifier's own analyze.py runs are
   identical; `grep -nE "open\(|write|unlink|rename|chmod" eval/jev-shadow-stage1/analyze.py` shows only read-mode opens.
@@ -291,3 +294,8 @@ The first real-log run had already been executed against the grown log (its outp
 - Amendment (scope): the three aggregate evidence files `evidence/{pre-run,real-run,real-run-fulllog}.txt` are
   force-committed alongside plan.md so the report's references and the gates' pre-registration/number checks are
   resolvable from the branch. They contain counts/statistics only (no ids, task text or per-record rows).
+
+- Round 1 gates launched on 5f479c1: codex verify, codex review (--base origin/local/installed-main), verifier-normal agentId a49e8401591cafcfa (R0-R3).
+- verifier-normal round 1: PASS (R0-R3). Its concern is correct and recorded here as a correction: `evidence/real-run-fulllog.txt` is the parked first run (09:39:08, log sha 2e30c4eb…, 326 records), renamed after the amendment — not a post-09:39:43 rerun (that rerun went to scratch `lead-alpha-55/full-b.txt` and differed only because the log had grown). The report describes it as the first full-log output, which is accurate.
+- codex verify round 1: INCONCLUSIVE — only #5, because 37 loopback tests of test-jev.sh are skipped in the sandbox (bind denied); all non-delegated others met. Delegated as R4 to verifier-normal (same agent).
+- Round 1 result: codex-verify INCONCLUSIVE (only #5 loopback, delegated as R4) · codex-review CLEAR · verifier-normal PASS (R0-R4; R4: test-jev.sh OK, 0 skipped).
