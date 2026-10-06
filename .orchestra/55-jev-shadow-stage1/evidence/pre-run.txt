@@ -1,0 +1,9 @@
+pre-run evidence (lead-alpha), written immediately before the first real-log run
+date: 2026-10-06T09:39:07+09:00
+HEAD: db15d35004d2084b5eef6e031c2b0357e8628d03
+analysis-plan commit: 5deb5c9ae017baa66f2b106f5fb8d9acd3f7b2aa (2026-10-06 09:32:12 +0900)
+plan commit is ancestor of HEAD: yes
+analysis-plan section sha256 at commit: ed143bb7eb3a557abd56bd50df3241c85b2b7d22b0666c8137367b9a10966183
+analysis-plan section sha256 in worktree: ed143bb7eb3a557abd56bd50df3241c85b2b7d22b0666c8137367b9a10966183
+log sha256: 2e30c4ebbeffedd3c09c05659ae63d34f333350471fc4e57ceed03790789c18c
+log mtime: 2026-10-06 09:38:24.809625279 +0900

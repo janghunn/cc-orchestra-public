@@ -203,16 +203,21 @@ Codex-runnable (synthetic data only):
 ## Verification — delegated to verifier-normal
 
 The real log is outside the Codex sandbox; Codex does not run or grade these.
-- R1 (acceptance 2, real data): `python3 eval/jev-shadow-stage1/analyze.py` (default path = real log) run twice →
-  byte-identical stdout, all criterion lines and the verdict line present; output equals `evidence/real-run.txt`.
+- R1 (acceptance 2, real data; per the 09:45 amendment the verdict is computed on the task-start snapshot):
+  `python3 eval/jev-shadow-stage1/analyze.py --log <(head -c 240745 /home/janghun/.claude/orchestra-state/codex-shadow.jsonl)`
+  run twice → byte-identical stdout; `log sha256:` line equals `1c6a58ec07f3dafafbce8aa6554cf94766fa0e2d77fb34d1ee5c7668cd4491c0`;
+  every line except line 2 (`log: <path>`) equals `evidence/real-run.txt`. Also `python3 eval/jev-shadow-stage1/analyze.py`
+  (default path = full current log) runs, exits 0, prints all criterion lines and a verdict line (the full log may
+  have grown since, so its numbers need not equal `evidence/real-run-fulllog.txt`).
 - R2 (acceptance 3): every number in `eval/jev-shadow-stage1/report-2026-10-06.md` matches that output.
 - R0 (acceptance 1): `.orchestra/55-jev-shadow-stage1/evidence/pre-run.txt`, written by the lead immediately before
   the first real-log run, records the date/time, `HEAD`, the analysis-plan commit SHA, and the sha256 of the
   "## Analysis plan" section both in that commit (`git show <sha>:.orchestra/55-jev-shadow-stage1/plan.md`) and in
   the working tree; the two hashes must match, and the plan commit must be HEAD or an ancestor of HEAD at run time.
   The real-run output file's mtime must be later than the plan commit's committer date.
-- R3 (acceptance 6): `sha256sum` and `stat -c %y` of `/home/janghun/.claude/orchestra-state/codex-shadow.jsonl`
-  equal the Baseline values above after the runs.
+- R3 (acceptance 6, as read by the 09:45 amendment): `head -c 240745 <log> | sha256sum` equals the Baseline sha256;
+  `sha256sum` + `stat -c %y` of the log taken immediately before and after the verifier's own analyze.py runs are
+  identical; `grep -nE "open\(|write|unlink|rename|chmod" eval/jev-shadow-stage1/analyze.py` shows only read-mode opens.
 
 ## Risks
 
@@ -264,3 +269,24 @@ The first real-log run had already been executed against the grown log (its outp
    `analyze.py` invocation, and the 240745-byte prefix keeps the Baseline sha256. The log's growth through the
    harness's shadow worker (Codex dispatches by this and sibling tasks) is outside this task's control and is
    reported, not prevented (preventing it would need `JEV_SHADOW_ENABLED=0`, which is out of scope).
+
+## Running record (cont.)
+
+| lane | id | unit | status |
+|---|---|---|---|
+| codex implement (gpt-6-astra@xhigh+fast-mode) | thread 01a10ea0-5c4b-77a3-b16a-81b713d5f2be | unit 1 | done, reviewed, committed db15d35 |
+
+- 5deb5c9 — analysis plan (pre-registration). db15d35 — unit 1 code+tests. 44a4bb9 — snapshot amendment.
+- 09:39:07 pre-run evidence written; first run hit the grown log (output parked unread); amendment committed 44a4bb9;
+  then snapshot runs (byte-identical twice) → `evidence/real-run.txt`; full-log run → `evidence/real-run-fulllog.txt`.
+  Real log sha/mtime identical before/after my snapshot+full runs (it grew again at 09:39:43 from a harness worker,
+  before those runs).
+- Note: my first full-log second run wrote `scratchpad/run2.txt`; the scratchpad is shared with other sessions and a
+  same-named file may have pre-existed (overwritten). Subsequent files are under `scratchpad/lead-alpha-55/`.
+- Result (snapshot): C1 met (alt: not met), C2 met, C3 not met, C4 insufficient → `do not adopt`
+  (alternative reading → `inconclusive`).
+- Unit 2 (same Codex thread, resume): report + append; reviewed by me — numbers match evidence, aggregate only,
+  decision-doc diff is additive at the end only.
+- Amendment (scope): the three aggregate evidence files `evidence/{pre-run,real-run,real-run-fulllog}.txt` are
+  force-committed alongside plan.md so the report's references and the gates' pre-registration/number checks are
+  resolvable from the branch. They contain counts/statistics only (no ids, task text or per-record rows).
