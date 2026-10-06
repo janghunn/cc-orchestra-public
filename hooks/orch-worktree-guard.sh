@@ -25,6 +25,8 @@ import tempfile
 STATE = Path(sys.argv[1])
 LEAD = re.compile(r"^(?:route-)?lead-(alpha|bravo|charlie|delta)(?:-(?:light|normal|critical|critical-xhigh))?$")
 INACTIVE = {"PASS", "FAIL", "BLOCKED", "ACCEPTED", "CLOSED", "IDLE", "UNASSIGNED"}
+# Mirror the terminal-prefix rule in bin/cc-orch's reload awk filter.
+TERMINAL = re.compile(r"(?:" + "|".join(sorted(INACTIVE)) + r")(?:[^A-Za-z0-9_-]|\Z)")
 
 
 def journal(event, hook, decision, reason):
@@ -522,7 +524,7 @@ def main(event):
                 raise ValueError(error)
             checkout, branch, common = resolved
             registry = find_registry(checkout, event.get("cwd"), common)
-            rows = [row for row in registry_rows(registry) if row["status"] and row["status"] not in INACTIVE]
+            rows = [row for row in registry_rows(registry) if row["status"] and not TERMINAL.match(row["status"])]
             matched = next((row for row in rows if id_matches(agent_id, row["agentId"])), None)
             if matched:
                 kind, slot = "lead", matched["slot"]
