@@ -46,3 +46,4 @@ Under the alternative first-to-last-span reading of "14 days", the verdict would
 See [jev-shadow-stage1/report-2026-10-06.md](jev-shadow-stage1/report-2026-10-06.md).
 Turning shadow off as prescribed is a separate change awaiting user approval and has not been made.
 No criterion above was edited.
+2026-10-06: JEV_SHADOW_ENABLED set to 0 in jev-policy.conf per this rule; code kept.

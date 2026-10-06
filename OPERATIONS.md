@@ -505,6 +505,7 @@ Codex-only dispatch never starts it. When enabled, `codex-run-runtime` starts a 
 worker for eligible first-run `implement` calls and never waits for it. Dispatch, arguments,
 stdout/stderr, exit codes, and `codex.log` remain unchanged, including when Jev is unavailable.
 With the flag off, there is no shadow process, network request, or log write.
+Stage 1 returned `do not adopt`; re-enabling requires a new decision.
 
 Use the sidecar's key setup above and set `JEV_SHADOW_ENABLED=1` in `jev-policy.conf`
 (or the policy file selected by `CC_ORCH_JEV_POLICY`); `JEV_ENABLED=1` must also be set.
