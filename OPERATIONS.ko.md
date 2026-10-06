@@ -1114,8 +1114,9 @@ thumbnail의 멱등성은 한 머신 안에서만 보장한다. 원본(해시·�
 기록하며 탐지된 원문을 표시하지 않는다. 해제하려면 보고서의 전체 해시를
 `sha256:<해시>` 형식으로 `~/.claude/orchestra-archive/allowlist.txt`(또는 설정한 경로)에
 추가하고 apply를 다시 실행한다. raw 로그는 무손실 보존되며 검사하지 않는다.
-전체 텍스트 backstop은 해제한 값의 원문과 JSON-escaped metadata를 허용하며,
-그 외 secret-shaped 줄은 거부한다.
+전체 텍스트 backstop은 해제한 값의 원문과 JSON-escaped metadata를 허용하되 span 단위로만 허용한다.
+탐지된 줄은 그 줄의 모든 secret-shaped 일치가 해제한 값의 한 출현 안에 완전히 들어갈 때만
+통과하므로, 해제한 값이 같은 줄(한 줄짜리 catalog 포함)의 다른 secret을 면제하지 않는다.
 네트워크·모델 호출, remote 설정, push는 하지 않는다.
 
 관리 파일 `.obsidian/graph.json`은 apply마다 재생성하며 artifacts, metadata, dashboard를

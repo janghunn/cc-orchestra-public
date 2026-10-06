@@ -33,6 +33,27 @@ _secrets = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_secrets)
 is_secret_shaped = _secrets.is_secret_shaped
 scan_record = _secrets.scan_record
+AWS_SPANS_RE = re.compile("(?=(" + _secrets.AWS_RE.pattern + "))")
+SECRET_SPANS_RE = re.compile("(?=(" + _secrets.SECRET_RE.pattern + "))")
+
+
+def secret_spans(line):
+    """Map every scanner match in an LF-free line back to its original coordinates."""
+    clean_indices = [i for i, char in enumerate(line) if char != "\x00"]
+    clean = line.replace("\x00", "")
+    low = clean.lower()
+    lower_indices = [i for i in clean_indices for _ in line[i].lower()]
+    if len(lower_indices) != len(low):
+        return None
+    spans = [(clean_indices[match.start(1)], clean_indices[match.end(1) - 1] + 1)
+             for match in AWS_SPANS_RE.finditer(clean)]
+    if not _secrets.PLACEHOLDER_RE.search(low):
+        # The lookahead adds group 1; group 2 is the scanner's non-secret boundary.
+        spans.extend((lower_indices[match.end(2)], lower_indices[match.end(1) - 1] + 1)
+                     for match in SECRET_SPANS_RE.finditer(low))
+    return spans
+
+
 EXCLUDED = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 PATH_KEYS = {"VAULT_DIR", "RAW_DIR", "ALLOWLIST_FILE", "CLAUDE_PROJECTS_DIR", "CODEX_HOME_DIR"}
 LIST_KEYS = {"STATE_DIRS", "EXTRA_BASES"}
@@ -495,15 +516,32 @@ class Guard:
         text = data.decode("utf-8")
         return self.value(text, owner, rel, "artifact") != text
 
+    def released_only(self, text):
+        if not any(value in text for value in self.released):
+            return False
+        offset = 0
+        for part in text.split("\n"):
+            if is_secret_shaped(part):
+                spans = secret_spans(part)
+                if not spans:
+                    return False
+                for start, end in spans:
+                    start, end = start + offset, end + offset
+                    if not any(value and text.find(value, max(0, end - len(value)), start + len(value)) != -1
+                               for value in self.released):
+                        return False
+            offset += len(part) + 1
+        return True
+
     def check(self, data, path, artifact=False):
-        # Each complete line passes scan_record immediately before the writer.
-        # Only values actually released by this Guard can exempt metadata lines.
+        # Each flagged line passes only when every secret-shaped span lies entirely
+        # inside one occurrence of a value actually released by this Guard.
         if artifact and sha(data) in self.allow:
             return
         lines = byte_lines(data) if isinstance(data, bytes) else data.lines()
         for n, line in enumerate(lines, 1):
             text = line.decode("utf-8")
-            if scan_record(text)[0] and not any(value in text for value in self.released):
+            if scan_record(text)[0] and not self.released_only(text):
                 raise ArchiveError(f"secret guard: {self.value(path)}:{n}", 1)
 
 

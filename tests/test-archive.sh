@@ -439,6 +439,102 @@ else:
 ok(token in released_note and '[withheld:' in released_note and 'verify: OK' in run('verify') and
    all(other_token.encode() not in data for data in all_released_vault),
    'allow-listed conf value is released and verifies; a different secret stays withheld and backstop rejects it')
+
+assignment_secrets = ('q' * 24, 'z' * 24, 'Q' * 24, 'R' * 24, 'S' * 24,
+                      'abcdefghijklmnopqrstuvwx', 'a' * 30, 's' * 40, 'a' * 24, 'b' * 24)
+
+def rejects(guard, data, path='note.md', artifact=False):
+    try:
+        guard.check(data, path, artifact=artifact)
+    except archive.ArchiveError as error:
+        return (error.code == 1 and 'secret guard:' in str(error) and
+                all(value not in str(error) for value in (token, other_token, *assignment_secrets)))
+    return False
+
+ov = token + ' api_key'
+release_guard.allow.add(archive.sha(ov.encode()))
+assert release_guard.value(ov) == ov
+up = "PASSWORD='" + 'Q' * 24 + "'"
+release_guard.allow.add(archive.sha(up.encode()))
+assert release_guard.value(up) == up
+adj = "token='" + 'a' * 24 + "'"
+release_guard.allow.add(archive.sha(adj.encode()))
+assert release_guard.value(adj) == adj
+mixed_lines = [
+    (adj + "token='" + 'b' * 24 + "'").encode(),
+    archive.json_bytes({'a': token, 'b': other_token}, compact=True),
+    (token + " password='" + 'q' * 24 + "'").encode(),
+    (ov + "='" + 'z' * 24 + "'\n").encode(),
+    (token + other_token).encode(),
+    (token + ' ' + other_token).encode(),
+    (other_token[:10] + '\x00' + other_token[10:] + ' ' + token).encode(),
+    (other_token + ' # placeholder ' + token).encode(),
+    ('x ' + up + " Secret='" + 'R' * 24 + "'\n").encode(),
+    ('İİ ' + up + ' İ' + "token='" + 'S' * 24 + "'\n").encode(),
+]
+for data in mixed_lines:
+    assert rejects(release_guard, data)
+release_guard.check(archive.json_bytes({'a': token, 'b': '[withheld:0123456789ab]'}, compact=True), 'note.json')
+assert rejects(release_guard, f'notes {token} and {other_token}\n'.encode(), artifact=True)
+release_guard.check(f'notes {token}\n'.encode(), 'note.md', artifact=True)
+ok(True, 'mixed released/unreleased line is rejected (catalog + artifact)')
+
+nv = token + ' café "q"\nline'
+release_guard.allow.add(archive.sha(nv.encode()))
+assert release_guard.value(nv) == nv
+release_only_lines = [
+    json.dumps({'k': token}),
+    token + ' ' + token,
+    token + " password='" + 'q' * 24 + "' # placeholder",
+    'x ' + up + ' y',
+    'İİ ' + up,
+    "{'k': " + up + "}",
+    json.dumps({'k': nv}, ensure_ascii=False),
+    json.dumps({'k': nv}, ensure_ascii=True),
+    token,
+]
+for text in release_only_lines:
+    release_guard.check(text.encode(), 'note.md')
+release_guard.check(f'{token}\n'.encode(), 'note.md', artifact=True)
+ok(True, 'release-only lines still pass')
+
+class GuardLines:
+    def lines(self):
+        return [b'ok\n', (other_token + '\n').encode()]
+
+fresh_guard = archive.Guard(archive.load_policy())
+assert not fresh_guard.released
+old_rejecting_inputs = [
+    other_token.encode(),
+    (other_token + '\n').encode(),
+    b"api_key = 'abcdefghijklmnopqrstuvwx'",
+    ('Token: "' + 'a' * 30 + '"').encode(),
+    (other_token[:10] + '\x00' + other_token[10:]).encode(),
+    ('ok\n' + other_token + '\nok\n').encode(),
+    archive.json_bytes({'b': other_token}, compact=True),
+    json.dumps({'v': other_token + ' "q"\nx'}).encode(),
+    ("secret='" + 's' * 40 + "'").encode(),
+    GuardLines(),
+]
+for data in old_rejecting_inputs:
+    lines = archive.byte_lines(data) if isinstance(data, bytes) else data.lines()
+    assert any(archive.scan_record(t)[0] and not any(v in t for v in release_guard.released)
+               for t in (line.decode('utf-8') for line in lines))
+    assert rejects(release_guard, data) and rejects(fresh_guard, data)
+try:
+    release_guard.check(('ok\n' + other_token + '\nok\n').encode(), 'note.md')
+except archive.ArchiveError as error:
+    assert str(error).endswith(':2')
+else:
+    raise AssertionError('unreleased secret on line 2 must abort')
+ok(True, 'every old-rejecting input is still rejected')
+
+ok(archive.scan_record is archive._secrets.scan_record and
+   archive.scan_record('ok\n' + other_token) == (True, 2) and
+   archive.scan_record('ok') == (False, None) and
+   archive.scan_record(token + ' # placeholder') == (True, 1),
+   'scan_record contract unchanged')
+
 retained_conf = home / 'state/sessions/retained-release.conf'
 put(retained_conf, f'LAUNCH_NAME=retained-release\nPRIVATE={token}\n')
 run('apply')
