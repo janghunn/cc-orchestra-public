@@ -864,7 +864,9 @@ verdict 파일만 쓰라는 지시와 명령 정책은 그대로 적용됩니다
 systemd 호출은 수행하지 않습니다. `CC_ORCH_SETTINGS`로 settings 경로를 지정할 수 있으며,
 기본값은 `$HOME/.claude/settings.json`입니다. 기존의 관련 없는 항목을 보존하고 checkout
 경로가 바뀌면 해당 hook command를 현재 경로로 갱신합니다. 재실행하면 각 hook의 의도한 matcher와
-timeout도 복구하고, `hooks/<name>` 경로 요소로 식별한 중복 등록을 하나의 항목으로 합칩니다.
+timeout도 복구하고 중복 등록을 하나의 항목으로 합칩니다. 설치 프로그램 자체의 한 줄 형식만 식별합니다:
+`bash <hooks/<name>으로 끝나는 절대 경로>`에 선택적으로 `|| true`와 끝의 `# comment`가 붙는 형식이며, 다른 command는 그대로 두고 올바른 항목을 옆에 추가합니다.
+`--check`는 중복 등록, 잘못된 matcher 또는 `|| true`가 없는 command를 `STALE <name> under <event>`로 보고합니다.
 등록 command의 `|| true`는
 유지해야 합니다. Timeout은 `PreToolUse` 10초, `SubagentStop` 30초입니다. 저장소의
 `guardrails.json`은 기존 `/home/janghun/cc-orchestra/hooks/` 경로를 사용하므로 다른 위치에

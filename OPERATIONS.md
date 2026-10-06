@@ -831,7 +831,9 @@ Installation registers independent hooks in user settings and in the session gua
 changing executable bits, or contacting systemd. It honors `CC_ORCH_SETTINGS` (default:
 `$HOME/.claude/settings.json`), preserves unrelated entries, and updates an existing hook command
 when the checkout path changes; re-running it also restores each hook's intended matcher and timeout
-and collapses duplicate registrations (recognised by the `hooks/<name>` path segment) to one entry.
+and collapses duplicate registrations to one entry. Only the installer's own one-line form is recognised:
+`bash <absolute path ending in hooks/<name>>`, with optional `|| true` and trailing `# comment`; other commands are left unchanged and the correct entry is added beside them.
+`--check` reports duplicates, a wrong matcher or a command without `|| true` as `STALE <name> under <event>`.
 Commands retain `|| true`; timeouts are 10 seconds for
 `PreToolUse` and 30 seconds for `SubagentStop`. The checked-in `guardrails.json` uses the existing
 `/home/janghun/cc-orchestra/hooks/` prefix; adjust it for a different installation location.

@@ -135,29 +135,86 @@ PY
 }
 
 install_safety_hooks() {
-  python3 - "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" "$REPO_DIR" <<'PY'
-import json, os, shlex, sys, tempfile
+  python3 - "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" "$REPO_DIR" "${1:-repair}" <<'PY'
+import json, os, re, shlex, sys, tempfile
 SAFETY_HOOKS = (
     ("PreToolUse", "Bash", "orch-worktree-guard.sh", 10),
     ("SubagentStop", "(route-)?lead-.*", "orch-stop-gate.sh", 30),
     ("SessionStart", "compact", "orch-compact-context.sh", 10),
 )
 
-def is_safety_hook(hook, basename):
-    if not isinstance(hook, dict) or not isinstance(hook.get("command"), str):
-        return False
-    try:
-        lex = shlex.shlex(hook["command"], posix=True, punctuation_chars=True)
-        lex.commenters = ''
-        lex.whitespace_split = True
-        tokens = list(lex)
-    except ValueError:
-        return False
-    path = "hooks/" + basename
-    return any(token == path or token.endswith("/" + path) for token in tokens)
+OUR_SHAPE = re.compile(
+    r"bash (?:(?P<plain>/[\w@%+=:,./-]*)|'(?P<quoted>/[^'\x00-\x1f\x7f]*)')"
+    r"(?P<or_true>[ \t]*\|\|[ \t]*true)?(?:[ \t]+#[^\n]*)?", re.ASCII)
+# Shapes ever written: install.sh 4b750d1 ("bash " + shlex.quote(path) + " || true"), guardrails.json
+# 4b750d1 (bash '<path>' || true) and f4053e3 (bash <path> || true); tests also use no-or-true and '||true'.
 
-path, repo = sys.argv[1:]
+def our_shape(hook, basename, command):
+    """Match object (or True for the exact canonical command) when this is our one-line hook."""
+    if not isinstance(hook, dict) or not isinstance(hook.get("command"), str):
+        return None
+    if hook["command"] == command:
+        return True
+    match = OUR_SHAPE.fullmatch(hook["command"])
+    if match and (match["plain"] or match["quoted"]).endswith("/hooks/" + basename):
+        return match
+    return None
+
+path, repo = sys.argv[1:3]
+mode = sys.argv[3] if len(sys.argv) > 3 else "repair"
 path = os.path.abspath(path)
+if mode == "check":
+    settings = {}
+    reason = ""
+    try:
+        with open(path, encoding="utf-8") as source:
+            settings = json.load(source)
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError):
+        reason = " (unreadable settings)"
+    except ValueError:
+        reason = " (invalid JSON)"
+    if not isinstance(settings, dict):
+        settings = {}
+        reason = " (settings must be a JSON object)"
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        reason = " (hooks must be a JSON object)"
+    rc = 0
+    for event, matcher, basename, timeout in SAFETY_HOOKS:
+        entries = hooks.get(event, [])
+        event_reason = reason
+        if not isinstance(entries, list):
+            entries = []
+            event_reason = f" (hooks.{event} must be a list)"
+        command = "bash " + shlex.quote(os.path.join(repo, "hooks", basename)) + " || true"
+        matches = [(entry, hook) for entry in entries
+                   if isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+                   for hook in entry["hooks"] if our_shape(hook, basename, command)]
+        if not matches:
+            print(f"  MISSING  {basename} in settings.json{event_reason}")
+            rc = 1
+            continue
+        problems = []
+        if len(matches) > 1:
+            problems.append(f"{len(matches)} registrations (expect 1)")
+        for entry, hook in matches:
+            if entry.get("matcher") != matcher:
+                problems.append(f"matcher {json.dumps(entry.get('matcher'))} (expect {json.dumps(matcher)})")
+            result = our_shape(hook, basename, command)
+            if hook.get("type") != "command" or not (result is True or result["or_true"]):
+                problems.append("command is not the fail-open 'bash … || true' command form")
+        if problems:
+            problems.append("re-run ./install.sh --safety-hooks-only to repair")
+            for problem in problems:
+                print(f"  STALE    {basename} under {event}: {problem}")
+            rc = 1
+        else:
+            print(f"  ok       {basename} in settings.json")
+    raise SystemExit(rc)
+
 os.makedirs(os.path.dirname(path), exist_ok=True)
 settings = {}
 if os.path.exists(path):
@@ -174,7 +231,7 @@ for event, matcher, basename, timeout in SAFETY_HOOKS:
         if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
             continue
         for hook in entry["hooks"]:
-            if is_safety_hook(hook, basename):
+            if our_shape(hook, basename, command):
                 matches.append((entry, hook))
     if not matches:
         entries.append({"matcher": matcher, "hooks": [
@@ -308,13 +365,7 @@ check() {
   fi
   echo "  budget   $("$REPO_DIR/bin/orch-model-guard-runtime" budget --compact 2>/dev/null || echo unavailable)"
 
-  for hook in orch-worktree-guard.sh orch-stop-gate.sh orch-compact-context.sh; do
-    if grep -q "$hook" "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" 2>/dev/null; then
-      echo "  ok       $hook in settings.json"
-    else
-      echo "  MISSING  $hook in settings.json"; rc=1
-    fi
-  done
+  install_safety_hooks check || rc=1
 
   if command -v tmux >/dev/null 2>&1; then
     echo "  ok       tmux ($(tmux -V 2>/dev/null)) — managed sessions enabled"
