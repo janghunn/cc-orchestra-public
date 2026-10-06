@@ -1087,9 +1087,13 @@ blobs are recompressed deterministically; existing blobs are never rewritten. So
 histories live under `sources/<host>/`, keeping machine-specific watermarks separate.
 Before source verification, import rejects any entry in the source vault or raw store that
 is not a regular file or directory (FIFO, socket, device or symlink) with `not-regular`.
-Other unreadable source directories are also refused as `not-regular`; an unreadable `raw/blobs`,
-`raw/sources` or blob shard directory still stops import with exit `2` (permission error, nothing written).
+Unreadable source directories (including `raw/blobs`, `raw/sources` and blob shards) and regular
+files are also refused as `not-regular`, exit `4`, without writing archive content. An unreadable
+source catalog is still a usage/input error (exit `2`), since it is read before this preflight.
 Source verification is skipped once any entry has been rejected.
+Before the first write, import rechecks source file identity, size, timestamps and mode;
+a changed or unrecorded file refuses the import with exit `4` and no archive content written.
+This is not a transaction: changes after that recheck rely on the existing copy-time hash checks.
 Source histories whose blob pointers leave `blobs/` are also refused before source verification.
 Import also verifies every local blob it reuses and refuses damaged blobs without rewriting
 them. Before writing, including during `--dry-run`, it validates its own rendered links and
@@ -1161,7 +1165,7 @@ Open limitations:
   manifest hash check and counted as `artifacts_unverified`.
 - A crash during writing can leave a partial, re-runnable import; there is no transaction
   spanning all files.
-- Short task names in `show` can become ambiguous after import; use the full `<host>--…` id.
+- An exact full id wins in `show`; otherwise an ambiguous id lists every matching id and exits `1`.
 - Imported notes use this host's thumbnail/embed policy when rendered.
 - Local discovery of a project or session whose id equals an imported id stops `apply`.
 

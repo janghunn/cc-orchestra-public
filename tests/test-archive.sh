@@ -2367,6 +2367,7 @@ def bounded_rejected(dest, source, reason, host='bee', *options, limit=60, code=
     with (home / dest / 'raw/.lock').open('r+b') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lock, fcntl.LOCK_UN)
+    return result
 
 import socket
 
@@ -2739,6 +2740,176 @@ imported('interrupted-refresh', 'bee2', 'bee', '--refresh', '--no-commit')
 replaced = catalog('interrupted-refresh')['hosts']['bee']['replaced']
 ok(all(item in replaced for item in journal_entries) and verified('interrupted-refresh'),
    'R9: listing and recovery journal precede overwrites; retry retains every interrupted-run recovery pointer')
+
+# T1/T2: unreadable raw directories and regular files fail in the source preflight.
+for location in ('blobs', 'shard', 'sources', 'history', 'blob'):
+    source = clone('bee', 'unreadable-' + location)
+    root = home / source / 'raw'
+    path = (next((root / 'blobs').iterdir()) if location == 'shard' else
+            next((root / 'sources').glob('*.json')) if location == 'history' else
+            next((root / 'blobs').glob('*/*.gz')) if location == 'blob' else root / location)
+    directory, mode = path.is_dir(), stat.S_IMODE(path.stat().st_mode)
+    try:
+        path.chmod(0)
+        readable = os.access(path, os.R_OK)
+        try:
+            if directory:
+                os.listdir(path)
+            else:
+                with path.open('rb') as stream:
+                    stream.read(1)
+            readable = True
+        except PermissionError:
+            pass
+        if readable:
+            note = f'T1/T2 unreadable {location}: permission bits are bypassed'
+            skipped.append(note)
+            print(f'skip - {note}', flush=True)
+            continue
+        result = bounded_rejected('reject', source, 'not-regular')
+        assert 'PermissionError' not in result.stderr, result.stderr
+        assert {item['reason'] for item in report(result.stdout)['rejected']['items']} == {'not-regular'}
+        ok(True, f'T1/T2: unreadable {location} exits 4 not-regular without writes or a held lock')
+    finally:
+        path.chmod(mode)
+source = clone('bee', 'readable-source')
+clone('original', 'after-unreadable')
+imported('after-unreadable', source, 'bee')
+ok(verified('after-unreadable'), 'T1: a normal import verifies after unreadable-source refusals')
+
+# T3/T3b: inject changes after preparation, or simulate an unrecorded new blob.
+swap_code = '''
+import os
+import sys
+sys.path.insert(0, sys.argv[1])
+import orch_archive as archive
+variant = sys.argv[2]
+prepare = archive.Importer.prepare
+preflight = archive.Importer.reject_special_sources
+def wrapped_prepare(self):
+    prepare(self)
+    assert not self.rejected and self.new_blobs
+    if variant == 'changed':
+        digest = self.new_blobs[0]
+        path = self.src_raw / f'blobs/{digest[:2]}/{digest}.gz'
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1000000000))
+def wrapped_preflight(self):
+    preflight(self)
+    if variant == 'unrecorded':
+        path = next(path for path in sorted((self.src_raw / 'blobs').glob('*/*.gz'))
+                    if not (self.raw / path.relative_to(self.src_raw)).exists())
+        self.source_identity.pop(str(path))
+archive.Importer.prepare = wrapped_prepare
+archive.Importer.reject_special_sources = wrapped_preflight
+sys.exit(archive.main(sys.argv[3:]))
+'''
+for variant in ('unchanged', 'changed', 'unrecorded'):
+    source = clone('bee', 'swap-source-' + variant)
+    dest = clone('original', 'swap-dest-' + variant)
+    before = state(dest, git=True)
+    result = subprocess.run(
+        ['python3', '-B', '-c', swap_code, str(repo / 'lib'), variant,
+         'import', '--host', 'bee', '--source-vault', str(home / source / 'vault'),
+         '--source-raw', str(home / source / 'raw'), '--no-commit', '--json'],
+        env=environment(dest), text=True, capture_output=True, timeout=60)
+    assert result.returncode == (0 if variant == 'unchanged' else 4), (result.stdout, result.stderr)
+    if variant == 'unchanged':
+        assert verified(dest)
+    else:
+        assert result.stderr == 'import: 1 source files changed during import; nothing written\n', result.stderr
+        assert state(dest, git=True) == before
+    with (home / dest / 'raw/.lock').open('r+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    ok(True, f'T3/T3b: {variant} source identity check preserves destination and releases the lock')
+
+# T4: both pointer hashing and generation reconstruction use bounded reads.
+name = 'stream-verify'
+payload = b'bounded archive verification\n' * 320000
+assert len(payload) > 8 * 1024 * 1024
+pointer = add_blob(name, payload)
+large_blob = home / name / 'raw' / pointer['blob']
+large_file = home / name / 'vault/artifacts/large.txt'
+put(large_file, payload)
+manifest = add_blob(name, archive.json_bytes({'entries': [pointer]}))
+save_catalog(name, {'version': 1, 'tasks': {}, 'projects': {'stream': {'manifests': [manifest]}},
+                    'generated': ['_meta/catalog.json'], 'payload': pointer,
+                    'file': {'path': 'artifacts/large.txt', 'sha256': pointer['sha256']}})
+put(home / name / ('raw/sources/' + 'a' * 24 + '.json'), archive.json_bytes({'generations': [{
+    'chunks': [dict(pointer, offset=0)], 'prefix_sha256': pointer['sha256'],
+    'tail': None, 'size_seen': len(payload)}]}))
+decompress, read_bytes, gzip_read = gzip.decompress, Path.read_bytes, gzip.GzipFile.read
+decompressed_sizes, read_paths, gzip_sizes = [], [], []
+def tracked_decompress(data):
+    result = decompress(data)
+    decompressed_sizes.append(len(result))
+    return result
+def tracked_read_bytes(path):
+    read_paths.append(path)
+    return read_bytes(path)
+def tracked_gzip_read(stream, size=-1):
+    gzip_sizes.append(size)
+    return gzip_read(stream, size)
+try:
+    gzip.decompress = tracked_decompress
+    Path.read_bytes = tracked_read_bytes
+    gzip.GzipFile.read = tracked_gzip_read
+    result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+finally:
+    gzip.decompress, Path.read_bytes, gzip.GzipFile.read = decompress, read_bytes, gzip_read
+assert result == ([], 0, 0, 2), result
+assert gzip_sizes and all(0 < size <= 1024 * 1024 for size in gzip_sizes), gzip_sizes
+assert decompressed_sizes and max(decompressed_sizes) <= 1024 * 1024, decompressed_sizes
+assert large_blob not in read_paths and large_file not in read_paths, read_paths
+ok(True, 'T4: large blob/file pointers and raw generations stream in at most 1 MiB reads; manifests still parse')
+
+# T5: retain the base whole-decompression error classes and exact CLI diagnostics.
+for variant, error_name in (('truncated', 'EOFError'), ('bad-crc', 'BadGzipFile'), ('trailing', 'BadGzipFile')):
+    name = 'verify-' + variant
+    pointer = add_blob(name, b'archive verification corruption fixture\n')
+    path = home / name / 'raw' / pointer['blob']
+    packed = path.read_bytes()
+    if variant == 'truncated':
+        packed = packed[:-1]
+    elif variant == 'bad-crc':
+        packed = packed[:-8] + bytes([packed[-8] ^ 1]) + packed[-7:]
+    else:
+        packed += b'trailing garbage'
+    put(path, packed)
+    save_catalog(name, {'version': 1, 'tasks': {}, 'projects': {},
+                        'generated': ['_meta/catalog.json'], 'payload': pointer})
+    try:
+        gzip.decompress(packed)
+    except (EOFError, gzip.BadGzipFile) as error:
+        assert type(error).__name__ == error_name
+    else:
+        raise AssertionError('base decompression accepted corrupt gzip')
+    expected = f'_meta/catalog.json: raw pointer or file pointer invalid ({error_name})'
+    assert run(name, 'verify', code=1) == expected + '\n'
+    assert archive.verify_problems(home / name / 'vault', home / name / 'raw') == ([expected], 0, 0, 0)
+    ok(True, f'T5: {variant} blob keeps the exact {error_name} verify diagnostic and pointer count')
+
+# T6/T6b: full ids win, while ambiguous short ids list every match across kinds.
+dest = clone('original', 'show-merged')
+imported(dest, 'bee')
+for identifier, rel in (('demo--01-shared', 'tasks/demo--01-shared.md'),
+                        ('bee--demo--01-shared', 'tasks/bee--demo--01-shared.md'),
+                        ('demo--02-bee-only', 'tasks/bee--demo--02-bee-only.md')):
+    result = subprocess.run([str(command), 'show', identifier], env=environment(dest), capture_output=True)
+    assert result.returncode == 0 and not result.stderr, (result.returncode, result.stderr)
+    assert result.stdout == (home / dest / 'vault' / rel).read_bytes()
+imported(dest, 'bee', 'zed')
+assert run(dest, 'show', 'demo--02-bee-only', code=1) == (
+    'show: ambiguous id; matching ids:\ntasks/bee--demo--02-bee-only\ntasks/zed--demo--02-bee-only\n')
+assert run(dest, 'show', 'unknown-id', code=1) == 'show: unknown or ambiguous id\n'
+ok(True, 'T6: exact/unique show bytes stay identical; ambiguous short ids list sorted matches; unknown stays unchanged')
+dest = clone(dest, 'show-cross-kind')
+for rel in ('projects/collision.md', 'models/collision.md', 'tasks/h--collision.md'):
+    put(home / dest / 'vault' / rel, '# Collision\n')
+assert run(dest, 'show', 'collision', code=1) == (
+    'show: ambiguous id; matching ids:\nmodels/collision\nprojects/collision\ntasks/h--collision\n')
+ok(True, 'T6b: multiple exact show matches also list every task-suffix match')
 
 # Syntax checks keep caches in the fixture home.
 subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)
