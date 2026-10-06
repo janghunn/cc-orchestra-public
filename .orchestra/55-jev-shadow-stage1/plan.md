@@ -230,3 +230,37 @@ The real log is outside the Codex sandbox; Codex does not run or grade these.
 ## Running record
 
 - 2026-10-06: Phase A scoping done; baselines green; dispatch=codex-first.
+- 5deb5c9 — analysis plan committed (pre-registration). plan cross-check: ISSUES 3, all addressed before that commit.
+
+## Implementation units
+
+- **Unit 1 (now, Codex `implement`): Changes 1, 2 and 3 only** (`eval/jev-shadow-stage1/analyze.py`,
+  `eval/jev-shadow-stage1/README.md`, `tests/test-jev-stage1.sh` [+ optional `tests/test-jev-stage1.py`]).
+  Do NOT create `report-2026-10-06.md`, do NOT edit `eval/jev-shadow-decision.md`, do NOT read
+  `/home/janghun/.claude/orchestra-state/` or run analyze.py without `--log`/`--policy` pointing at synthetic fixtures.
+  Do not edit `plan.md` or any `.orchestra/` file other than your impl report. Do not commit.
+- **Unit 2 (later, same thread via `resume`): Changes 4 and 5**, from `evidence/real-run.txt` written by the lead.
+
+## Amendment 2026-10-06 09:45 +0900 — analysed snapshot (written before any real-log result was viewed)
+
+Finding at the pre-run check (`evidence/pre-run.txt`): the real log changed during this task. It grew from 240745
+to 242347 bytes (mtime 2026-10-06 09:38:24 +0900): two `implement`/`ok` records dated 2026-10-06 were appended by
+the harness's own shadow worker, which `codex-run-runtime` starts on first-run implement calls while
+`JEV_SHADOW_ENABLED=1` — at least one of them is this task's own Codex implement dispatch. No analysis code wrote it;
+the first 240745 bytes still hash to the Baseline sha256 `1c6a58ec…4491c0`.
+
+The first real-log run had already been executed against the grown log (its output was moved unread to
+`evidence/real-run-fulllog-unviewed.txt`). Before viewing it I fix:
+
+1. **Analysed data = the snapshot present when this task started**: the first 240745 bytes of the log, whose sha256
+   must equal `1c6a58ec07f3dafafbce8aa6554cf94766fa0e2d77fb34d1ee5c7668cd4491c0` (the 324 records Tier 1 scoped,
+   2026-09-21..2026-10-03 UTC). Records appended during the review are produced by the review's own dispatches
+   (self-referential) and would, among other things, stretch the first-to-last span. The snapshot is copied with
+   `head -c 240745` to a mode-600 file outside every worktree and passed with `--log`. Plan sections A-G apply
+   unchanged to it.
+2. The report additionally prints the full current-log run (verbatim aggregate output) as a clearly labelled
+   secondary, informational result that does not determine the verdict.
+3. Acceptance 6 is read as: no analysis step writes the log — sha256/mtime are identical before and after each
+   `analyze.py` invocation, and the 240745-byte prefix keeps the Baseline sha256. The log's growth through the
+   harness's shadow worker (Codex dispatches by this and sibling tasks) is outside this task's control and is
+   reported, not prevented (preventing it would need `JEV_SHADOW_ENABLED=0`, which is out of scope).
