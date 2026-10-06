@@ -568,11 +568,120 @@ PANEL
   parity_case future 95
   parity_case invalid-until 95
 
+  table_case() {
+    local pin_case="$1" pct="$2" days="$3" expected="$4" pin="" until="" legacy runtime
+    case "$pin_case" in
+      unset) ;;
+      healthy) pin=healthy ;;
+      invalid) pin=watch ;;
+      expired) pin=healthy; until=$((PARITY_NOW-1)) ;;
+    esac
+    grep -v '^CODEX_PRESSURE_PIN' "$ROOT/budget-policy.conf" > "$PARITY_HARNESS/budget-policy.conf"
+    if [ "$pin_case" != unset ]; then
+      printf '\nCODEX_PRESSURE_PIN=%q\nCODEX_PRESSURE_PIN_UNTIL=%q\n' "$pin" "$until" \
+        >> "$PARITY_HARNESS/budget-policy.conf"
+    fi
+    rm -f "$PARITY_DIR/state/budget-state"
+    printf '{"rate_limits":{"primary":{"used_percent":%s,"resets_at":%s}}}\n' \
+      "$pct" "$((PARITY_NOW+days*86400))" > "$PARITY_DIR/codex/sessions/rollout-parity.jsonl"
+    printf '{"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":%s},"seven_day":{"used_percentage":10,"resets_at":%s}}}\n' \
+      "$((PARITY_NOW+9000))" "$((PARITY_NOW+518400))" | parity_guard orch-model-guard-runtime ingest-claude
+    parity_guard orch-model-guard lanes > "$PARITY_DIR/legacy.out" 2> "$PARITY_DIR/legacy.err"
+    parity_guard orch-model-guard-runtime lanes > "$PARITY_DIR/runtime.out" 2> "$PARITY_DIR/runtime.err"
+    legacy="$(cat "$PARITY_DIR/legacy.out")"; runtime="$(cat "$PARITY_DIR/runtime.out")"
+    assert_eq "$(printf '%s\n' "$legacy" | head -1)" "dispatch=$expected" "$pin_case $pct $days-day legacy dispatch"
+    assert_eq "$(printf '%s\n' "$legacy" | head -1)" "$(printf '%s\n' "$runtime" | head -1)" \
+      "$pin_case $pct $days-day legacy/runtime dispatch parity"
+    assert_eq "$(wc -l < "$PARITY_DIR/legacy.out")" 4 "$pin_case $pct $days-day legacy output shape"
+    assert_has "$legacy" "week=$pct%" "$pin_case $pct $days-day legacy real usage"
+    cmp "$PARITY_DIR/legacy.err" "$PARITY_DIR/runtime.err" || fail "$pin_case $pct $days-day warning parity"
+    if [ "$pin_case" = healthy ]; then
+      assert_has "$legacy" "pressure=healthy(pinned; real=week $pct%)" "$pin_case $pct $days-day legacy pin marker"
+    else
+      assert_not_has "$legacy" pinned "$pin_case $pct $days-day legacy remains dynamic"
+    fi
+  }
+  for pin_case in unset healthy invalid expired; do
+    for pct in 10 89 90 94; do
+      for days in 1 6; do
+        # Runtime is sparing only at 94% with six days remaining and no active pin.
+        expected=codex-first
+        if [ "$pin_case" != healthy ] && [ "$pct" = 94 ] && [ "$days" = 6 ]; then
+          expected=codex-sparing
+        fi
+        table_case "$pin_case" "$pct" "$days" "$expected"
+      done
+    done
+  done
+
+  # parity_guard intentionally fixes the Claude backend; exercise Codex-only mode explicitly.
+  for entry in orch-model-guard orch-model-guard-runtime; do
+    HOME="$PARITY_DIR/home" CC_ORCH_STATE_DIR="$PARITY_DIR/state" \
+      CC_ORCH_AGENTS_DIR="$PARITY_DIR/agents" CODEX_HOME="$PARITY_DIR/codex" \
+      CLAUDE_BIN="$PARITY_DIR/claude" CC_ORCH_NOW_EPOCH="$PARITY_NOW" \
+      CC_ORCH_BACKEND=codex TZ=UTC "$PARITY_HARNESS/bin/$entry" lanes > "$PARITY_DIR/$entry.codex.out"
+  done
+  legacy="$(cat "$PARITY_DIR/orch-model-guard.codex.out")"
+  runtime="$(cat "$PARITY_DIR/orch-model-guard-runtime.codex.out")"
+  assert_eq "$(printf '%s\n' "$legacy" | head -1)" dispatch=codex-first "Codex-only legacy dispatch"
+  assert_eq "$(printf '%s\n' "$legacy" | head -1)" "$(printf '%s\n' "$runtime" | head -1)" \
+    "Codex-only legacy/runtime dispatch parity"
+  assert_eq "$(wc -l < "$PARITY_DIR/orch-model-guard.codex.out")" 4 "Codex-only legacy output shape"
+  assert_has "$(printf '%s\n' "$legacy" | sed -n '/^reason: /p')" Astra-only "Codex-only legacy reason"
+
+  cp "$PARITY_HARNESS/bin/orch-model-guard-runtime" "$PARITY_DIR/runtime.real"
+  for stub_case in bad-dispatch nonzero success; do
+    case "$stub_case" in
+      bad-dispatch)
+        cat > "$PARITY_HARNESS/bin/orch-model-guard-runtime" <<'STUB'
+#!/usr/bin/env bash
+echo dispatch=bogus
+exit 0
+STUB
+        ;;
+      nonzero)
+        cat > "$PARITY_HARNESS/bin/orch-model-guard-runtime" <<'STUB'
+#!/usr/bin/env bash
+echo dispatch=codex-sparing
+echo stub-error >&2
+exit 3
+STUB
+        ;;
+      success)
+        cat > "$PARITY_HARNESS/bin/orch-model-guard-runtime" <<'STUB'
+#!/usr/bin/env bash
+echo dispatch=codex-sparing
+echo 'reason: stub-reason'
+echo stub-warning >&2
+exit 0
+STUB
+        ;;
+    esac
+    parity_guard orch-model-guard lanes > "$PARITY_DIR/legacy.out" 2> "$PARITY_DIR/legacy.err"
+    legacy="$(cat "$PARITY_DIR/legacy.out")"
+    assert_eq "$(wc -l < "$PARITY_DIR/legacy.out")" 4 "$stub_case adapter output shape"
+    if [ "$stub_case" = success ]; then
+      assert_eq "$(printf '%s\n' "$legacy" | head -1)" dispatch=codex-sparing "adapter accepts runtime dispatch"
+      assert_eq "$(printf '%s\n' "$legacy" | sed -n '/^reason: /p')" 'reason: stub-reason' "adapter forwards runtime reason"
+      printf 'stub-warning\n' > "$PARITY_DIR/expected.err"
+      cmp "$PARITY_DIR/legacy.err" "$PARITY_DIR/expected.err" || fail "adapter forwards runtime stderr verbatim"
+    else
+      assert_eq "$(printf '%s\n' "$legacy" | head -1)" dispatch=codex-first "$stub_case adapter fallback dispatch"
+      assert_has "$legacy" "runtime lanes unavailable" "$stub_case adapter fallback reason"
+      assert_eq "$(cat "$PARITY_DIR/legacy.err")" "" "$stub_case adapter discards runtime stderr"
+    fi
+  done
+  mv "$PARITY_DIR/runtime.real" "$PARITY_HARNESS/bin/orch-model-guard-runtime"
+
+  ! grep -q 'LANES_CODEX_SPARE_PCT' "$ROOT/bin/orch-model-guard" || fail "legacy keeps its own rule"
+  ! grep -q 'resolve_codex_pin' "$ROOT/bin/orch-model-guard" || fail "legacy keeps its own rule"
+
   # An incomplete old installation must still support legacy lanes under nounset.
   printf '\nCODEX_PRESSURE_PIN=healthy\nCODEX_PRESSURE_PIN_UNTIL=""\n' >> "$PARITY_HARNESS/budget-policy.conf"
   rm "$PARITY_HARNESS/lib/orch-budget-metrics.sh"
   legacy="$(parity_guard orch-model-guard lanes 2> "$PARITY_DIR/legacy.err")"
-  assert_eq "$(printf '%s\n' "$legacy" | head -1)" dispatch=codex-sparing "missing pin library preserves legacy decision"
+  assert_eq "$(printf '%s\n' "$legacy" | head -1)" dispatch=codex-first "missing runtime library falls back to codex-first"
+  assert_has "$legacy" "runtime lanes unavailable" "missing runtime library reason"
   assert_eq "$(cat "$PARITY_DIR/legacy.err")" "" "missing pin library has no nounset error"
   assert_not_has "$legacy" pinned "missing pin library leaves pin inactive"
 )

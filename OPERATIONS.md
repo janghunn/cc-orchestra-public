@@ -439,7 +439,7 @@ This selects the healthy Codex rows (Astra, Fast on) and keeps dispatch `codex-f
 The hook/compact status shows `codex=healthy(pinned; real=watch, …)`; `budget`, `lanes` and the `route codex` reason also mark the pin and real state, which remains recorded in `budget-state`.
 Only `healthy` is accepted: invalid values warn on stderr and leave routing dynamic.
 `CODEX_PRESSURE_PIN_UNTIL` accepts epoch seconds or an absolute local `YYYY-MM-DD[ HH:MM[:SS]]` date/time; at or after expiry the pin is ignored. Invalid or relative dates warn and leave routing dynamic.
-The legacy repo-path `bin/orch-model-guard lanes` honors the same pin with the same validation.
+The legacy repo-path `bin/orch-model-guard lanes` takes its dispatch decision, including the pin, from runtime `lanes`, so both entry points apply the same rule; it only keeps its own percent display lines.
 Explicit `--model`, `--effort`, `--critical` and `--fast` flags still win.
 The review/verify reserve is gone while pinned; exhausted quota fails at the provider with existing exit-code handling. Missing Astra falls back per `model-policy.conf`.
 No `cc-orch --reload` is needed: the policy is read per invocation and excluded from the policy revision. Set `CODEX_PRESSURE_PIN=""` to restore dynamic routing.

@@ -48,7 +48,7 @@ Codex CLI의 로그인도 확인한다. 자세한 준비와 확인 명령은
 | 세션 목록·상태 | `cc-orch session list` · `cc-orch session status main` |
 | 다시 접속·정지·재시작 | `cc-orch session attach main` · `cc-orch session stop main` · `cc-orch session restart main` |
 | 작업 폴더 찾기 | `cc-orch session path main` |
-| 사용량·모델 배정 상태 | `orch-usage-report --days 1` · `orch-model-guard budget` · `orch-model-guard lanes` |
+| 사용량·모델 배정 상태 | `orch-usage-report --days 1` · `orch-model-guard budget` · `orch-model-guard lanes` (PATH의 `orch-model-guard`는 런타임 래퍼 `bin/orch-model-guard-runtime`) |
 | 작업 기록 보관(아카이브) | `orch-archive` · `orch-archive apply` · `orch-archive verify` |
 
 ### 막혔을 때
