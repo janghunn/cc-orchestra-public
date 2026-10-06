@@ -2970,6 +2970,52 @@ for variant, data, error_name in (
     assert run(name, 'verify', code=1 if expected else 0) == output, variant
 ok(True, 'T5b: noncanonical/malformed manifests keep whole-parse diagnostics; malformed ones check no embedded pointers')
 
+# T5c: every manifest parsing pass authenticates the bytes it actually consumes.
+scan_manifest = archive.scan_manifest
+for layout in ('canonical', 'fallback'):
+    original = (manifest_bytes({'snapshot': 'race'}, [b'null']) if layout == 'canonical'
+                else archive.json_bytes({'entries': [None]}))
+    for replacement_kind, replacement in (
+            ('canonical', manifest_bytes({}, [])),
+            ('indented', archive.json_bytes({'entries': []})),
+            ('same-length', original.replace(b'null', b'true'))):
+        name = f'manifest-swap-{layout}-{replacement_kind}'
+        manifest = manifest_fixture(name, original)
+        manifest_path = home / name / 'raw' / manifest['blob']
+        replacement_path = manifest_path.with_suffix('.replacement')
+        put(replacement_path, gzip.compress(replacement, mtime=0))
+        assert replacement != original
+        if replacement_kind == 'same-length':
+            assert len(replacement) == len(original)
+        swaps = []
+
+        def replace_after_validation(path, visit=None):
+            result = scan_manifest(path, visit)
+            if path == manifest_path and visit is None:
+                replacement_path.replace(path)
+                swaps.append(path)
+            return result
+
+        def replace_before_fallback(path):
+            if path == manifest_path:
+                replacement_path.replace(path)
+                swaps.append(path)
+            return read_bytes(path)
+
+        try:
+            if layout == 'canonical':
+                archive.scan_manifest = replace_after_validation
+            else:
+                Path.read_bytes = replace_before_fallback
+            result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+        finally:
+            archive.scan_manifest = scan_manifest
+            Path.read_bytes = read_bytes
+        assert swaps == [manifest_path], (layout, replacement_kind, swaps)
+        expected = '_meta/catalog.json: raw pointer or file pointer invalid (ValueError)'
+        assert result == ([expected], 0, 0, 1), (layout, replacement_kind, result)
+    ok(True, f'T5c: {layout} manifest replacements between passes fail authentication, including equal-length swaps')
+
 # T5: retain the base whole-decompression error classes and exact CLI diagnostics.
 for variant, error_name in (('truncated', 'EOFError'), ('bad-crc', 'BadGzipFile'), ('trailing', 'BadGzipFile')):
     name = 'verify-' + variant

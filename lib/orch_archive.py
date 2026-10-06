@@ -2442,43 +2442,55 @@ def live_links(fields, body):
     return [re.split(r"[|#]", target, 1)[0] for target in re.findall(r"\[\[([^]\n]+)\]\]", live)]
 
 
-def canonical_manifest_entries(path):
-    """Validate the writer's line layout before returning an entry iterator factory."""
-    def entries():
-        with gzip.open(path, "rb") as stream:
-            line = stream.readline()
-            suffix = b'"entries":[\n'
-            if not line.startswith(b"{") or not line.endswith(suffix):
+def scan_manifest(path, visit=None):
+    """Hash the same bytes used to validate the layout and optionally visit entries."""
+    def entries(read):
+        line = read()
+        suffix = b'"entries":[\n'
+        if not line.startswith(b"{") or not line.endswith(suffix):
+            raise ValueError()
+        prefix = line[:-len(suffix)]
+        if prefix != b"{":
+            if not prefix.endswith(b","):
                 raise ValueError()
-            prefix = line[:-len(suffix)]
-            if prefix != b"{":
-                if not prefix.endswith(b","):
-                    raise ValueError()
-                header = json.loads((prefix[:-1] + b"}").decode("utf-8", "surrogatepass"))
-                if not isinstance(header, dict) or not header or "entries" in header:
-                    raise ValueError()
-            line = stream.readline()
-            if line != b"\n":  # Document adds this blank line when the body is empty.
-                while True:
-                    if not line.endswith(b"\n"):
-                        raise ValueError()
-                    more = line.endswith(b",\n")
-                    value = line[:-2] if more else line[:-1]
-                    # Whole-document json.loads(bytes) also uses UTF-8 with surrogatepass
-                    # for this layout; individual entries must not autodetect UTF-16/32.
-                    yield json.loads(value.decode("utf-8", "surrogatepass"))
-                    if not more:
-                        break
-                    line = stream.readline()
-            if stream.readline() != b"]}\n" or stream.read(1):
+            header = json.loads((prefix[:-1] + b"}").decode("utf-8", "surrogatepass"))
+            if not isinstance(header, dict) or not header or "entries" in header:
                 raise ValueError()
+        line = read()
+        if line != b"\n":  # Document adds this blank line when the body is empty.
+            while True:
+                if not line.endswith(b"\n"):
+                    raise ValueError()
+                more = line.endswith(b",\n")
+                value = line[:-2] if more else line[:-1]
+                # Whole-document json.loads(bytes) also uses UTF-8 with surrogatepass
+                # for this layout; individual entries must not autodetect UTF-16/32.
+                yield json.loads(value.decode("utf-8", "surrogatepass"))
+                if not more:
+                    break
+                line = read()
+        if read() != b"]}\n" or read(1):
+            raise ValueError()
 
-    try:
-        for _ in entries():
+    digest, length, canonical = hashlib.sha256(), 0, True
+    with gzip.open(path, "rb") as stream:
+        def read(size=None):
+            nonlocal length
+            data = stream.readline() if size is None else stream.read(size)
+            digest.update(data)
+            length += len(data)
+            return data
+
+        try:
+            for entry in entries(read):
+                if visit is not None:
+                    visit(entry)
+        except ValueError:
+            canonical = False
+        # Even a layout failure must authenticate the complete stream and its gzip trailer.
+        while read(1024 * 1024):
             pass
-    except ValueError:
-        return None
-    return entries
+    return digest.hexdigest(), length, canonical
 
 
 def verify_problems(vault, raw):
@@ -2505,23 +2517,32 @@ def verify_problems(vault, raw):
             if key in checked:
                 return
             checked.add(key)
-            digest, length = stream_digest(base / rel, is_raw)
+            is_manifest = is_raw and (rel, pointer["sha256"]) in manifest_blobs
+            if is_manifest:
+                digest, length, canonical = scan_manifest(base / rel)
+            else:
+                digest, length = stream_digest(base / rel, is_raw)
             if is_raw:
                 pointers += 1
             if digest != pointer["sha256"] or (is_raw and length != pointer["length"]):
                 raise ValueError("hash or length mismatch")
-            if is_raw and (rel, pointer["sha256"]) in manifest_blobs:
-                read_entries = canonical_manifest_entries(base / rel)
-                if read_entries is None:
-                    data = gzip.decompress((base / rel).read_bytes())
-                    manifest = json.loads(data)
-                    entries = (manifest.get("entries", []),) if isinstance(manifest, dict) else ()
-                else:
-                    entries = read_entries()
-                for entry in entries:
+            if is_manifest:
+                def check_entry(entry):
                     for embedded in pointer_values(entry):
                         if "blob" in embedded:
                             check_pointer(embedded, f"{context}: manifest {rel}")
+
+                if canonical:
+                    digest, length, _ = scan_manifest(base / rel, check_entry)
+                    if digest != pointer["sha256"] or length != pointer["length"]:
+                        raise ValueError("hash or length mismatch")
+                else:
+                    data = gzip.decompress((base / rel).read_bytes())
+                    if sha(data) != pointer["sha256"] or len(data) != pointer["length"]:
+                        raise ValueError("hash or length mismatch")
+                    manifest = json.loads(data)
+                    if isinstance(manifest, dict):
+                        check_entry(manifest.get("entries", []))
         except (OSError, ValueError, EOFError, KeyError, TypeError, zlib.error) as error:
             problems.append(f"{context}: raw pointer or file pointer invalid ({type(error).__name__})")
 
