@@ -2367,6 +2367,7 @@ def bounded_rejected(dest, source, reason, host='bee', *options, limit=60, code=
     with (home / dest / 'raw/.lock').open('r+b') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lock, fcntl.LOCK_UN)
+    return result
 
 import socket
 
@@ -2739,6 +2740,328 @@ imported('interrupted-refresh', 'bee2', 'bee', '--refresh', '--no-commit')
 replaced = catalog('interrupted-refresh')['hosts']['bee']['replaced']
 ok(all(item in replaced for item in journal_entries) and verified('interrupted-refresh'),
    'R9: listing and recovery journal precede overwrites; retry retains every interrupted-run recovery pointer')
+
+# T1/T2: unreadable raw directories and regular files fail in the source preflight.
+for location in ('blobs', 'shard', 'sources', 'history', 'blob'):
+    source = clone('bee', 'unreadable-' + location)
+    root = home / source / 'raw'
+    path = (next((root / 'blobs').iterdir()) if location == 'shard' else
+            next((root / 'sources').glob('*.json')) if location == 'history' else
+            next((root / 'blobs').glob('*/*.gz')) if location == 'blob' else root / location)
+    directory, mode = path.is_dir(), stat.S_IMODE(path.stat().st_mode)
+    try:
+        path.chmod(0)
+        readable = os.access(path, os.R_OK)
+        try:
+            if directory:
+                os.listdir(path)
+            else:
+                with path.open('rb') as stream:
+                    stream.read(1)
+            readable = True
+        except PermissionError:
+            pass
+        if readable:
+            note = f'T1/T2 unreadable {location}: permission bits are bypassed'
+            skipped.append(note)
+            print(f'skip - {note}', flush=True)
+            continue
+        result = bounded_rejected('reject', source, 'not-regular')
+        assert 'PermissionError' not in result.stderr, result.stderr
+        assert {item['reason'] for item in report(result.stdout)['rejected']['items']} == {'not-regular'}
+        ok(True, f'T1/T2: unreadable {location} exits 4 not-regular without writes or a held lock')
+    finally:
+        path.chmod(mode)
+source = clone('bee', 'readable-source')
+clone('original', 'after-unreadable')
+imported('after-unreadable', source, 'bee')
+ok(verified('after-unreadable'), 'T1: a normal import verifies after unreadable-source refusals')
+
+# T3/T3b: inject changes after preparation, or simulate an unrecorded new blob.
+swap_code = '''
+import os
+import sys
+sys.path.insert(0, sys.argv[1])
+import orch_archive as archive
+variant = sys.argv[2]
+prepare = archive.Importer.prepare
+preflight = archive.Importer.reject_special_sources
+def wrapped_prepare(self):
+    prepare(self)
+    assert not self.rejected and self.new_blobs
+    if variant == 'changed':
+        digest = self.new_blobs[0]
+        path = self.src_raw / f'blobs/{digest[:2]}/{digest}.gz'
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1000000000))
+def wrapped_preflight(self):
+    preflight(self)
+    if variant == 'unrecorded':
+        path = next(path for path in sorted((self.src_raw / 'blobs').glob('*/*.gz'))
+                    if not (self.raw / path.relative_to(self.src_raw)).exists())
+        self.source_identity.pop(str(path))
+archive.Importer.prepare = wrapped_prepare
+archive.Importer.reject_special_sources = wrapped_preflight
+sys.exit(archive.main(sys.argv[3:]))
+'''
+for variant in ('unchanged', 'changed', 'unrecorded'):
+    source = clone('bee', 'swap-source-' + variant)
+    dest = clone('original', 'swap-dest-' + variant)
+    before = state(dest, git=True)
+    result = subprocess.run(
+        ['python3', '-B', '-c', swap_code, str(repo / 'lib'), variant,
+         'import', '--host', 'bee', '--source-vault', str(home / source / 'vault'),
+         '--source-raw', str(home / source / 'raw'), '--no-commit', '--json'],
+        env=environment(dest), text=True, capture_output=True, timeout=60)
+    assert result.returncode == (0 if variant == 'unchanged' else 4), (result.stdout, result.stderr)
+    if variant == 'unchanged':
+        assert verified(dest)
+    else:
+        assert result.stderr == 'import: 1 source files changed during import; nothing written\n', result.stderr
+        assert state(dest, git=True) == before
+    with (home / dest / 'raw/.lock').open('r+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    ok(True, f'T3/T3b: {variant} source identity check preserves destination and releases the lock')
+
+# T4: both pointer hashing and generation reconstruction use bounded reads.
+name = 'stream-verify'
+payload = b'bounded archive verification\n' * 320000
+assert len(payload) > 8 * 1024 * 1024
+pointer = add_blob(name, payload)
+large_blob = home / name / 'raw' / pointer['blob']
+large_file = home / name / 'vault/artifacts/large.txt'
+put(large_file, payload)
+manifest = add_blob(name, archive.json_bytes({'entries': [pointer]}))
+save_catalog(name, {'version': 1, 'tasks': {}, 'projects': {'stream': {'manifests': [manifest]}},
+                    'generated': ['_meta/catalog.json'], 'payload': pointer,
+                    'file': {'path': 'artifacts/large.txt', 'sha256': pointer['sha256']}})
+put(home / name / ('raw/sources/' + 'a' * 24 + '.json'), archive.json_bytes({'generations': [{
+    'chunks': [dict(pointer, offset=0)], 'prefix_sha256': pointer['sha256'],
+    'tail': None, 'size_seen': len(payload)}]}))
+decompress, read_bytes, gzip_read = gzip.decompress, Path.read_bytes, gzip.GzipFile.read
+decompressed_sizes, read_paths, gzip_sizes = [], [], []
+def tracked_decompress(data):
+    result = decompress(data)
+    decompressed_sizes.append(len(result))
+    return result
+def tracked_read_bytes(path):
+    read_paths.append(path)
+    return read_bytes(path)
+def tracked_gzip_read(stream, size=-1):
+    gzip_sizes.append(size)
+    return gzip_read(stream, size)
+try:
+    gzip.decompress = tracked_decompress
+    Path.read_bytes = tracked_read_bytes
+    gzip.GzipFile.read = tracked_gzip_read
+    result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+finally:
+    gzip.decompress, Path.read_bytes, gzip.GzipFile.read = decompress, read_bytes, gzip_read
+assert result == ([], 0, 0, 2), result
+assert gzip_sizes and all(0 < size <= 1024 * 1024 for size in gzip_sizes), gzip_sizes
+assert decompressed_sizes and max(decompressed_sizes) <= 1024 * 1024, decompressed_sizes
+assert large_blob not in read_paths and large_file not in read_paths, read_paths
+ok(True, 'T4: large blob/file pointers and raw generations stream in at most 1 MiB reads; manifests still parse')
+
+# T4b: the real manifest writer's large, line-oriented output never needs a whole read.
+def manifest_bytes(header, entry_lines):
+    output = io.BytesIO()
+    archive.Archive.manifest(header, {'body': b',\n'.join(entry_lines)})(output)
+    return output.getvalue()
+
+def manifest_fixture(name, data):
+    manifest = add_blob(name, data)
+    save_catalog(name, {'version': 1, 'projects': {},
+                        'tasks': {'sample': {'snapshots': {'sample': {'manifest': manifest}}}},
+                        'generated': ['_meta/catalog.json']})
+    return manifest
+
+name = 'manifest-stream'
+embedded = add_blob(name, b'embedded manifest content\n')
+padding = archive.json_bytes({'kind': 'checkpoint', 'relpath': 'nested/' + 'x' * 192}, compact=True).rstrip(b'\n')
+data = manifest_bytes({'snapshot': 'sample', 'version': 1},
+                      [padding] * 20000 + [archive.json_bytes({'raw': [embedded]}, compact=True).rstrip(b'\n')])
+assert len(data) > 4 * 1024 * 1024
+manifest = manifest_fixture(name, data)
+manifest_path = home / name / 'raw' / manifest['blob']
+decompressed_sizes.clear()
+read_paths.clear()
+gzip_sizes.clear()
+try:
+    gzip.decompress = tracked_decompress
+    Path.read_bytes = tracked_read_bytes
+    gzip.GzipFile.read = tracked_gzip_read
+    result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+finally:
+    gzip.decompress, Path.read_bytes, gzip.GzipFile.read = decompress, read_bytes, gzip_read
+assert result == ([], 0, 0, 2), result
+assert not decompressed_sizes or max(decompressed_sizes) <= 1024 * 1024, decompressed_sizes
+assert manifest_path not in read_paths, read_paths
+assert gzip_sizes and all(0 < size <= 1024 * 1024 for size in gzip_sizes), gzip_sizes
+ok(True, 'T4b: a writer-generated manifest over 4 MiB streams without whole reads and checks embedded pointers')
+
+name = clone(name, 'manifest-stream-broken')
+put(home / name / 'raw' / embedded['blob'], gzip.compress(b'changed embedded content\n', mtime=0))
+expected = f'_meta/catalog.json: manifest {manifest["blob"]}: raw pointer or file pointer invalid (ValueError)'
+assert run(name, 'verify', code=1) == expected + '\n'
+assert archive.verify_problems(home / name / 'vault', home / name / 'raw') == ([expected], 0, 0, 2)
+ok(True, 'T4c: a corrupt embedded blob keeps the exact manifest-context diagnostic and pointer count')
+
+assert manifest_bytes({}, []) == b'{"entries":[\n\n]}\n'
+for variant, header, lines in (('empty', {}, []), ('empty-with-header', {'snapshot': 'empty'}, []),
+                               ('values', {}, [b'null', b'false', b'42', b'NaN', b'"\xed\xa0\x80"', b'[1,{"x":2}]'])):
+    name = 'manifest-' + variant
+    manifest = manifest_fixture(name, manifest_bytes(header, lines))
+    read_paths.clear()
+    try:
+        Path.read_bytes = tracked_read_bytes
+        result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+    finally:
+        Path.read_bytes = read_bytes
+    assert result == ([], 0, 0, 1), (variant, result)
+    assert home / name / 'raw' / manifest['blob'] not in read_paths
+ok(True, 'T4d: empty writer manifests and UTF-8 surrogatepass/scalar entries stream with unchanged counts')
+
+# T5b: malformed manifests must finish parsing before any embedded pointer is checked.
+missing = {'blob': 'blobs/00/' + '0' * 64 + '.gz', 'sha256': '0' * 64, 'length': 1}
+missing_line = archive.json_bytes({'raw': [missing]}, compact=True).rstrip(b'\n')
+one_entry = manifest_bytes({}, [missing_line])
+for variant, data, error_name in (
+        ('indented', archive.json_bytes({'entries': [missing]}), 'FileNotFoundError'),
+        ('compact', archive.json_bytes({'entries': [missing]}, compact=True), 'FileNotFoundError'),
+        ('trailing-space', one_entry + b' ', 'FileNotFoundError'),
+        ('utf16', archive.json_bytes({'entries': [missing]}).decode().encode('utf-16'), 'FileNotFoundError'),
+        ('entries-object', archive.json_bytes({'entries': missing}), 'FileNotFoundError'),
+        ('header-entries', manifest_bytes({'entries': [missing]}, []), None),
+        ('non-object', b'[]\n', None),
+        ('trailing-junk', one_entry + b'junk\n', 'JSONDecodeError'),
+        ('truncated-last-line', one_entry[:-2], 'JSONDecodeError'),
+        ('late-invalid-entry', manifest_bytes({}, [missing_line, b'{"unfinished":']), 'JSONDecodeError'),
+        ('missing-separator', manifest_bytes({}, [missing_line, b'{}']).replace(b',\n', b'\n', 1), 'JSONDecodeError'),
+        ('empty-header-comma', b'{,"entries":[\n\n]}\n', 'JSONDecodeError'),
+        ('entry-utf16', manifest_bytes({}, [missing_line, '{"x":1}'.encode('utf-16le')]), 'JSONDecodeError'),
+        ('late-invalid-utf8', manifest_bytes({}, [missing_line, b'"\xff"']), 'UnicodeDecodeError')):
+    name = 'manifest-fallback-' + variant
+    manifest = manifest_fixture(name, data)
+    try:
+        whole = json.loads(data)
+    except (ValueError, UnicodeError) as error:
+        assert type(error).__name__ == error_name, (variant, error)
+    else:
+        assert error_name in (None, 'FileNotFoundError'), variant
+        if error_name == 'FileNotFoundError':
+            assert list(archive.pointer_values(whole['entries'])) == [missing]
+        else:
+            assert not isinstance(whole, dict) or whole['entries'] == []
+    context = '_meta/catalog.json'
+    if error_name == 'FileNotFoundError':
+        context += f': manifest {manifest["blob"]}'
+    expected = [f'{context}: raw pointer or file pointer invalid ({error_name})'] if error_name else []
+    read_paths.clear()
+    try:
+        Path.read_bytes = tracked_read_bytes
+        result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+    finally:
+        Path.read_bytes = read_bytes
+    assert result == (expected, 0, 0, 1), (variant, result)
+    assert home / name / 'raw' / manifest['blob'] in read_paths, variant
+    output = '\n'.join(expected) + '\n' if expected else 'verify: OK (0 notes, 0 links, 1 raw pointers)\n'
+    assert run(name, 'verify', code=1 if expected else 0) == output, variant
+ok(True, 'T5b: noncanonical/malformed manifests keep whole-parse diagnostics; malformed ones check no embedded pointers')
+
+# T5c: every manifest parsing pass authenticates the bytes it actually consumes.
+scan_manifest = archive.scan_manifest
+for layout in ('canonical', 'fallback'):
+    original = (manifest_bytes({'snapshot': 'race'}, [b'null']) if layout == 'canonical'
+                else archive.json_bytes({'entries': [None]}))
+    for replacement_kind, replacement in (
+            ('canonical', manifest_bytes({}, [])),
+            ('indented', archive.json_bytes({'entries': []})),
+            ('same-length', original.replace(b'null', b'true'))):
+        name = f'manifest-swap-{layout}-{replacement_kind}'
+        manifest = manifest_fixture(name, original)
+        manifest_path = home / name / 'raw' / manifest['blob']
+        replacement_path = manifest_path.with_suffix('.replacement')
+        put(replacement_path, gzip.compress(replacement, mtime=0))
+        assert replacement != original
+        if replacement_kind == 'same-length':
+            assert len(replacement) == len(original)
+        swaps = []
+
+        def replace_after_validation(path, visit=None):
+            result = scan_manifest(path, visit)
+            if path == manifest_path and visit is None:
+                replacement_path.replace(path)
+                swaps.append(path)
+            return result
+
+        def replace_before_fallback(path):
+            if path == manifest_path:
+                replacement_path.replace(path)
+                swaps.append(path)
+            return read_bytes(path)
+
+        try:
+            if layout == 'canonical':
+                archive.scan_manifest = replace_after_validation
+            else:
+                Path.read_bytes = replace_before_fallback
+            result = archive.verify_problems(home / name / 'vault', home / name / 'raw')
+        finally:
+            archive.scan_manifest = scan_manifest
+            Path.read_bytes = read_bytes
+        assert swaps == [manifest_path], (layout, replacement_kind, swaps)
+        expected = '_meta/catalog.json: raw pointer or file pointer invalid (ValueError)'
+        assert result == ([expected], 0, 0, 1), (layout, replacement_kind, result)
+    ok(True, f'T5c: {layout} manifest replacements between passes fail authentication, including equal-length swaps')
+
+# T5: retain the base whole-decompression error classes and exact CLI diagnostics.
+for variant, error_name in (('truncated', 'EOFError'), ('bad-crc', 'BadGzipFile'), ('trailing', 'BadGzipFile')):
+    name = 'verify-' + variant
+    pointer = add_blob(name, b'archive verification corruption fixture\n')
+    path = home / name / 'raw' / pointer['blob']
+    packed = path.read_bytes()
+    if variant == 'truncated':
+        packed = packed[:-1]
+    elif variant == 'bad-crc':
+        packed = packed[:-8] + bytes([packed[-8] ^ 1]) + packed[-7:]
+    else:
+        packed += b'trailing garbage'
+    put(path, packed)
+    save_catalog(name, {'version': 1, 'tasks': {}, 'projects': {},
+                        'generated': ['_meta/catalog.json'], 'payload': pointer})
+    try:
+        gzip.decompress(packed)
+    except (EOFError, gzip.BadGzipFile) as error:
+        assert type(error).__name__ == error_name
+    else:
+        raise AssertionError('base decompression accepted corrupt gzip')
+    expected = f'_meta/catalog.json: raw pointer or file pointer invalid ({error_name})'
+    assert run(name, 'verify', code=1) == expected + '\n'
+    assert archive.verify_problems(home / name / 'vault', home / name / 'raw') == ([expected], 0, 0, 0)
+    ok(True, f'T5: {variant} blob keeps the exact {error_name} verify diagnostic and pointer count')
+
+# T6/T6b: full ids win, while ambiguous short ids list every match across kinds.
+dest = clone('original', 'show-merged')
+imported(dest, 'bee')
+for identifier, rel in (('demo--01-shared', 'tasks/demo--01-shared.md'),
+                        ('bee--demo--01-shared', 'tasks/bee--demo--01-shared.md'),
+                        ('demo--02-bee-only', 'tasks/bee--demo--02-bee-only.md')):
+    result = subprocess.run([str(command), 'show', identifier], env=environment(dest), capture_output=True)
+    assert result.returncode == 0 and not result.stderr, (result.returncode, result.stderr)
+    assert result.stdout == (home / dest / 'vault' / rel).read_bytes()
+imported(dest, 'bee', 'zed')
+assert run(dest, 'show', 'demo--02-bee-only', code=1) == (
+    'show: ambiguous id; matching ids:\ntasks/bee--demo--02-bee-only\ntasks/zed--demo--02-bee-only\n')
+assert run(dest, 'show', 'unknown-id', code=1) == 'show: unknown or ambiguous id\n'
+ok(True, 'T6: exact/unique show bytes stay identical; ambiguous short ids list sorted matches; unknown stays unchanged')
+dest = clone(dest, 'show-cross-kind')
+for rel in ('projects/collision.md', 'models/collision.md', 'tasks/h--collision.md'):
+    put(home / dest / 'vault' / rel, '# Collision\n')
+assert run(dest, 'show', 'collision', code=1) == (
+    'show: ambiguous id; matching ids:\nmodels/collision\nprojects/collision\ntasks/h--collision\n')
+ok(True, 'T6b: multiple exact show matches also list every task-suffix match')
 
 # Syntax checks keep caches in the fixture home.
 subprocess.run(['bash', '-n', str(repo / 'tests/test-archive.sh')], check=True)

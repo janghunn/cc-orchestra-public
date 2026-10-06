@@ -74,6 +74,15 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def stream_digest(path, compressed):
+    digest, length = hashlib.sha256(), 0
+    with (gzip.open(path, "rb") if compressed else open(path, "rb")) as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            length += len(chunk)
+    return digest.hexdigest(), length
+
+
 def json_bytes(value, compact=False):
     options = {"separators": (",", ":")} if compact else {"indent": 2}
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, **options) + "\n").encode()
@@ -2433,6 +2442,57 @@ def live_links(fields, body):
     return [re.split(r"[|#]", target, 1)[0] for target in re.findall(r"\[\[([^]\n]+)\]\]", live)]
 
 
+def scan_manifest(path, visit=None):
+    """Hash the same bytes used to validate the layout and optionally visit entries."""
+    def entries(read):
+        line = read()
+        suffix = b'"entries":[\n'
+        if not line.startswith(b"{") or not line.endswith(suffix):
+            raise ValueError()
+        prefix = line[:-len(suffix)]
+        if prefix != b"{":
+            if not prefix.endswith(b","):
+                raise ValueError()
+            header = json.loads((prefix[:-1] + b"}").decode("utf-8", "surrogatepass"))
+            if not isinstance(header, dict) or not header or "entries" in header:
+                raise ValueError()
+        line = read()
+        if line != b"\n":  # Document adds this blank line when the body is empty.
+            while True:
+                if not line.endswith(b"\n"):
+                    raise ValueError()
+                more = line.endswith(b",\n")
+                value = line[:-2] if more else line[:-1]
+                # Whole-document json.loads(bytes) also uses UTF-8 with surrogatepass
+                # for this layout; individual entries must not autodetect UTF-16/32.
+                yield json.loads(value.decode("utf-8", "surrogatepass"))
+                if not more:
+                    break
+                line = read()
+        if read() != b"]}\n" or read(1):
+            raise ValueError()
+
+    digest, length, canonical = hashlib.sha256(), 0, True
+    with gzip.open(path, "rb") as stream:
+        def read(size=None):
+            nonlocal length
+            data = stream.readline() if size is None else stream.read(size)
+            digest.update(data)
+            length += len(data)
+            return data
+
+        try:
+            for entry in entries(read):
+                if visit is not None:
+                    visit(entry)
+        except ValueError:
+            canonical = False
+        # Even a layout failure must authenticate the complete stream and its gzip trailer.
+        while read(1024 * 1024):
+            pass
+    return digest.hexdigest(), length, canonical
+
+
 def verify_problems(vault, raw):
     problems, links, pointers, notes = [], 0, 0, 0
     try:
@@ -2457,18 +2517,32 @@ def verify_problems(vault, raw):
             if key in checked:
                 return
             checked.add(key)
-            data = (base / rel).read_bytes()
+            is_manifest = is_raw and (rel, pointer["sha256"]) in manifest_blobs
+            if is_manifest:
+                digest, length, canonical = scan_manifest(base / rel)
+            else:
+                digest, length = stream_digest(base / rel, is_raw)
             if is_raw:
-                data = gzip.decompress(data)
                 pointers += 1
-            if sha(data) != pointer["sha256"] or (is_raw and len(data) != pointer["length"]):
+            if digest != pointer["sha256"] or (is_raw and length != pointer["length"]):
                 raise ValueError("hash or length mismatch")
-            if is_raw and (rel, pointer["sha256"]) in manifest_blobs:
-                manifest = json.loads(data)
-                if isinstance(manifest, dict):
-                    for embedded in pointer_values(manifest.get("entries", [])):
+            if is_manifest:
+                def check_entry(entry):
+                    for embedded in pointer_values(entry):
                         if "blob" in embedded:
                             check_pointer(embedded, f"{context}: manifest {rel}")
+
+                if canonical:
+                    digest, length, _ = scan_manifest(base / rel, check_entry)
+                    if digest != pointer["sha256"] or length != pointer["length"]:
+                        raise ValueError("hash or length mismatch")
+                else:
+                    data = gzip.decompress((base / rel).read_bytes())
+                    if sha(data) != pointer["sha256"] or len(data) != pointer["length"]:
+                        raise ValueError("hash or length mismatch")
+                    manifest = json.loads(data)
+                    if isinstance(manifest, dict):
+                        check_entry(manifest.get("entries", []))
         except (OSError, ValueError, EOFError, KeyError, TypeError, zlib.error) as error:
             problems.append(f"{context}: raw pointer or file pointer invalid ({type(error).__name__})")
 
@@ -2520,7 +2594,9 @@ def verify_problems(vault, raw):
                         if pointer["offset"] != offset:
                             problems.append(f"{path.name}: non-contiguous chunks")
                         offset += pointer["length"]
-                        digest.update(gzip.decompress((raw / pointer["blob"]).read_bytes()))
+                        with gzip.open(raw / pointer["blob"], "rb") as stream:
+                            while chunk := stream.read(1024 * 1024):
+                                digest.update(chunk)
                     if digest.hexdigest() != generation["prefix_sha256"]:
                         problems.append(f"{path.name}: prefix hash mismatch")
                     tail = generation.get("tail")
@@ -2594,7 +2670,12 @@ class Importer:
         self.journal_rel = f"hosts/{self.host}/replaced.json"
         self.models = set()
         self.artifacts_withheld = self.artifacts_unverified = 0
-        self.cat_bytes = (self.src_vault / "_meta/catalog.json").read_bytes()
+        self.preflight_failed = False
+        catalog_path = self.src_vault / "_meta/catalog.json"
+        st = os.lstat(catalog_path)
+        self.source_identity = {str(catalog_path): (st.st_dev, st.st_ino, st.st_size,
+                                                   st.st_mtime_ns, st.st_ctime_ns, st.st_mode)}
+        self.cat_bytes = catalog_path.read_bytes()
         try:
             self.incoming = json.loads(self.cat_bytes)
         except ValueError:
@@ -2711,12 +2792,7 @@ class Importer:
 
     @staticmethod
     def blob_identity(path):
-        digest, length = hashlib.sha256(), 0
-        with gzip.open(path, "rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-                length += len(chunk)
-        return digest.hexdigest(), length
+        return stream_digest(path, True)
 
     def local_blob(self, digest, expected_length=None):
         if digest in self.local_blobs_checked:
@@ -2749,8 +2825,14 @@ class Importer:
                 for name in sorted(dirnames + filenames):
                     path = Path(directory) / name
                     try:
-                        mode = os.lstat(path).st_mode
-                        if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+                        st = os.lstat(path)
+                        if stat.S_ISDIR(st.st_mode):
+                            continue
+                        if stat.S_ISREG(st.st_mode):
+                            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                            os.close(fd)
+                            self.source_identity.setdefault(str(path), (st.st_dev, st.st_ino, st.st_size,
+                                                                       st.st_mtime_ns, st.st_ctime_ns, st.st_mode))
                             continue
                     except OSError:
                         pass
@@ -2767,6 +2849,10 @@ class Importer:
                     self.reject("source-verify", f"{path.relative_to(self.src_raw)}: blob pointer outside blobs/")
 
     def scan_raw(self):
+        self.reject_special_sources()
+        if any(item["reason"] == "not-regular" for item in self.rejected):
+            self.preflight_failed = True
+            return
         blob_root = self.src_raw / "blobs"
         if blob_root.exists():
             if blob_root.is_symlink() or not blob_root.is_dir():
@@ -2831,7 +2917,6 @@ class Importer:
                     target = self.unchanged_destination(self.raw, rel, data)
                     if target is not None and (not target.exists() or target.read_bytes() != data):
                         self.new_sources.append(path.name)
-        self.reject_special_sources()
         if not self.rejected:
             self.reject_escaping_histories()
         if not self.rejected:
@@ -3450,6 +3535,8 @@ class Importer:
             return
         self.map_ids()
         self.scan_raw()
+        if self.preflight_failed:
+            return
         self.validate_raw_pointers()
         self.build_records()
         # Invalid raw data cannot safely supply artifact manifests.
@@ -3466,7 +3553,24 @@ class Importer:
         if not self.rejected:
             self.validate_merged()
 
+    def changed_sources(self):
+        changed = set()
+        for path, identity in self.source_identity.items():
+            try:
+                st = os.lstat(path)
+                if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode) != identity:
+                    changed.add(path)
+            except OSError:
+                changed.add(path)
+        copied = {str(self.src_raw / f"blobs/{digest[:2]}/{digest}.gz") for digest in self.new_blobs}
+        copied.update(str(path) for rel, (path, _, _) in self.artifacts.items() if rel not in self.files)
+        changed.update(copied - self.source_identity.keys())
+        return sorted(changed)
+
     def write(self):
+        changed = self.changed_sources()
+        if changed:
+            raise ArchiveError(f"import: {len(changed)} source files changed during import; nothing written", 4)
         if not (self.new_files or self.changed_files or self.new_blobs or self.pending_blobs or self.new_sources):
             return 0, "none"
         # Inventory and recovery blobs, then the journal, precede every overwrite.
@@ -3585,11 +3689,20 @@ def show(policy, identifier):
             if entry.is_file(follow_symlinks=False) and entry.name.endswith(".md"):
                 name = Path(entry.name).stem
                 if name == identifier or (kind == "tasks" and name.split("--", 1)[-1] == identifier):
-                    matches.append(Path(entry.path))
-    if len(matches) != 1:
+                    matches.append((kind, name, Path(entry.path)))
+    exact = [entry for entry in matches if entry[1] == identifier]
+    if len(exact) == 1:
+        print(exact[0][2].read_text(), end="")
+        return 0
+    if not matches:
         print("show: unknown or ambiguous id")
         return 1
-    print(matches[0].read_text(), end="")
+    if len(matches) > 1:
+        print("show: ambiguous id; matching ids:")
+        for kind, name, _ in sorted(matches):
+            print(f"{kind}/{name}")
+        return 1
+    print(matches[0][2].read_text(), end="")
     return 0
 
 
