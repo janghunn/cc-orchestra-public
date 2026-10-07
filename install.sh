@@ -102,6 +102,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 link() { # link <source> <dest>
   local src="$1" dest="$2"
   if [[ "$DRY_RUN" == 1 ]]; then
+    dest="$(plan_path "$dest")"
     if [[ -L "$dest" ]]; then
       local current; current="$(readlink -f "$dest" || readlink "$dest")"
       if [[ "$current" == "$(readlink -f "$src")" ]]; then
@@ -589,10 +590,15 @@ ensure_provider_auth() {
 # Dry-run helpers only inspect install targets. The roster builder is confined to disposable storage.
 plan() { printf '%-20s %s\n' "$1" "$2"; }
 
+plan_path() { python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$1"; }
+
 declare -A PLANNED_DIRS=()
 plan_dir() {
-  local dir="${1%/}"
-  [[ -n "$dir" ]] || dir=/
+  local dir; dir="$(plan_path "$1")"
+  if [[ ! -d "$dir" && ( -e "$dir" || -L "$dir" ) ]]; then
+    plan error "$dir (exists and is not a directory; the install would stop here)"
+    exit 1
+  fi
   [[ -z "${PLANNED_DIRS[$dir]:-}" ]] || return 0
   if [[ -d "$dir" ]]; then
     plan unchanged "${dir%/}/"
@@ -613,13 +619,14 @@ import glob, json, os, pathlib, shutil, stat, subprocess, sys, tempfile
 repo, bin_dir, claude, poll = sys.argv[1:]
 # Guard facades resolve their own script path; the installer and roster keep the logical path.
 guard_repo = os.path.realpath(repo)
+bin_dir = os.path.abspath(bin_dir)
 home = os.environ['HOME']
-agents = os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents'
-manifest = os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json'
-state = os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state'
-units = os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user'
-h = home + '/.claude/settings.json'
-s = os.environ.get('CC_ORCH_SETTINGS') or h
+agents = os.path.abspath(os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents')
+manifest = os.path.abspath(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json')
+state = os.path.abspath(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state')
+units = os.path.abspath(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user')
+h = os.path.abspath(home + '/.claude/settings.json')
+s = os.path.abspath(os.environ.get('CC_ORCH_SETTINGS') or h)
 
 def plan(action, detail):
     print(f'{action:20s} {detail}', flush=True)
@@ -632,6 +639,9 @@ remember(home + '/.claude/agents')
 remember(bin_dir)
 def plan_dir(path):
     path = os.path.abspath(path)
+    if os.path.lexists(path) and not os.path.isdir(path):
+        plan('error', path + ' (exists and is not a directory; the install would stop here)')
+        raise SystemExit(1)
     if path in planned:
         return
     if os.path.isdir(path):
@@ -716,6 +726,7 @@ else:
         plan('generate-profiles', f'{agents}/ ({len(profiles)} profiles: {counts["create"]} create, '
              f'{counts["replace"]} replace, {counts["unchanged"]} unchanged; {leads} lead-*.md and '
              'the manifest use the current guard state — state-dependent)')
+        # The builder records absolute destinations even when overrides were relative.
         # Manifest paths are JSON escaped by the real builder.
         data = pathlib.Path(scratch_manifest).read_text()
         for old, new in ((scratch_manifest, manifest), (scratch_agents, agents)):
@@ -758,13 +769,15 @@ dry_run_settings() {
 import copy, json, os, pathlib, sys
 repo, bin_dir, claude, refresh = sys.argv[1:]
 guard_repo = os.path.realpath(repo)
+bin_dir = os.path.abspath(bin_dir)
 home = os.environ['HOME']
 h = os.path.abspath(home + '/.claude/settings.json')
-s = os.path.abspath(os.environ.get('CC_ORCH_SETTINGS') or h)
-state = os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state'
-agents = os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents'
-manifest = os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json'
-units = os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user'
+raw_settings = os.environ.get('CC_ORCH_SETTINGS') or h
+s = os.path.abspath(raw_settings)
+state = os.path.abspath(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state')
+agents = os.path.abspath(os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents')
+manifest = os.path.abspath(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json')
+units = os.path.abspath(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user')
 settings = {}
 created = set()
 planned_dirs = set()
@@ -783,6 +796,10 @@ def plan(action, detail):
     print(f'{action:20s} {detail}')
 
 def plan_dir(path):
+    path = os.path.abspath(path)
+    if os.path.lexists(path) and not os.path.isdir(path):
+        plan('error', path + ' (exists and is not a directory; the install would stop here)')
+        raise SystemExit(1)
     if os.path.realpath(path) in planned_dirs or os.path.isdir(path):
         return
     plan_dir(os.path.dirname(path))
@@ -829,20 +846,24 @@ try:
                 if other:
                     detail += f' (WARNING: removed entries also carried {other} other hook(s))'
             plan('merge-json', f'{s} hooks.UserPromptSubmit: {action} orch-model-notice.sh{detail}; keep {len(kept)} other UserPromptSubmit entries')
-    create(s)
-    cur = current.get('statusLine')
-    ours = isinstance(cur, dict) and 'orch-statusline.sh' in str(cur.get('command', ''))
-    replacement = dict(cur) if isinstance(cur, dict) else {}
-    replacement.update(type='command', command='bash ' + repr(guard_repo + '/hooks/orch-statusline.sh'))
-    replacement.setdefault('refreshInterval', int(refresh))
-    detail = 'unchanged (already orch-statusline.sh)' if replacement == cur else 'replace ' + str(cur.get('command', 'none') if isinstance(cur, dict) else 'none')
-    previous = state + '/statusline.previous.json'
-    if not ours:
-        detail += f' (previous saved to {previous})'
-    plan('merge-json', s + ' statusLine: ' + detail)
-    if not ours:
-        plan('replace' if os.path.lexists(previous) else 'create', previous)
-    current['statusLine'] = replacement
+    if not os.path.dirname(raw_settings):
+        # register_statusline calls makedirs(dirname(raw_settings)); the facade continues on failure.
+        plan('merge-json', s + ' statusLine: unchanged (settings path has no parent component; registration fails before writing)')
+    else:
+        create(s)
+        cur = current.get('statusLine')
+        ours = isinstance(cur, dict) and 'orch-statusline.sh' in str(cur.get('command', ''))
+        replacement = dict(cur) if isinstance(cur, dict) else {}
+        replacement.update(type='command', command='bash ' + repr(guard_repo + '/hooks/orch-statusline.sh'))
+        replacement.setdefault('refreshInterval', int(refresh))
+        detail = 'unchanged (already orch-statusline.sh)' if replacement == cur else 'replace ' + str(cur.get('command', 'none') if isinstance(cur, dict) else 'none')
+        previous = state + '/statusline.previous.json'
+        if not ours:
+            detail += f' (previous saved to {previous})'
+        plan('merge-json', s + ' statusLine: ' + detail)
+        if not ours:
+            plan('replace' if os.path.lexists(previous) else 'create', previous)
+        current['statusLine'] = replacement
     path = h
     current = load(h)
     create(h)
@@ -855,6 +876,8 @@ try:
     if not found:
         entries.append({'hooks': [{'type': 'command', 'command': command}]})
     plan('merge-json', h + ' hooks.UserPromptSubmit: ' + ('unchanged' if found else 'add') + ' orch-runtime-context.sh')
+    # Safety repair uses an absolute path and can create S even if guard registration failed.
+    create(s)
 except (OSError, ValueError, AttributeError, TypeError) as exc:
     plan('merge-json', f'{path} ERROR: {exc} (the install would stop here)')
     raise SystemExit(1)

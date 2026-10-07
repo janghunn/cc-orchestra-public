@@ -38,7 +38,7 @@ for path in [root, *sorted(root.rglob('*'))]:
     # pathlib does not recurse through symlink directories.
     rel = str(path.relative_to(root))
     if kind == 'content':
-        state = pathlib.Path(os.environ['CC_ORCH_STATE_DIR'])
+        state = pathlib.Path(os.environ.get('CC_ORCH_STATE_DIR') or os.environ['HOME'] + '/.claude/orchestra-state').absolute()
         if state in path.parents and path != state / 'statusline.previous.json':
             continue
         backup = pathlib.Path(os.environ['HOME']) / '.claude/backups'
@@ -359,4 +359,116 @@ grep -Eq "^create +$CC_ORCH_UNIT_DIR/\$" "$TMP/no-claude-unit-settings.out"
 ! grep -q '^merge-json .*orch-model-notice.sh\|^enable-unit' "$TMP/no-claude-unit-settings.out"
 grep -F "$CC_ORCH_SETTINGS statusLine: replace" "$TMP/no-claude-unit-settings.out" >/dev/null
 echo 'PASS: without Claude, statusLine still plans creation of the missing custom settings parent'
+
+# mkdir -p cannot replace a non-directory, including one reached through a symlink.
+for kind in file symlink dangling; do
+  fresh_home "blocked-bin-$kind"
+  block="$HOME/blocked"
+  if [[ "$kind" == file ]]; then
+    printf 'keep\n' > "$block"
+  elif [[ "$kind" == symlink ]]; then
+    printf 'keep\n' > "$HOME/target"
+    ln -s "$HOME/target" "$block"
+  else
+    ln -s "$HOME/missing" "$block"
+  fi
+  for dest in "$block" "$block/child"; do
+    for mode in hybrid codex-only; do
+      args=()
+      [[ "$mode" == hybrid ]] || args+=(--codex-only)
+      CC_ORCH_BIN_DIR="$dest" preview 1 "$TMP/blocked-bin.out" --dry-run "${args[@]}"
+      grep -Eq '^error ' "$TMP/blocked-bin.out"
+      grep -F "$block (exists and is not a directory; the install would stop here)" "$TMP/blocked-bin.out" >/dev/null
+      ! grep -q -- ' -> ' "$TMP/blocked-bin.out"
+      rc=0
+      CC_ORCH_BIN_DIR="$dest" bash "$TMP/repo/install.sh" "${args[@]}" > "$TMP/blocked-real.log" 2>&1 || rc=$?
+      [[ "$rc" != 0 ]] || fail 'real install accepted a non-directory bin path'
+    done
+  done
+done
+echo 'PASS: non-directory bin paths and ancestors fail before links, preserve dry-run snapshots, and fail real installs'
+
+fresh_home blocked-planners
+printf 'keep\n' > "$HOME/blocked"
+ln -s "$HOME/blocked" "$HOME/blocked-link"
+for block in "$HOME/blocked" "$HOME/blocked-link"; do
+  for name in CC_ORCH_STATE_DIR CC_ORCH_AGENTS_DIR CC_ORCH_MANIFEST CC_ORCH_UNIT_DIR CC_ORCH_SETTINGS; do
+    for dest in "$block" "$block/child"; do
+      (
+        case "$name" in
+          CC_ORCH_MANIFEST|CC_ORCH_SETTINGS) export "$name=$dest/settings.json" ;;
+          *) export "$name=$dest" ;;
+        esac
+        preview 1 "$TMP/blocked-planner.out" --dry-run
+        grep -Eq '^error ' "$TMP/blocked-planner.out"
+        grep -F "$block (exists and is not a directory; the install would stop here)" "$TMP/blocked-planner.out" >/dev/null
+      )
+    done
+  done
+  CC_ORCH_SETTINGS="$block/child/settings.json" preview 1 "$TMP/blocked-safety.out" --dry-run --safety-hooks-only
+  grep -F "$block (exists and is not a directory; the install would stop here)" "$TMP/blocked-safety.out" >/dev/null
+done
+mkdir -p "$HOME/.claude"
+printf '{}\n' > "$CC_ORCH_SETTINGS"
+printf 'keep\n' > "$HOME/.claude/backups"
+preview 1 "$TMP/blocked-backups.out" --dry-run
+grep -F "$HOME/.claude/backups (exists and is not a directory; the install would stop here)" "$TMP/blocked-backups.out" >/dev/null
+echo 'PASS: both Python planners and safety-only reject non-directory targets, ancestors and backup directories'
+
+fresh_home relative-agents
+(
+  cd "$HOME"
+  export CC_ORCH_AGENTS_DIR=relative-agents
+  unset CC_ORCH_MANIFEST
+  real_install
+  real_install
+  preview 0 "$TMP/relative-agents.out" --dry-run
+  assert_stable_plan "$TMP/relative-agents.out" stable
+  grep -Eq "^unchanged +$HOME/relative-agents/.install-manifest.json\$" "$TMP/relative-agents.out"
+)
+echo 'PASS: relative agents directory and default manifest remain unchanged after two real installs'
+
+fresh_home relative-targets
+(
+  cd "$HOME"
+  export CC_ORCH_BIN_DIR=paths/bin CC_ORCH_AGENTS_DIR=paths/agents CC_ORCH_MANIFEST=paths/manifest.json
+  export CC_ORCH_STATE_DIR=paths/state CC_ORCH_UNIT_DIR=paths/units CC_ORCH_SETTINGS=paths/settings.json
+  snap "$HOME" content > "$TMP/relative-initial"
+  preview 0 "$TMP/relative-targets-first.out" --dry-run
+  real_install
+  snap "$HOME" content > "$TMP/relative-installed"
+  assert_created_paths "$TMP/relative-initial" "$TMP/relative-installed" "$TMP/relative-targets-first.out"
+  real_install
+  preview 0 "$TMP/relative-targets.out" --dry-run
+  assert_stable_plan "$TMP/relative-targets.out" stable
+  for path in paths/bin/cc-orch paths/manifest.json paths/units/orch-model-guard.service paths/settings.json; do
+    grep -F "$HOME/$path" "$TMP/relative-targets.out" >/dev/null
+  done
+)
+echo 'PASS: all six relative destination overrides match real install paths and stabilize'
+
+for provider in claude missing; do
+fresh_home "bare-settings-$provider"
+(
+  cd "$HOME"
+  export CC_ORCH_SETTINGS=settings.json
+  if [[ "$provider" == missing ]]; then export CLAUDE_BIN="$TMP/missing-claude"; fi
+  snap "$HOME" content > "$TMP/bare-initial"
+  preview 0 "$TMP/bare-first.out" --dry-run
+  real_install
+  snap "$HOME" content > "$TMP/bare-installed"
+  assert_created_paths "$TMP/bare-initial" "$TMP/bare-installed" "$TMP/bare-first.out"
+  real_install
+  preview 0 "$TMP/bare-settings.out" --dry-run
+  assert_stable_plan "$TMP/bare-settings.out" stable
+  grep -F "$HOME/settings.json statusLine: unchanged (settings path has no parent component; registration fails before writing)" "$TMP/bare-settings.out" >/dev/null
+  python3 - <<'PY'
+import json, os
+settings = json.load(open('settings.json'))
+assert 'statusLine' not in settings
+assert not os.path.exists(os.environ['CC_ORCH_STATE_DIR'] + '/statusline.previous.json')
+PY
+)
+done
+echo 'PASS: bare settings filename predicts the existing statusLine registration failure without writes'
 echo 'PASS: all install dry-run tests'
