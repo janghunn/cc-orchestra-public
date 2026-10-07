@@ -1294,8 +1294,9 @@ Calls consume ChatGPT-plan quota; dollar amounts are a relative-load proxy only.
 The Astra counterfactual re-prices the same observed tokens; Astra would use different token counts.
 Unpriced calls lack surviving token data; coverage counts calls with tokens and a valid rate over all calls in the window.
 Fast multipliers are unknown by default (Standard-rate estimates); per-request long-context surcharges are not applied.
-Attribution uses event-file mtimes and wrapper log order. Same-mode runs in one root with crossing intervals can be swapped when no other wrapper call starts between their completions.
-Copied or touched task directories can give event files newer mtimes and attribute their tokens to newer calls.
-Token-to-call matching is an estimate: `codex.log` has no event-file or run identifier.
-`codex-run` writes the event file before its `codex.log` line; another call appending between these writes can cause the completing call to be priced under the other call's model.
-Exact matching needs a deferred `codex-run` log change; `orch-jev` parses the line with a full-line regex.
+`codex-run` appends a unique run identifier and captured token usage for each attempt to `<state>/codex-runs.jsonl`; `codex.log` stays byte-identical.
+The report joins sidecar records by log byte offset and line text and labels their attribution exact. Captured usage survives fallback attempts and repeated runs overwriting the same event file.
+Each attempt writes a uniquely created file that is atomically renamed onto the events path and reads usage from that attempt's own file so an overlapping same-lane run cannot replace it; an overlapping pre-upgrade wrapper can still affect it by truncating in place.
+Accepted limit: if private events-file setup fails during an overlapping same-lane run, the fallback redirect can truncate the file the other run published, and that run's record can then count the later run's tokens while still labeled exact; this affects only the cost report's attribution, never routing or pricing.
+The sidecar defaults to `codex-runs.jsonl` beside the selected log; override it with `CC_ORCH_CODEX_RUNS`.
+Calls without a matching sidecar record retain estimated attribution using event-file mtimes and wrapper log order. Crossing same-mode runs, copied or touched task directories, and concurrent log appends can still misattribute legacy tokens; overwritten legacy events can leave calls unpriced.

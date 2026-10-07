@@ -385,4 +385,663 @@ fi
 assert_eq "$(grep -rl pricing-policy "$ROOT/bin" "$ROOT/lib" "$ROOT/hooks")" "$REPORT" 'pricing policy is report-only'
 ok 'shell/Python syntax, local-only dependencies and report-only pricing policy'
 
+# Sidecars use byte offsets even when the log text is identical or contains Unicode.
+record() {
+  python3 - "$CC_ORCH_CODEX_LOG" "$CC_ORCH_CODEX_RUNS" "$@" <<'PY'
+import json, sys, uuid
+from pathlib import Path
+log, sidecar, index, source, inp, cached, out = sys.argv[1:]
+lines = Path(log).read_bytes().splitlines(keepends=True)
+index = int(index)
+try:
+    stat = Path(source).stat()
+    mtime_ns, size = stat.st_mtime_ns, stat.st_size
+except OSError:
+    mtime_ns = size = None
+row = dict(v=1, run_id=uuid.uuid4().hex, log_offset=sum(map(len, lines[:index])),
+           log_line=lines[index].decode().rstrip('\n'), events=source,
+           events_mtime_ns=mtime_ns, events_size=size,
+           usage=dict(input_tokens=int(inp), cached_input_tokens=int(cached), output_tokens=int(out)))
+with Path(sidecar).open('a') as stream:
+    stream.write(json.dumps(row) + '\n')
+PY
+}
+attribution() {
+  assert_has "$RUN_OUTPUT" "attribution exact: $1 call(s) with token data joined by run identifier (" 'exact attribution'
+  assert_has "$RUN_OUTPUT" "attribution estimated: $2 call(s) with token data matched by event-file time; legacy records without a run identifier (" 'estimated attribution'
+}
+export CC_ORCH_CODEX_RUNS="$TMP/crossing-runs.jsonl"
+CC_ORCH_CODEX_LOG="$TMP/crossing.log"
+CC_ORCH_PRICING_POLICY="$ROOT/pricing-policy.conf"
+# The time matcher assigns these surviving events to the opposite models.
+record 0 "$TMP/crossing/.orchestra/05-y/codex-verify.jsonl" 1000000 500000 1000000
+record 2 "$TMP/crossing/.orchestra/04-x/codex-verify.jsonl" 1000000 400000 100000
+run --cost
+assert_success 'exact crossing'
+assert_row $'gpt-6-astra\t1\t0\t500000\t500000\t1000000\t55.5000\t55.5000'
+assert_row $'gpt-6-luna\t1\t0\t600000\t400000\t100000\t0.1140\t11.4000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/3 calls priced (66.7%)' 'exact crossing coverage'
+attribution 2 0
+assert_has "$RUN_OUTPUT" 'joined by run identifier (gpt-6-astra 1, gpt-6-luna 1)' 'exact model counts'
+rm "$CC_ORCH_CODEX_RUNS"
+run --cost
+assert_success 'legacy crossing control'
+assert_row $'gpt-6-astra\t1\t0\t600000\t400000\t100000\t11.4000\t11.4000'
+assert_row $'gpt-6-luna\t1\t0\t500000\t500000\t1000000\t0.5550\t55.5000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/3 calls priced (66.7%)' 'legacy crossing coverage'
+attribution 0 2
+ok 'exact crossing attribution and unchanged legacy crossing control'
+
+fixture mixed
+CC_ORCH_CODEX_RUNS="$TMP/mixed-runs.jsonl"
+call 0 verify gpt-6-astra@high "$REPO"
+call 720 verify gpt-6-luna@high "$REPO"
+event "$REPO/.orchestra/identified/codex-verify.jsonl" 900 1000000 400000 100000
+event "$REPO/.orchestra/legacy/codex-verify.jsonl" 1200 1000000 500000 1000000
+ln -s "$REPO/.orchestra/identified" "$REPO/.orchestra/alias"
+record 0 "$REPO/.orchestra/alias/codex-verify.jsonl" 1000000 400000 100000
+run --cost
+assert_success mixed
+assert_row $'gpt-6-astra\t1\t0\t600000\t400000\t100000\t11.4000\t11.4000'
+assert_row $'gpt-6-luna\t1\t0\t500000\t500000\t1000000\t0.5550\t55.5000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'mixed coverage'
+attribution 1 1
+ok 'mixed exact and legacy calls exclude consumed events by realpath'
+
+for shape in fallback symlink-repo; do
+  CC_ORCH_CODEX_LOG="$TMP/$shape.log"
+  CC_ORCH_CODEX_RUNS="$TMP/$shape-runs.jsonl"
+  tag=verify; [ "$shape" != fallback ] || tag=implement
+  record 0 "$TMP/$shape/.orchestra/task/codex-$tag.jsonl" 1000000 400000 100000
+  if [ "$shape" = fallback ]; then
+    record 1 "$TMP/$shape/.orchestra/task/codex-$tag.jsonl" 2000000 1500000 200000
+  else
+    record 1 "$TMP/$shape/.orchestra/task/codex-$tag.jsonl" 1000000 0 0
+  fi
+  run --cost
+  assert_success "exact overwritten $shape"
+  assert_row $'gpt-6-astra\t1\t0\t600000\t400000\t100000\t11.4000\t11.4000'
+  if [ "$shape" = fallback ]; then
+    assert_row $'gpt-6.1-sol\t1\t0\t500000\t1500000\t200000\t3.1500\t16.5000'
+  else
+    assert_row $'gpt-6-luna\t1\t0\t1000000\t0\t0\t0.1000\t10.0000'
+  fi
+  assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'both overwritten calls priced'
+  attribution 2 0
+  rm "$CC_ORCH_CODEX_RUNS"
+  run --cost
+  assert_success "legacy overwritten $shape"
+  assert_has "$RUN_OUTPUT" 'unpriced: 1 call(s) without surviving token data (gpt-6-astra 1)' 'legacy original unpriced'
+  assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'legacy overwritten coverage'
+  attribution 0 1
+done
+ok 'captured usage survives fallback and repeated workdir aliases'
+
+fixture 'identical 한글 lines'
+CC_ORCH_CODEX_RUNS="$TMP/identical-runs.jsonl"
+call 0 verify gpt-6-astra@high "$REPO"
+call 0 verify gpt-6-astra@high "$REPO"
+TOKENS="$REPO/.orchestra/task/codex-verify.jsonl"
+event "$TOKENS" 60 2000000 0 0
+record 0 "$TMP/missing-first-events" 1000000 0 0
+record 1 "$TOKENS" 2000000 0 0
+run --cost
+assert_success 'identical log lines'
+assert_row $'gpt-6-astra\t2\t0\t3000000\t0\t0\t30.0000\t30.0000'
+attribution 2 0
+cp "$CC_ORCH_CODEX_RUNS" "$TMP/identical-complete"
+head -1 "$TMP/identical-complete" > "$CC_ORCH_CODEX_RUNS"
+run --cost
+assert_success 'identical line without a record'
+assert_row $'gpt-6-astra\t2\t0\t3000000\t0\t0\t30.0000\t30.0000'
+attribution 1 1
+ok 'byte-identical lines join their own offsets and an unidentified repeat remains legacy'
+
+fixture generation
+CC_ORCH_CODEX_RUNS="$TMP/generation-runs.jsonl"
+call 0 verify gpt-6-astra@high "$REPO"
+call 720 verify gpt-6-luna@high "$REPO"
+TOKENS="$REPO/.orchestra/task/codex-verify.jsonl"
+# Its mtime makes this file a legacy candidate for the later call if not excluded.
+event "$TOKENS" 900 1000000 0 0
+record 0 "$TOKENS" 1000000 0 0
+run --cost
+assert_success 'unchanged generation excluded'
+assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'consumed generation unavailable'
+attribution 1 0
+assert_not_has "$RUN_OUTPUT" $'\ngpt-6-luna\t' 'no duplicate legacy tokens'
+event "$TOKENS" 1200 20000000 0 0
+run --cost
+assert_success 'unidentified rewrite retained'
+assert_row $'gpt-6-astra\t1\t0\t1000000\t0\t0\t10.0000\t10.0000'
+assert_row $'gpt-6-luna\t1\t0\t20000000\t0\t0\t2.0000\t200.0000'
+attribution 1 1
+ok 'only the consumed event generation is excluded from legacy matching'
+
+fixture orphans
+CC_ORCH_CODEX_RUNS="$TMP/orphans-runs.jsonl"
+call 0 verify gpt-6-luna@high "$REPO"
+TOKENS="$REPO/.orchestra/task/codex-verify.jsonl"
+event "$TOKENS" 60 1000000 0 0
+record 0 "$TOKENS" 9000000 0 0
+cp "$CC_ORCH_CODEX_RUNS" "$TMP/valid-record"
+python3 - "$TMP/valid-record" "$CC_ORCH_CODEX_RUNS" <<'PY'
+import json, sys
+from pathlib import Path
+row = json.loads(Path(sys.argv[1]).read_text())
+bad = [dict(row, log_offset=999999), dict(row, run_id='wrong-text', log_line='different line'),
+       dict(row, run_id='bool-offset', log_offset=True), dict(row, run_id='negative', log_offset=-1),
+       dict(row, run_id='float-offset', log_offset=0.0), dict(row, run_id=''), dict(row, run_id=None),
+       dict(row, run_id='bad-line', log_line=None), [], None]
+Path(sys.argv[2]).write_text('invalid json\n' + ''.join(json.dumps(r) + '\n' for r in bad))
+PY
+run --cost
+assert_success 'orphan and malformed sidecars'
+assert_row $'gpt-6-luna\t1\t0\t1000000\t0\t0\t0.1000\t10.0000'
+attribution 0 1
+# The first valid record wins; duplicates cannot replace usage or claim another call.
+cp "$TMP/valid-record" "$CC_ORCH_CODEX_RUNS"
+record 0 "$TOKENS" 8000000 0 0
+call 120 verify gpt-6-astra@high "$REPO"
+python3 - "$TMP/valid-record" "$CC_ORCH_CODEX_RUNS" "$CC_ORCH_CODEX_LOG" <<'PY'
+import json, sys
+from pathlib import Path
+row = json.loads(Path(sys.argv[1]).read_text())
+lines = Path(sys.argv[3]).read_bytes().splitlines(keepends=True)
+row.update(log_offset=len(lines[0]), log_line=lines[1].decode().rstrip('\n'))
+with Path(sys.argv[2]).open('a') as stream:
+    stream.write(json.dumps(row) + '\n')
+PY
+run --cost
+assert_success 'duplicate records'
+assert_row $'gpt-6-luna\t1\t0\t9000000\t0\t0\t0.9000\t90.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'duplicate run id ignored'
+attribution 1 0
+for usage in '{"input_tokens":true,"cached_input_tokens":0,"output_tokens":1}' \
+    '{"input_tokens":1,"cached_input_tokens":2,"output_tokens":1}' \
+    '{"input_tokens":1,"cached_input_tokens":0,"output_tokens":-1}' \
+    '{"input_tokens":1.5,"cached_input_tokens":0,"output_tokens":1}' \
+    '{"input_tokens":1,"output_tokens":1}' null '[]'; do
+  python3 - "$TMP/valid-record" "$CC_ORCH_CODEX_RUNS" "$usage" <<'PY'
+import json, sys
+from pathlib import Path
+row = json.loads(Path(sys.argv[1]).read_text())
+row['usage'] = json.loads(sys.argv[3])
+Path(sys.argv[2]).write_text(json.dumps(row) + '\n')
+PY
+  run --cost
+  assert_success 'invalid recorded usage'
+  assert_has "$RUN_OUTPUT" 'coverage: 0/2 calls priced (0.0%)' 'invalid usage still claims its call and event'
+  attribution 0 0
+done
+# A directory is unreadable as JSONL; malformed line separators disable exact joins.
+CC_ORCH_CODEX_RUNS="$TMP"
+run --cost
+assert_success 'unreadable sidecar'
+attribution 0 1
+CC_ORCH_CODEX_RUNS="$TMP/valid-record"
+python3 - "$CC_ORCH_CODEX_LOG" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+path.write_bytes(path.read_bytes().replace(b'\n', b'\r\n'))
+PY
+run --cost
+assert_success 'pathological line splitting'
+attribution 0 1
+ok 'orphan, malformed, duplicate and invalid-usage records fail safely'
+
+# Exercise both real launchers with isolated, offline dependencies.
+FAKEBIN="$TMP/run-fakebin"
+WRAP_REPO="$TMP/wrapper work"
+WRAP_TASK="$WRAP_REPO/.orchestra/task"
+WRAP_STATE="$TMP/wrapper-state"
+mkdir -p "$FAKEBIN" "$WRAP_TASK" "$TMP/run-home/.claude" "$TMP/run-catalog"
+printf 'private-prompt-sentinel\n' > "$WRAP_TASK/plan.md"
+printf 'private-brief-sentinel\n' > "$WRAP_TASK/brief.md"
+cat > "$FAKEBIN/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then echo 'codex-cli 0.159.0'; exit 0; fi
+if [ "${FAKE_CHECK_FD7:-0}" = 1 ] && [ -e "/proc/$$/fd/7" ]; then
+  echo 'events descriptor 7 leaked into Codex' >&2
+  exit 91
+fi
+model="" output=""
+while [ $# -gt 0 ]; do
+  case "$1" in -m) shift; model="$1" ;; -o) shift; output="$1" ;; esac
+  shift
+done
+printf '%s\n' '{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}'
+if [ "${FAKE_FALLBACK:-0}" = 1 ] && [ "$model" = gpt-6-astra ]; then
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":4000000,"cached_input_tokens":0,"output_tokens":0}}'
+  printf '%s\n' 'ERROR: {"type":"error","error":{"message":"This model is not supported when using Codex with a ChatGPT account."}}' >&2
+  exit 1
+fi
+printf '{"type":"turn.completed","usage":{"input_tokens":%s,"cached_input_tokens":%s,"output_tokens":%s}}\n' \
+  "${FAKE_USAGE_IN:-1000000}" "${FAKE_USAGE_CACHED:-0}" "${FAKE_USAGE_OUT:-0}"
+if [ -n "${FAKE_EXTRA_EVENTS:-}" ]; then printf '%s\n' "$FAKE_EXTRA_EVENTS"; fi
+printf 'ok\n' > "$output"
+if [ "${FAKE_LEGACY_APPEND:-0}" = 1 ]; then
+  printf '%s\n' "$RACE_LINE" >> "$CC_ORCH_STATE_DIR/codex.log"
+fi
+exit "${FAKE_FINISH_EXIT:-0}"
+CODEX
+cat > "$FAKEBIN/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+printf '%s\n' 'Current session: 10% used' 'Current week (all models): 20% used' 'Current week (Fable): 20% used'
+CLAUDE
+cat > "$FAKEBIN/date" <<'DATE'
+#!/usr/bin/env bash
+if [ "$#" = 1 ] && [ "$1" = -Is ]; then printf '%s\n' "$FROZEN_START"; else exec "$REAL_DATE" "$@"; fi
+DATE
+chmod +x "$FAKEBIN/"*
+export REAL_DATE="$(command -v date)" FROZEN_START="$(date -Is)"
+wrapper() {
+  env -u CC_ORCH_BACKEND -u CC_ORCH_CODEX_ROUTE PATH="$FAKEBIN:$PATH" \
+    HOME="$TMP/run-home" CODEX_HOME="$TMP/run-catalog" CLAUDE_BIN="$FAKEBIN/claude" \
+    CC_ORCH_STATE_DIR="$WRAP_STATE" CC_ORCH_ALWAYS_FAST_MODE=0 \
+    CC_ORCH_JEV_POLICY="$ROOT/jev-policy.conf" "$@" > "$TMP/wrapper.out" 2> "$TMP/wrapper.err"
+}
+FAKE_USAGE_IN=1000000 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --lane repeat
+FAKE_USAGE_IN=2000000 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --lane repeat
+FAKE_USAGE_IN=3000000 wrapper "$ROOT/bin/codex-run-codex" implement "$WRAP_REPO" "$WRAP_TASK"
+FAKE_FALLBACK=1 FAKE_USAGE_IN=5000000 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK"
+assert_has "$(cat "$TMP/wrapper.err")" MODEL_FALLBACK 'offline auto-routed fallback'
+python3 - "$WRAP_STATE" "$WRAP_TASK" "$FROZEN_START" <<'PY'
+import json, re, sys
+from pathlib import Path
+state, task, start = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+raw = (state / 'codex-runs.jsonl').read_text()
+records = [json.loads(line) for line in raw.splitlines()]
+assert len(records) == len(lines) == 5, records
+assert lines[0] == lines[1], lines
+assert len({row['run_id'] for row in records}) == 5
+offset = 0
+keys = set(('v run_id attempt pid start end mode lane run_tag model effort fast_mode fallback_from '
+            'exit workdir task_dir events events_mtime_ns events_size usage log_offset log_line').split())
+for row, line in zip(records, lines):
+    assert set(row) == keys, row
+    assert re.fullmatch(r'[0-9a-f]{32}', row['run_id']), row
+    assert row['log_line'].encode() + b'\n' == line
+    assert row['log_offset'] == offset, row
+    assert row['start'] == start and line.startswith(start.encode()), row
+    assert row['task_dir'] == str(task), row
+    assert row['events_mtime_ns'] > 0 and row['events_size'] > 0, row
+    offset += len(line)
+assert [r['usage']['input_tokens'] for r in records] == [1000000, 2000000, 3000000, 4000000, 5000000]
+assert [r['attempt'] for r in records] == [1, 1, 1, 1, 2]
+assert [r['fallback_from'] for r in records] == [None, None, None, None, 'gpt-6-astra']
+assert records[0]['lane'] == records[1]['lane'] == 'repeat'
+assert records[0]['run_tag'] == records[1]['run_tag'] == 'implement-repeat'
+assert records[2]['model'] == 'gpt-6-astra'
+assert records[3]['exit'] == 1 and records[4]['exit'] == 0
+assert 'private-prompt-sentinel' not in raw and 'private-brief-sentinel' not in raw
+assert 'You are' not in raw and 'FAKE_USAGE' not in raw and '--sandbox' not in raw
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+unset CC_ORCH_CODEX_RUNS
+run --cost
+assert_success 'real wrappers exact pricing'
+assert_row $'gpt-6-astra\t2\t0\t7000000\t0\t0\t70.0000\t70.0000'
+assert_row $'gpt-6.1-sol\t3\t0\t8000000\t0\t0\t16.0000\t80.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 5/5 calls priced (100.0%)' 'all attempts survive overwrites'
+attribution 5 0
+ok 'real runtime and Codex-only launchers preserve same-second repeats and fallback usage'
+
+# Writer validation matches the reader and sums all valid completed turns.
+WRAP_STATE="$TMP/writer-validation"
+FAKE_USAGE_IN=100 FAKE_USAGE_CACHED=40 FAKE_USAGE_OUT=10 \
+  FAKE_EXTRA_EVENTS=$'invalid json\n[]\n{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":20}}' \
+  wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --fast-mode
+for extra in null '{"input_tokens":true,"cached_input_tokens":0,"output_tokens":1}' \
+    '{"input_tokens":1,"cached_input_tokens":2,"output_tokens":1}' \
+    '{"input_tokens":1,"cached_input_tokens":0,"output_tokens":-1}' \
+    '{"input_tokens":1.5,"cached_input_tokens":0,"output_tokens":1}' '{"input_tokens":1,"output_tokens":1}'; do
+  FAKE_EXTRA_EVENTS="{\"type\":\"turn.completed\",\"usage\":$extra}" \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol
+done
+python3 - "$WRAP_STATE/codex-runs.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+assert len(rows) == 7, rows
+assert rows[0]['usage'] == dict(input_tokens=300, cached_input_tokens=90, output_tokens=30), rows[0]
+assert rows[0]['fast_mode'] is True
+assert all(r['usage'] is None for r in rows[1:]), rows
+PY
+WRAP_STATE="$TMP/unwritable-sidecar"
+mkdir -p "$WRAP_STATE/codex-runs.jsonl"
+wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol
+assert_eq "$(wc -l < "$WRAP_STATE/codex.log" | tr -d ' ')" 1 'legacy log written despite sidecar failure'
+assert_eq "$(grep -c '^codex-run: warning:' "$TMP/wrapper.err")" 1 'one sidecar warning'
+assert_has "$(cat "$TMP/wrapper.err")" "codex-run: warning: run record not written to $WRAP_STATE/codex-runs.jsonl" 'sidecar failure warning'
+ok 'writer validates every completed turn and sidecar failure preserves successful exit and log'
+
+# An unlocked legacy writer can append identical text after a size snapshot.
+# The stat shim reproduces the old defect; the descriptor-based writer bypasses it.
+export REAL_STAT="$(command -v stat)"
+cat > "$FAKEBIN/stat" <<'STAT'
+#!/usr/bin/env bash
+if [ "$#" = 3 ] && [ "$1" = -c ] && [ "$2" = %s ] && [[ "$3" == */codex.log ]]; then
+  "$REAL_STAT" "$@"
+  printf '%s\n' "$RACE_LINE" >> "$3"
+  exit 0
+fi
+exec "$REAL_STAT" "$@"
+STAT
+chmod +x "$FAKEBIN/stat"
+WRAP_REPO="$TMP/legacy 한글 race"
+WRAP_TASK="$WRAP_REPO/.orchestra/task"
+mkdir -p "$WRAP_TASK"
+printf 'race fixture\n' > "$WRAP_TASK/plan.md"
+printf 'race fixture\n' > "$WRAP_TASK/brief.md"
+export RACE_LINE="$(printf '%s  %-11s  %s  exit=%s  %s' "$FROZEN_START" implement gpt-6.1-sol@high 0 "$WRAP_REPO")"
+for foreign in 0 1; do
+  WRAP_STATE="$TMP/legacy-race-$foreign"
+  mkdir -p "$WRAP_STATE"
+  : > "$WRAP_STATE/codex.log"
+  # Also append independently of stat, before the real wrapper writes its line.
+  FAKE_LEGACY_APPEND="$foreign" FAKE_USAGE_IN=6000000 \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+  python3 - "$WRAP_STATE" "$RACE_LINE" "$foreign" <<'PY'
+import json, sys
+from pathlib import Path
+state, line, foreign = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+record, = [json.loads(row) for row in (state / 'codex-runs.jsonl').read_text().splitlines()]
+own_offset = sum(map(len, lines[:-1]))
+assert record['log_offset'] == own_offset, f"record joined a foreign line: {record['log_offset']} != {own_offset}"
+assert len(lines) == foreign + 1, lines
+assert all(row == line.encode() + b'\n' for row in lines), lines
+assert record['log_line'] == line
+assert record['usage']['input_tokens'] == 6000000
+if foreign:
+    assert own_offset == len(line.encode()) + 1
+    assert own_offset != len(line) + 1, 'fixture must exercise UTF-8 byte length'
+PY
+  CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+  run --cost
+  assert_success 'legacy append race'
+  assert_row $'gpt-6.1-sol\t1\t0\t6000000\t0\t0\t12.0000\t60.0000'
+  attribution 1 0
+  if [ "$foreign" = 1 ]; then
+    assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'foreign identical line unpriced'
+    assert_has "$RUN_OUTPUT" 'unpriced: 1 call(s) without surviving token data (gpt-6.1-sol 1)' 'foreign line cannot consume exact tokens'
+  else
+    assert_has "$RUN_OUTPUT" 'coverage: 1/1 calls priced (100.0%)' 'no stat race window'
+  fi
+done
+ok 'legacy append races cannot claim the run identifier, including identical UTF-8 lines'
+
+# Run B completely while run A waits to lock its sidecar, reusing the events path.
+export REAL_FLOCK="$(command -v flock)"
+cat > "$FAKEBIN/flock" <<'FLOCK'
+#!/usr/bin/env bash
+if [ "${OVERLAP_RUN:-0}" = 1 ] && [ ! -e "$OVERLAP_MARKER" ]; then
+  : > "$OVERLAP_MARKER"
+  FAKE_USAGE_IN=2000000 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+    > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+fi
+exec "$REAL_FLOCK" "$@"
+FLOCK
+chmod +x "$FAKEBIN/flock"
+WRAP_STATE="$TMP/overlap-state"
+export OVERLAP_MARKER="$WRAP_STATE/overlap-fired" OVERLAP_WRAPPER="$ROOT/bin/codex-run-runtime"
+export OVERLAP_REPO="$WRAP_REPO" OVERLAP_TASK="$WRAP_TASK"
+OVERLAP_RUN=1 FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+  wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+python3 - "$WRAP_STATE" "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+state, events = Path(sys.argv[1]), Path(sys.argv[2])
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2, records
+assert [r['usage']['input_tokens'] for r in records] == [2000000, 1000000], 'overlap replaced attempt usage: ' + repr([r['usage'] for r in records])
+assert len({r['run_id'] for r in records}) == 2
+assert len({r['pid'] for r in records}) == 2
+offset = 0
+for row, line in zip(records, lines):
+    assert row['log_offset'] == offset, row
+    assert row['log_line'].encode() + b'\n' == line
+    assert row['events'] == str(events)
+    assert row['events_mtime_ns'] > 0 and row['events_size'] > 0, row
+    offset += len(line)
+surviving = [json.loads(line) for line in events.read_text().splitlines()]
+assert surviving[-1]['usage']['input_tokens'] == 2000000, surviving
+assert records[0]['events_mtime_ns'] == events.stat().st_mtime_ns
+assert records[0]['events_size'] == events.stat().st_size
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'same-lane overlap'
+assert_row $'gpt-6.1-sol\t2\t0\t3000000\t0\t0\t6.0000\t30.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'both overlapping calls priced'
+attribution 2 0
+ok 'each overlapping same-lane attempt retains its own events and token usage'
+
+# Published events retain ordinary redirect permissions and exact Codex stdout.
+check_events() {
+  local expected_input="$1"
+  FAKE_USAGE_IN="$expected_input" "$FAKEBIN/codex" -m gpt-6.1-sol -o "$TMP/expected-artifact" > "$TMP/expected-events"
+  python3 - "$WRAP_TASK" "$TMP/expected-events" "$TMP/event-mode-reference" <<'PY'
+import stat, sys
+from pathlib import Path
+task, expected, reference = map(Path, sys.argv[1:])
+events = task / 'codex-implement.jsonl'
+assert not list(task.glob('.codex-*.jsonl')), list(task.glob('.codex-*.jsonl'))
+assert events.read_bytes() == expected.read_bytes()
+assert stat.S_IMODE(events.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+PY
+}
+for mask in 0022 0027 0077; do
+  WRAP_STATE="$TMP/events-mode-$mask"
+  rm -f "$WRAP_TASK/codex-implement.jsonl"
+  rm -f "$TMP/event-mode-reference"
+  (
+    umask "$mask"
+    : > "$TMP/event-mode-reference"
+    FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+      wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+  )
+  check_events 1000000
+done
+ok 'unique events leave no temporary files and preserve stdout bytes and umask permissions'
+
+# Inject setup failures only for the private events file; other commands run normally.
+export REAL_MKTEMP="$(command -v mktemp)" REAL_CHMOD="$(command -v chmod)" REAL_MV="$(command -v mv)"
+export REAL_TIMEOUT="$(command -v timeout)"
+cat > "$FAKEBIN/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+if [ "${FAKE_SETUP_FAIL:-}" = mktemp ] && [[ "${1:-}" == */.codex-*.jsonl ]]; then exit 1; fi
+exec "$REAL_MKTEMP" "$@"
+MKTEMP
+cat > "$FAKEBIN/chmod" <<'CHMOD'
+#!/usr/bin/env bash
+if [ "${FAKE_SETUP_FAIL:-}" = chmod ] && [[ "${2:-}" == */.codex-*.jsonl ]]; then exit 1; fi
+exec "$REAL_CHMOD" "$@"
+CHMOD
+cat > "$FAKEBIN/mv" <<'MV'
+#!/usr/bin/env bash
+if [[ "${3:-}" == */.codex-*.jsonl ]]; then
+  if [ "${FAKE_SETUP_FAIL:-}" = mv ]; then exit 1; fi
+  if [ "${CREATE_OVERLAP:-0}" = 1 ] && [ ! -e "$OVERLAP_MARKER" ]; then
+    : > "$OVERLAP_MARKER"
+    "$REAL_STAT" -c %i "$3" > "$CC_ORCH_STATE_DIR/inode-a"
+    FAKE_USAGE_IN=2000000 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+      > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+    "$REAL_STAT" -c %i "$4" > "$CC_ORCH_STATE_DIR/inode-b"
+  fi
+fi
+exec "$REAL_MV" "$@"
+MV
+cat > "$FAKEBIN/timeout" <<'TIMEOUT'
+#!/usr/bin/env bash
+if [ "${FAKE_TIMEOUT:-0}" = 1 ]; then
+  shift
+  "$@"
+  exit 124
+fi
+exec "$REAL_TIMEOUT" "$@"
+TIMEOUT
+chmod +x "$FAKEBIN/mktemp" "$FAKEBIN/chmod" "$FAKEBIN/mv" "$FAKEBIN/timeout"
+cat > "$TMP/fail-events-exec" <<'EXEC'
+exec() {
+  if [ "$#" = 0 ] && [ "${FUNCNAME[1]:-}" = run_once ]; then
+    unset -f exec
+    return 1
+  fi
+  builtin exec "$@"
+}
+EXEC
+for failure in mktemp chmod exec mv codex timeout; do
+  WRAP_STATE="$TMP/events-failure-$failure"
+  # Start with no shared file so the fallback redirect also uses the current umask.
+  rm -f "$WRAP_TASK/codex-implement.jsonl" "$TMP/event-mode-reference"
+  (
+    umask 0027
+    : > "$TMP/event-mode-reference"
+    expected_rc=0; codex_exit=0; timed_out=0
+    bash_env=/dev/null
+    if [ "$failure" = exec ]; then bash_env="$TMP/fail-events-exec"; fi
+    if [ "$failure" = codex ]; then expected_rc=1; codex_exit=1; fi
+    if [ "$failure" = timeout ]; then expected_rc=5; timed_out=1; fi
+    actual_rc=0
+    BASH_ENV="$bash_env" FAKE_SETUP_FAIL="$failure" FAKE_FINISH_EXIT="$codex_exit" FAKE_TIMEOUT="$timed_out" \
+      FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+      wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high || actual_rc=$?
+    assert_eq "$actual_rc" "$expected_rc" "events cleanup after $failure"
+  )
+  check_events 1000000
+  python3 - "$WRAP_STATE/codex-runs.jsonl" "$failure" <<'PY'
+import json, sys
+from pathlib import Path
+row = json.loads(Path(sys.argv[1]).read_text())
+if sys.argv[2] in ('mktemp', 'chmod', 'exec', 'mv'):
+    assert row['usage'] is None, row
+    assert row['log_offset'] is None, row
+else:
+    assert row['usage']['input_tokens'] == 1000000, row
+    assert type(row['log_offset']) is int, row
+PY
+done
+ok 'setup fallback stays estimated; Codex failure and timeout retain exact usage; temporary events are cleaned'
+
+# A is paused after opening its private file; B creates, publishes and completes first.
+WRAP_STATE="$TMP/creation-overlap"
+mkdir -p "$WRAP_STATE"
+export OVERLAP_MARKER="$WRAP_STATE/creation-fired"
+rm -f "$TMP/event-mode-reference"
+(
+  umask 0027
+  : > "$TMP/event-mode-reference"
+  CREATE_OVERLAP=1 FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+)
+check_events 1000000
+python3 - "$WRAP_STATE" "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+state, events = map(Path, sys.argv[1:])
+assert (state / 'creation-fired').exists(), 'creation interleave did not run'
+inode_a, inode_b = (int((state / name).read_text()) for name in ('inode-a', 'inode-b'))
+assert inode_a != inode_b, 'attempts shared an inode during creation'
+assert events.stat().st_ino == inode_a
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2
+assert [r['usage']['input_tokens'] for r in records] == [2000000, 1000000], records
+assert len({r['run_id'] for r in records}) == 2
+offset = 0
+for row, line in zip(records, lines):
+    assert row['log_offset'] == offset, row
+    assert row['log_line'].encode() + b'\n' == line
+    offset += len(line)
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'atomic creation overlap'
+assert_row $'gpt-6.1-sol\t2\t0\t3000000\t0\t0\t6.0000\t30.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'atomic creation preserves both calls'
+attribution 2 0
+ok 'unique creation and atomic rename keep interleaved attempts on distinct inodes'
+
+# Include the earlier real fallback/repeat fixtures in the final cleanup audit.
+python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+strays = list(Path(sys.argv[1]).rglob('.codex-*.jsonl'))
+assert not strays, strays
+PY
+
+# A shared-path fallback must not capture or consume a later attempt's tokens.
+mv "$FAKEBIN/mktemp" "$FAKEBIN/mktemp.saved"
+mv "$FAKEBIN/flock" "$FAKEBIN/flock.saved"
+cat > "$FAKEBIN/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */.codex-*.jsonl ]] && [ ! -e "$FALLBACK_SETUP_MARKER" ]; then
+  : > "$FALLBACK_SETUP_MARKER"
+  exit 1
+fi
+exec "$REAL_MKTEMP" "$@"
+MKTEMP
+cat > "$FAKEBIN/flock" <<'FLOCK'
+#!/usr/bin/env bash
+if [ ! -e "$OVERLAP_MARKER" ]; then
+  : > "$OVERLAP_MARKER"
+  FAKE_USAGE_IN=200 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+    > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+fi
+exec "$REAL_FLOCK" "$@"
+FLOCK
+chmod +x "$FAKEBIN/mktemp" "$FAKEBIN/flock"
+WRAP_STATE="$TMP/fallback-overlap"
+mkdir -p "$WRAP_STATE"
+export FALLBACK_SETUP_MARKER="$WRAP_STATE/setup-failed" OVERLAP_MARKER="$WRAP_STATE/overlap-fired"
+FAKE_USAGE_IN=100 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+python3 - "$WRAP_STATE" <<'PY'
+import json, sys
+from pathlib import Path
+state = Path(sys.argv[1])
+assert (state / 'setup-failed').exists() and (state / 'overlap-fired').exists()
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2, records
+b, a = records
+assert a['usage'] is None and a['log_offset'] is None, ('fallback must stay estimated', a)
+assert b['usage'] == dict(input_tokens=200, cached_input_tokens=0, output_tokens=0), b
+assert b['log_offset'] == 0 and b['log_line'].encode() + b'\n' == lines[0], b
+assert a['log_line'].encode() + b'\n' == lines[1], a
+assert len({row['run_id'] for row in records}) == 2
+assert [row['attempt'] for row in records] == [1, 1]
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'estimated fallback overlap'
+assert_row $'gpt-6.1-sol\t1\t0\t200\t0\t0\t0.0004\t0.0020'
+assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'only private attempt priced'
+assert_has "$RUN_OUTPUT" 'unpriced: 1 call(s) without surviving token data (gpt-6.1-sol 1)' 'fallback cannot reuse consumed private events'
+attribution 1 0
+mv "$FAKEBIN/mktemp.saved" "$FAKEBIN/mktemp"
+mv "$FAKEBIN/flock.saved" "$FAKEBIN/flock"
+ok 'shared-path setup fallback remains unidentified and cannot duplicate exact tokens'
+
+# Replacing an existing events file preserves its mode instead of applying a new umask.
+WRAP_STATE="$TMP/existing-events-mode"
+printf 'previous events\n' > "$WRAP_TASK/codex-implement.jsonl"
+chmod 0600 "$WRAP_TASK/codex-implement.jsonl"
+(
+  umask 0022
+  FAKE_USAGE_IN=1000000 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+)
+python3 - "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import stat, sys
+from pathlib import Path
+events = Path(sys.argv[1])
+assert stat.S_IMODE(events.stat().st_mode) == 0o600, oct(stat.S_IMODE(events.stat().st_mode))
+assert not list(events.parent.glob('.codex-*.jsonl'))
+PY
+ok 'existing events mode 0600 survives replacement under umask 0022'
+
 echo "PASS: $pass usage-cost test groups"

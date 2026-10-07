@@ -18,9 +18,10 @@ done
 
 CLAUDE_ROOT="${CC_ORCH_CLAUDE_PROJECTS:-$HOME/.claude/projects}"
 CODEX_LOG="${CC_ORCH_CODEX_LOG:-$HOME/.claude/orchestra-state/codex.log}"
+CODEX_RUNS="${CC_ORCH_CODEX_RUNS:-$(dirname "$CODEX_LOG")/codex-runs.jsonl}"
 PRICING_POLICY="${CC_ORCH_PRICING_POLICY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../pricing-policy.conf}"
 
-python3 - "$CLAUDE_ROOT" "$CODEX_LOG" "$DAYS" "$COST" "$PRICING_POLICY" <<'PY'
+python3 - "$CLAUDE_ROOT" "$CODEX_LOG" "$DAYS" "$COST" "$PRICING_POLICY" "$CODEX_RUNS" <<'PY'
 import json, os, sys, time
 from collections import defaultdict
 from pathlib import Path
@@ -103,10 +104,22 @@ for (model, kind, effort), row in sorted(totals.items(), key=lambda x: x[1]["con
 
 codex = defaultdict(int)
 log_lines, log_mtime = [], None
+line_offsets = []
 if codex_log.exists():
-    with codex_log.open(errors="replace") as log_file:
+    with codex_log.open("rb") as log_file:
         log_mtime = os.fstat(log_file.fileno()).st_mtime
-        log_lines = log_file.read().splitlines()
+        log_bytes = log_file.read()
+        log_lines = log_bytes.decode(errors="replace").splitlines()
+    byte_lines = log_bytes.split(b"\n")
+    offset = 0
+    for line in byte_lines[:-1]:
+        line_offsets.append(offset)
+        offset += len(line) + 1
+    decoded_lines = [line.decode(errors="replace") for line in byte_lines]
+    if decoded_lines[-1] == "":
+        decoded_lines.pop()
+    if decoded_lines != log_lines:
+        line_offsets = []
     cutoff_day = time.strftime("%Y-%m-%d", time.localtime(cutoff))
     for line in log_lines:
         parts = line.split()
@@ -183,7 +196,8 @@ if sys.argv[4] == "1":
         parts = line.split()
         in_window = len(parts) >= 3 and parts[0][:10] >= cutoff_day
         call = {"in_window": in_window, "model": parts[2].split("@", 1)[0] if len(parts) >= 3 else "unknown",
-                "earlier_latest_start": earlier_latest_start, "usage": None}
+                "earlier_latest_start": earlier_latest_start, "usage": None,
+                "basis": "estimated", "fast": False}
         # Even a line with malformed details can bound later calls' completion.
         try:
             start = datetime.fromisoformat(parts[0]).timestamp()
@@ -244,7 +258,51 @@ if sys.argv[4] == "1":
             return None
         return tuple(total) if completed else None
 
-    claimed, ambiguous = set(), 0
+    claimed, seen_runs, consumed_events = set(), set(), set()
+    calls_by_offset = {offset: i for i, offset in enumerate(line_offsets)}
+    try:
+        with Path(sys.argv[6]).open(errors="replace") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                run_id, offset = record.get("run_id"), record.get("log_offset")
+                if (not isinstance(run_id, str) or not run_id or run_id in seen_runs
+                        or not isinstance(record.get("log_line"), str)
+                        or type(offset) is not int or offset < 0):
+                    continue
+                seen_runs.add(run_id)
+                i = calls_by_offset.get(offset)
+                if i is None or i in claimed or log_lines[i] != record["log_line"]:
+                    continue
+                claimed.add(i)
+                calls[i]["basis"] = "exact"
+                usage = record.get("usage")
+                if isinstance(usage, dict):
+                    values = [usage.get(k) for k in ("input_tokens", "cached_input_tokens", "output_tokens")]
+                    if all(type(v) is int and v >= 0 for v in values) and values[1] <= values[0]:
+                        calls[i]["usage"] = tuple(values)
+                path = record.get("events")
+                mtime_ns, size = record.get("events_mtime_ns"), record.get("events_size")
+                if (isinstance(path, str) and path and "\0" not in path
+                        and type(mtime_ns) is int and type(size) is int and size >= 0):
+                    consumed_events.add((os.path.realpath(path), mtime_ns, size))
+    except OSError:
+        pass
+
+    legacy_events = []
+    for event in events:
+        try:
+            stat = os.stat(event[1])
+        except OSError:
+            continue
+        if (event[1], stat.st_mtime_ns, stat.st_size) not in consumed_events:
+            legacy_events.append(event)
+    events = legacy_events
+    ambiguous = 0
     pending = 0
     for mtime, path, root, mode in sorted(events):
         if log_mtime is None or mtime > log_mtime:
@@ -341,6 +399,16 @@ if sys.argv[4] == "1":
 
     def counts_text(counts):
         return ", ".join(f"{model} {count}" for model, count in sorted(counts.items()))
+
+    for basis, description in (
+        ("exact", "joined by run identifier"),
+        ("estimated", "matched by event-file time; legacy records without a run identifier"),
+    ):
+        counts = defaultdict(int)
+        for call in window_calls:
+            if call["basis"] == basis and call["usage"] is not None:
+                counts[call["model"]] += 1
+        print(f"attribution {basis}: {sum(counts.values())} call(s) with token data {description} ({counts_text(counts) or 'none'})")
 
     if unpriced_count:
         print(f"unpriced: {unpriced_count} call(s) without surviving token data ({counts_text(unpriced)})")

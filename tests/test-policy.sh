@@ -577,6 +577,18 @@ assert_has "$first_log" "gpt-6-astra" "live first attempt model"
 assert_has "$first_log" "exit=1" "live first attempt exit"
 assert_has "$second_log" "exit=0" "live fallback attempt exit"
 assert_has "$second_log" "fallback-from:gpt-6-astra" "live fallback log marker"
+python3 - "$STATE_LIVE" <<'PY'
+import json, re, sys
+from pathlib import Path
+state = Path(sys.argv[1])
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(records) == 2, records
+assert [row['attempt'] for row in records] == [1, 2], records
+assert len({row['run_id'] for row in records}) == 2, records
+assert all(re.fullmatch(r'[0-9a-f]{32}', row['run_id']) for row in records), records
+assert [row['log_line'] for row in records] == (state / 'codex.log').read_text().splitlines()
+assert [row['fallback_from'] for row in records] == [None, 'gpt-6-astra'], records
+PY
 
 set +e
 out="$(PATH="$FAKEBIN_LIVE:$PATH" CC_ORCH_STATE_DIR="$TMP/state-live-explicit" \
