@@ -860,6 +860,7 @@ MKTEMP
 cat > "$FAKEBIN/chmod" <<'CHMOD'
 #!/usr/bin/env bash
 if [ "${FAKE_SETUP_FAIL:-}" = chmod ] && [[ "${2:-}" == */.codex-*.jsonl ]]; then exit 1; fi
+if [ "${FAKE_FD_CHMOD_FAIL:-0}" = 1 ] && [ "${2:-}" = /dev/fd/7 ]; then exit 1; fi
 exec "$REAL_CHMOD" "$@"
 CHMOD
 cat > "$FAKEBIN/mv" <<'MV'
@@ -1043,5 +1044,176 @@ assert stat.S_IMODE(events.stat().st_mode) == 0o600, oct(stat.S_IMODE(events.sta
 assert not list(events.parent.glob('.codex-*.jsonl'))
 PY
 ok 'existing events mode 0600 survives replacement under umask 0022'
+
+# A private attempt must retain its tokens when a later attempt falls back.
+mv "$FAKEBIN/mktemp" "$FAKEBIN/mktemp.saved"
+mv "$FAKEBIN/flock" "$FAKEBIN/flock.saved"
+cat > "$FAKEBIN/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */.codex-*.jsonl ]] && [ -e "$OVERLAP_MARKER" ]; then
+  : > "$FALLBACK_SETUP_MARKER"
+  exit 1
+fi
+exec "$REAL_MKTEMP" "$@"
+MKTEMP
+cat > "$FAKEBIN/flock" <<'FLOCK'
+#!/usr/bin/env bash
+if [ ! -e "$OVERLAP_MARKER" ]; then
+  : > "$OVERLAP_MARKER"
+  FAKE_USAGE_IN=200 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+    > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+fi
+exec "$REAL_FLOCK" "$@"
+FLOCK
+chmod +x "$FAKEBIN/mktemp" "$FAKEBIN/flock"
+WRAP_STATE="$TMP/private-first-fallback-overlap"
+mkdir -p "$WRAP_STATE"
+export FALLBACK_SETUP_MARKER="$WRAP_STATE/setup-failed" OVERLAP_MARKER="$WRAP_STATE/overlap-fired"
+FAKE_USAGE_IN=100 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+python3 - "$WRAP_STATE" "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+state, events = map(Path, sys.argv[1:])
+assert (state / 'setup-failed').exists() and (state / 'overlap-fired').exists()
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2, records
+b, a = records
+assert b['usage'] is None and b['log_offset'] is None, b
+assert b['log_line'].encode() + b'\n' == lines[0], b
+assert a['usage'] == dict(input_tokens=100, cached_input_tokens=0, output_tokens=0), a
+assert a['log_offset'] == len(lines[0]), a
+assert a['log_line'].encode() + b'\n' == lines[1], a
+assert len({row['run_id'] for row in records}) == 2
+assert len({row['pid'] for row in records}) == 2
+assert '"input_tokens":200' in events.read_text()
+assert (a['events_mtime_ns'], a['events_size']) != (events.stat().st_mtime_ns, events.stat().st_size)
+assert not list(events.parent.glob('.codex-*.jsonl'))
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'private-first fallback overlap'
+assert_row $'gpt-6.1-sol\t2\t0\t300\t0\t0\t0.0006\t0.0030'
+assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'private and fallback attempts priced'
+attribution 1 1
+mv "$FAKEBIN/mktemp.saved" "$FAKEBIN/mktemp"
+mv "$FAKEBIN/flock.saved" "$FAKEBIN/flock"
+ok 'later setup fallback preserves the private attempt and prices its own surviving events by estimate'
+
+# Publish a foreign file precisely between the fallback unlink and exclusive create.
+export REAL_RM="$(command -v rm)" RM_RACE_CONTENT="$TMP/race-foreign-events"
+printf '%s\n' '{"type":"thread.started","thread_id":"00000000-0000-4000-8000-0000000000cc"}' \
+  '{"type":"error","message":"This model is not supported"}' > "$RM_RACE_CONTENT"
+cat > "$FAKEBIN/rm" <<'RM'
+#!/usr/bin/env bash
+target="${!#}"
+if [ -n "${RM_RACE_MARKER:-}" ] && [ ! -e "$RM_RACE_MARKER" ] && [[ "$target" == */codex-implement.jsonl ]]; then
+  "$REAL_RM" "$@" || exit "$?"
+  cat "$RM_RACE_CONTENT" > "$target"
+  : > "$RM_RACE_MARKER"
+  exit 0
+fi
+exec "$REAL_RM" "$@"
+RM
+chmod +x "$FAKEBIN/rm"
+cp "$WRAP_TASK/.codex-session" "$TMP/race-session-before"
+for race_model in sol default; do
+  WRAP_STATE="$TMP/exclusive-create-race-$race_model"
+  mkdir -p "$WRAP_STATE"
+  export RM_RACE_MARKER="$WRAP_STATE/race-fired"
+  rm -f "$WRAP_TASK/impl-report-codex.md"
+  race_args=()
+  if [ "$race_model" = sol ]; then race_args=(--model sol --effort high); fi
+  actual_rc=0
+  FAKE_SETUP_FAIL=mktemp wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" \
+    "${race_args[@]}" || actual_rc=$?
+  assert_eq "$actual_rc" 1 "exclusive-create race ($race_model)"
+  assert_has "$(cat "$TMP/wrapper.err")" 'could not create events file' 'exclusive-create failure diagnostic'
+  [ ! -e "$WRAP_TASK/impl-report-codex.md" ] || fail 'Codex ran after losing exclusive create'
+  python3 - "$WRAP_STATE" "$WRAP_TASK" "$RM_RACE_CONTENT" "$TMP/race-session-before" "$race_model" <<'PY'
+import json, sys
+from pathlib import Path
+state, task, expected, session_before = map(Path, sys.argv[1:5])
+assert (state / 'race-fired').exists(), 'exclusive-create race did not fire'
+assert (task / 'codex-implement.jsonl').read_bytes() == expected.read_bytes()
+assert (task / '.codex-session').read_bytes() == session_before.read_bytes()
+assert b'0000000000cc' not in (task / '.codex-session').read_bytes()
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 1, (lines, records)
+row = records[0]
+assert row['usage'] is None and row['log_offset'] is None, row
+assert row['exit'] == 1 and row['attempt'] == 1, row
+assert row['model'] == ('gpt-6.1-sol' if sys.argv[5] == 'sol' else 'gpt-6-astra'), row
+assert row['log_line'].encode() + b'\n' == lines[0], row
+assert not list(task.glob('.codex-*.jsonl'))
+PY
+done
+rm "$FAKEBIN/rm"
+unset RM_RACE_MARKER RM_RACE_CONTENT
+ok 'exclusive-create race preserves foreign bytes and stops Codex, retry, and session updates'
+
+# Fallback keeps existing private permissions and starts restrictive if chmod fails.
+WRAP_STATE="$TMP/fallback-existing-events-mode"
+printf 'previous events\n' > "$WRAP_TASK/codex-implement.jsonl"
+chmod 0600 "$WRAP_TASK/codex-implement.jsonl"
+: > "$TMP/event-mode-reference"
+chmod 0600 "$TMP/event-mode-reference"
+(
+  # Keep the old inode allocated so immediate filesystem reuse cannot mask replacement.
+  exec 6<"$WRAP_TASK/codex-implement.jsonl"
+  old_inode="$(stat -c %i "$WRAP_TASK/codex-implement.jsonl")"
+  umask 0022
+  FAKE_SETUP_FAIL=mktemp FAKE_CHECK_FD7=1 FAKE_USAGE_IN=300 \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+  check_events 300
+  python3 - "$WRAP_TASK/codex-implement.jsonl" "$old_inode" <<'PY'
+import sys
+from pathlib import Path
+assert Path(sys.argv[1]).stat().st_ino != int(sys.argv[2]), 'fallback reused the old inode'
+PY
+  exec 6<&-
+)
+WRAP_STATE="$TMP/fallback-fd-chmod-failure"
+rm -f "$WRAP_TASK/codex-implement.jsonl"
+(
+  umask 0022
+  actual_rc=0
+  FAKE_SETUP_FAIL=mktemp FAKE_FD_CHMOD_FAIL=1 FAKE_CHECK_FD7=1 FAKE_USAGE_IN=400 \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high || actual_rc=$?
+  assert_eq "$actual_rc" 0 'fallback still runs after fd chmod failure'
+)
+check_events 400
+ok 'fallback replaces existing 0600 inodes and stays 0600 when fd chmod fails'
+
+# Execute the actual writer with strings that lack Python 3.9 prefix/suffix methods.
+python3 - "$ROOT/bin/codex-run" "$TMP/old-python-writer" <<'PY'
+import ast, json, re, sys
+from pathlib import Path
+wrapper_source, state = map(Path, sys.argv[1:])
+state.mkdir()
+src, = [block for block in re.findall(r"<<'PY'\n(.*?)\nPY", wrapper_source.read_text(), re.S)
+        if 'fallback_from=' in block]
+
+class OldStr(str):
+    def __getattribute__(self, name):
+        if name in ('removeprefix', 'removesuffix'):
+            raise AttributeError(name)
+        return super().__getattribute__(name)
+
+for index, (fallback, expected) in enumerate((('fallback-from:gpt-6-astra', 'gpt-6-astra'),
+                                             ('', None), ('other', 'other'))):
+    runs = state / ('runs-%s.jsonl' % index)
+    events = str(state / 'absent-events')
+    sys.argv = ['-', str(runs), '1', '1', '2026-10-07T00:00:00+00:00', '2026-10-07T00:00:01+00:00',
+                'implement', 'implement', 'implement', 'gpt-6.1-sol', 'high', '0', OldStr(fallback),
+                '0', str(state), str(state), events, '', 'line', '0', events]
+    exec(compile(src, 'writer', 'exec'), {'__name__': '__main__'})
+    row = json.loads(runs.read_text())
+    assert row['fallback_from'] == expected, row
+assert not any(isinstance(node, ast.Attribute) and node.attr in ('removeprefix', 'removesuffix')
+               for node in ast.walk(ast.parse(src)))
+PY
+ok 'record writer supports strings without Python 3.9 prefix and suffix methods'
 
 echo "PASS: $pass usage-cost test groups"
