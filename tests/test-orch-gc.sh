@@ -97,6 +97,8 @@ TASK = '01-task'
 
 def git(repo, *args):
     return subprocess.check_output(['git', '-c', 'user.name=t', '-c', 'user.email=t@t',
+                                    '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+                                    '-c', 'gc.autoDetach=false',
                                     '-c', 'protocol.file.allow=always', '-C', str(repo), *args],
                                    stderr=subprocess.PIPE, text=True).strip()
 
