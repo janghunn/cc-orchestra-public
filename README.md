@@ -100,6 +100,8 @@ cd ~/cc-orchestra
 ./install.sh --check
 ```
 
+`./install.sh --dry-run`은 파일을 변경하지 않고 설치 예정 작업을 보여준다([변경 항목](OPERATIONS.ko.md#cc-orchestra가-머신에서-변경하는-항목)).
+
 설치 명령은 기본적으로 `~/.local/bin`에 연결된다. `cc-orch: command not found`가 나오면
 `export PATH="$HOME/.local/bin:$PATH"`로 현재 셸의 PATH에 추가하고, 같은 설정을
 `~/.profile`과 `~/.bashrc`에도 저장한다. `./install.sh --bootstrap`은 `~/.local/bin`을

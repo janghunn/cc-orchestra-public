@@ -21,6 +21,7 @@ orch-model-guard -> bin/orch-model-guard-runtime -> 기존 bin/orch-model-guard
 
 ```bash
 git pull
+./install.sh --dry-run
 ./install.sh
 ./install.sh --check
 
@@ -58,7 +59,35 @@ agent frontmatter로 자동 활성화되는 verifier guard는
 
 이 런타임 기능을 처음 설치한 뒤 이미 실행 중이던 cc-orch 세션이 있다면, 새로 생성된 16개의 `route-lead-*` agent type을 Claude Code가 캐시하도록 **한 번만 reload**하는 것이 좋습니다. 그 이후에는 일반적인 사용량 변화나 리셋 시각 변화 때문에 다시 reload할 필요가 없습니다.
 
-`build-roster-runtime.sh`는 렌더링한 38개 프로필의 대상 경로, 원본 템플릿, 양쪽 SHA-256 해시와 저장소 커밋을 `${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}/.install-manifest.json`에 NDJSON으로 기록합니다(`CC_ORCH_MANIFEST`로 경로 변경 가능). `~/.claude/orchestra/bin/orch-doctor [manifest-path]`로 파일 누락, 출력 변경, 오래된 템플릿, 저장소 버전 불일치를 확인할 수 있으며, 모두 일치하면 0, 문제가 있으면 1, 매니페스트가 없거나 잘못되었으면 2로 종료합니다. 선택적으로 표시되는 upstream 안내는 fetch 없이 로컬 추적 ref만 비교하므로 아직 fetch하지 않은 원격 변경은 감지하지 못합니다. `build-roster.sh`만 실행하면 매니페스트는 22개 프로필만 추적하며, 기존 route 파일은 디스크에 남지만 runtime builder를 다시 실행할 때까지 추적 대상에서 빠집니다. Quota에 따른 `orch-model-guard set` 전환은 매니페스트 갱신 없이 렌더링된 파일을 의도적으로 변경하므로, 해당 `lead-*.md`의 `DRIFTED` 표시는 다음 roster 재빌드까지 예상되는 정상 동작입니다.
+`build-roster-runtime.sh`는 렌더링한 39개 프로필의 대상 경로, 원본 템플릿, 양쪽 SHA-256 해시와 저장소 커밋을 `${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}/.install-manifest.json`에 NDJSON으로 기록합니다(`CC_ORCH_MANIFEST`로 경로 변경 가능). `~/.claude/orchestra/bin/orch-doctor [manifest-path]`로 파일 누락, 출력 변경, 오래된 템플릿, 저장소 버전 불일치를 확인할 수 있으며, 모두 일치하면 0, 문제가 있으면 1, 매니페스트가 없거나 잘못되었으면 2로 종료합니다. 선택적으로 표시되는 upstream 안내는 fetch 없이 로컬 추적 ref만 비교하므로 아직 fetch하지 않은 원격 변경은 감지하지 못합니다. `build-roster.sh`만 실행하면 매니페스트는 23개 프로필만 추적하며, 기존 route 파일은 디스크에 남지만 runtime builder를 다시 실행할 때까지 추적 대상에서 빠집니다. Quota에 따른 `orch-model-guard set` 전환은 매니페스트 갱신 없이 렌더링된 파일을 의도적으로 변경하므로, 해당 `lead-*.md`의 `DRIFTED` 표시는 다음 roster 재빌드까지 예상되는 정상 동작입니다.
+
+## cc-orchestra가 머신에서 변경하는 항목
+
+`./install.sh --dry-run`으로 설치 작업을 미리 확인합니다. `--codex-only`,
+`--safety-hooks-only`와 함께 사용할 수 있으며, 설치 대상 변경이나 사용량 조회는 하지 않습니다.
+프로필 비교는 `$TMPDIR`(기본 `/tmp`) 아래 임시 공간에서 렌더링합니다. 경로를 해석한 결과
+HOME·저장소·설치 대상 안이면 `/tmp`를 사용하고, 둘 다 안전하지 않으면 비교 불가로 표시합니다.
+임시 공간은 종료 전에 삭제합니다. Builder는 저장소 커밋과 현재 guard state의 임시 복사본을
+읽습니다. 실제 설치는 먼저 quota를 갱신하므로 16개 `lead-*.md`와 manifest 비교는
+`state-dependent`입니다. `--bootstrap`, `--check`와의 조합은 오류로 거부합니다.
+
+| 시점 | 변경 항목 |
+|---|---|
+| `./install.sh`: 링크·권한 | `~/.claude/orchestra`, `~/.claude/agents/{orchestrator,verifier-normal}.md`, `~/.local/bin`의 9개 명령 `cc-orch`, `codex-run`, `orch-model-guard`, `orch-summary-check`, `orch-usage-report`, `orch-archive`, `cc-orch-codex`, `codex-run-codex`, `orch-codex-route`를 연결합니다(`CC_ORCH_BIN_DIR`). 기존 일반 파일은 `<dest>.pre-cc-orchestra`로 이동하고 다른 symlink는 교체합니다. 저장소 `*.sh`, `bin/*`, `hooks/*.sh`에 `chmod +x`를 실행합니다. |
+| `./install.sh`: 프로필 | `~/.claude/agents`에 39개 프로필과 `.install-manifest.json`을 생성합니다(`CC_ORCH_AGENTS_DIR`, `CC_ORCH_MANIFEST`). 프로필 교체 시 백업하지 않습니다. |
+| `./install.sh`: 설정 | `~/.claude/settings.json`에 `UserPromptSubmit` runtime-context·`orch-model-notice.sh`, `PreToolUse` / `SubagentStop` / `SessionStart` safety hook을 병합합니다. `statusLine`을 교체하고, 다른 status line을 인수할 때 이전 값을 `~/.claude/orchestra-state/statusline.previous.json`에 저장합니다. Notice 등록 시 기존 설정을 매 설치마다 `~/.claude/backups/settings.json.<epoch>.bak`에 복사합니다. `CC_ORCH_SETTINGS`는 runtime-context를 제외한 설정 경로를 바꾸며, runtime-context는 항상 `~/.claude/settings.json`을 사용합니다. |
+| `./install.sh`: guard·unit | 사용량을 조회하고 `~/.claude/orchestra-state/{state,guard.log,last-usage.txt,budget-state,.lock,.budget.lock}`을 갱신합니다(`CC_ORCH_STATE_DIR`). Quota 전환은 lead 모델도 수정할 수 있습니다. `~/.config/systemd/user/orch-model-guard.{service,timer}`를 쓰고(`CC_ORCH_UNIT_DIR`), `systemctl --user daemon-reload`, `systemctl --user enable --now orch-model-guard.timer`를 실행합니다. 실행 가능한 Claude CLI가 없으면 unit·notice hook을 건너뛰지만 statusLine은 설치합니다. |
+| `--codex-only` / `--safety-hooks-only` | Codex-only는 `~/.local/bin`의 `cc-orch`, `cc-orch-codex`, `codex-run`, `codex-run-codex`, `orch-codex-route`, `orch-summary-check` 6개 링크를 생성합니다. Safety-only는 설정 파일에 safety hook 3개만 병합합니다. 필요한 부모 디렉터리도 생성합니다. |
+| `--dry-run` / `--check` | Dry-run은 설치 대상을 변경하지 않으며 위의 임시 렌더링만 파일을 씁니다. `--check`는 설치 파일을 교체하지 않지만 `budget --compact`가 사용량을 조회하고 state 디렉터리를 갱신할 수 있으며 프로필 검증도 임시 렌더링을 사용합니다. |
+| `--bootstrap` | 시스템 패키지·provider CLI를 설치하고 `~/.profile` / `~/.bashrc`에 PATH를 추가하며 provider 로그인 후 runtime 설치·검증을 수행합니다. |
+| 런타임: 세션·작업 | `<state>/projects/<name>`, `<state>/sessions/<name>.conf`, `<state>/worktrees/<project>/<name>`(`CC_ORCH_WORKTREE_ROOT`) 및 Git worktree·branch 메타데이터를 씁니다. `.orchestra/BACKEND-HANDOFF.md`, `.orchestra/<task>/codex-*.jsonl`, `codex-*.stderr.log`, `.codex-session`, `<state>/codex.log`도 생성·갱신합니다. Hybrid state 기본값은 `~/.claude/orchestra-state`, Codex backend 기본값은 `~/.local/state/cc-orchestra-codex`입니다. |
+| 런타임: 예산·archive·CLI 갱신 | 예산·state 파일을 갱신하며 설치된 timer는 5분마다 조회합니다(`POLL_MINUTES`). `orch-archive`는 `~/orchestra-vault`, `~/.claude/orchestra-archive/raw`에 씁니다(`ORCH_ARCHIVE_VAULT`, `ORCH_ARCHIVE_RAW`). `cc-orch` 시작 시 `${XDG_STATE_HOME:-~/.local/state}/cc-orchestra/cli-update.lock`(보통 `~/.local/state/cc-orchestra/cli-update.lock`)과 Claude Code / Codex의 `npm install -g`를 사용합니다(`CC_ORCH_CLI_AUTO_UPDATE=0`이면 비활성화). |
+| 제거 | `orch-model-guard uninstall`은 unit·notice hook을 제거하고 이전 statusLine을 복구하며 `statusline.previous.json`을 삭제합니다. State는 남깁니다. 전체 제거 명령은 없으므로 명령·저장소·agent 링크, 생성 프로필·manifest, runtime-context·safety hook, 백업, state·registry·worktree, archive, bootstrap PATH 항목·provider 패키지는 필요에 따라 수동으로 제거합니다. |
+
+재설치는 guard state를 갱신하고 timestamp 설정 백업을 생성합니다. Notice 항목은 매번
+제거 후 마지막에 추가하므로 두 번째 설치에서 runtime-context 뒤로 순서가 바뀔 수 있으며,
+이후 순서는 안정됩니다. 사용자 지정 설정의 부모 디렉터리가 없으면 notice 등록이 실패한 뒤
+statusLine 단계가 부모를 생성하므로 미리보기에서는 해당 notice 단계를 skipped로 표시합니다.
 
 ## 지속형 세션과 worktree
 

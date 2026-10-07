@@ -16,6 +16,7 @@ BIN_DIR="${CC_ORCH_BIN_DIR:-$HOME/.local/bin}"
 RUNTIME_HOOK="$REPO_DIR/hooks/orch-runtime-context.sh"
 
 MODE=install
+DRY_RUN=0
 SKIP_AUTH=0
 SKIP_TESTS=0
 
@@ -23,6 +24,7 @@ usage() {
   cat <<'EOF'
 usage:
   ./install.sh
+  ./install.sh --dry-run [--codex-only|--safety-hooks-only]
   ./install.sh --check
   ./install.sh --safety-hooks-only
   ./install.sh --codex-only
@@ -37,6 +39,8 @@ modes:
                 complete provider logins, install cc-orchestra, and run regression tests
 
 options:
+  --dry-run     preview install actions without writes to install targets; temporary profile
+                rendering uses a safe directory under $TMPDIR or /tmp, removed before exit
   --skip-auth   with --bootstrap, do not launch interactive Claude/Codex login flows
   --skip-tests  with --bootstrap, skip repository regression tests
   -h, --help    show this help
@@ -50,6 +54,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --dry-run) DRY_RUN=1 ;;
     --check)
       [[ "$MODE" == install ]] || { echo "ERROR: choose only one mode." >&2; exit 2; }
       MODE=check
@@ -74,6 +79,15 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "$DRY_RUN" == 1 && "$MODE" == bootstrap ]]; then
+  echo 'ERROR: --dry-run does not preview --bootstrap (system packages, provider installers, logins); run ./install.sh --dry-run to preview the install step.' >&2
+  exit 2
+fi
+if [[ "$DRY_RUN" == 1 && "$MODE" == check ]]; then
+  echo 'ERROR: --dry-run and --check cannot be combined; --check inspects, --dry-run previews.' >&2
+  exit 2
+fi
+
 if [[ "$MODE" != bootstrap && ( "$SKIP_AUTH" == 1 || "$SKIP_TESTS" == 1 ) ]]; then
   echo "ERROR: --skip-auth/--skip-tests are only valid with --bootstrap." >&2
   exit 2
@@ -87,6 +101,22 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 link() { # link <source> <dest>
   local src="$1" dest="$2"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    dest="$(plan_path "$dest")"
+    if [[ -L "$dest" ]]; then
+      local current; current="$(readlink -f "$dest" || readlink "$dest")"
+      if [[ "$current" == "$(readlink -f "$src")" ]]; then
+        plan unchanged "$dest -> $src"
+      else
+        plan relink "$dest -> $src (was -> $current)"
+      fi
+    elif [[ -e "$dest" ]]; then
+      plan backup-then-replace "$dest -> $dest.pre-cc-orchestra"
+    else
+      plan create "$dest -> $src"
+    fi
+    return
+  fi
   if [[ -L "$dest" ]]; then
     local cur; cur="$(readlink -f "$dest")"
     [[ "$cur" == "$(readlink -f "$src")" ]] && { echo "  ok       $dest"; return; }
@@ -136,7 +166,7 @@ PY
 
 install_safety_hooks() {
   python3 - "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}" "$REPO_DIR" "${1:-repair}" <<'PY'
-import json, os, re, shlex, sys, tempfile
+import copy, json, os, re, shlex, sys, tempfile
 SAFETY_HOOKS = (
     ("PreToolUse", "Bash", "orch-worktree-guard.sh", 10),
     ("SubagentStop", "(route-)?lead-.*", "orch-stop-gate.sh", 30),
@@ -215,12 +245,23 @@ if mode == "check":
             print(f"  ok       {basename} in settings.json")
     raise SystemExit(rc)
 
-os.makedirs(os.path.dirname(path), exist_ok=True)
+if mode != "plan":
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 settings = {}
 if os.path.exists(path):
-    with open(path, encoding="utf-8") as source:
-        settings = json.load(source)
+    try:
+        with open(path, encoding="utf-8") as source:
+            settings = json.load(source)
+    except (OSError, ValueError) as exc:
+        if mode != "plan":
+            raise
+        print(f"{'merge-json':20s} {path} ERROR: {exc} (the install would stop here)")
+        raise SystemExit(1)
+elif mode == "plan":
+    print(f"{'create':20s} {path}")
 hooks = settings.setdefault("hooks", {})
+if mode == "plan":
+    original_hooks = copy.deepcopy(hooks)
 for event, matcher, basename, timeout in SAFETY_HOOKS:
     entries = hooks.setdefault(event, [])
     if not isinstance(entries, list):
@@ -256,6 +297,21 @@ for event, matcher, basename, timeout in SAFETY_HOOKS:
             # Preserve the matcher and position of any co-located user hooks.
             kept_entry["hooks"][:] = [item for item in kept_entry["hooks"] if item is not kept_hook]
             entries.append({"matcher": matcher, "hooks": [kept_hook]})
+if mode == "plan":
+    for event, matcher, basename, timeout in SAFETY_HOOKS:
+        before = original_hooks.get(event, [])
+        command = "bash " + shlex.quote(os.path.join(repo, "hooks", basename)) + " || true"
+        matches = [hook for entry in before if isinstance(entry, dict)
+                   and isinstance(entry.get("hooks"), list)
+                   for hook in entry["hooks"] if our_shape(hook, basename, command)]
+        action = "unchanged" if before == hooks[event] else "canonicalise" if matches else "add"
+        print(f"{'merge-json':20s} {path} hooks.{event}[{matcher}]: {action} {basename}")
+        unrelated = sum(1 for entry in before if isinstance(entry, dict)
+                        and isinstance(entry.get("hooks"), list)
+                        for hook in entry["hooks"] if not our_shape(hook, basename, command))
+        if unrelated:
+            print(f"{'merge-json':20s} {path} hooks.{event}: keep {unrelated} unrelated hook(s)")
+    raise SystemExit(0)
 fd, tmp = tempfile.mkstemp(prefix="settings.", dir=os.path.dirname(path), text=True)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as out:
@@ -531,10 +587,312 @@ ensure_provider_auth() {
   fi
 }
 
+# Dry-run helpers only inspect install targets. The roster builder is confined to disposable storage.
+plan() { printf '%-20s %s\n' "$1" "$2"; }
+
+plan_path() { python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$1"; }
+
+declare -A PLANNED_DIRS=()
+plan_dir() {
+  local dir; dir="$(plan_path "$1")"
+  if [[ ! -d "$dir" && ( -e "$dir" || -L "$dir" ) ]]; then
+    plan error "$dir (exists and is not a directory; the install would stop here)"
+    exit 1
+  fi
+  [[ -z "${PLANNED_DIRS[$dir]:-}" ]] || return 0
+  if [[ -d "$dir" ]]; then
+    plan unchanged "${dir%/}/"
+  else
+    plan_dir "$(dirname "$dir")"
+    plan create "${dir%/}/"
+  fi
+  PLANNED_DIRS[$dir]=1
+}
+
+dry_run_install_rest() {
+  local bin poll refresh
+  bin="${CLAUDE_BIN:-$(command -v claude || true)}"
+  poll="$(. "$REPO_DIR/model-policy.conf"; printf '%s' "$POLL_MINUTES")"
+  refresh="$(. "$REPO_DIR/budget-policy.conf"; printf '%s' "${BUDGET_STATUSLINE_REFRESH_SECONDS:-60}")"
+  python3 - "$REPO_DIR" "$BIN_DIR" "$bin" "$poll" <<'PY'
+import glob, json, os, pathlib, shutil, stat, subprocess, sys, tempfile
+repo, bin_dir, claude, poll = sys.argv[1:]
+# Guard facades resolve their own script path; the installer and roster keep the logical path.
+guard_repo = os.path.realpath(repo)
+bin_dir = os.path.abspath(bin_dir)
+home = os.environ['HOME']
+agents = os.path.abspath(os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents')
+manifest = os.path.abspath(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json')
+state = os.path.abspath(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state')
+units = os.path.abspath(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user')
+h = os.path.abspath(home + '/.claude/settings.json')
+s = os.path.abspath(os.environ.get('CC_ORCH_SETTINGS') or h)
+
+def plan(action, detail):
+    print(f'{action:20s} {detail}', flush=True)
+
+planned = set()
+def remember(path):
+    path = os.path.abspath(path)
+    planned.update(str(p) for p in (pathlib.Path(path), *pathlib.Path(path).parents))
+remember(home + '/.claude/agents')
+remember(bin_dir)
+def plan_dir(path):
+    path = os.path.abspath(path)
+    if os.path.lexists(path) and not os.path.isdir(path):
+        plan('error', path + ' (exists and is not a directory; the install would stop here)')
+        raise SystemExit(1)
+    if path in planned:
+        return
+    if os.path.isdir(path):
+        plan('unchanged', path.rstrip('/') + '/')
+        planned.add(path)
+        return
+    plan_dir(os.path.dirname(path))
+    plan('create', path.rstrip('/') + '/')
+    planned.add(path)
+
+mask = os.umask(0)
+os.umask(mask)
+unchanged = 0
+for path in sorted(glob.glob(repo + '/*.sh') + glob.glob(repo + '/bin/*') + glob.glob(repo + '/hooks/*.sh')):
+    old = stat.S_IMODE(os.stat(path).st_mode)
+    new = old | (0o111 & ~mask)
+    if new != old:
+        plan('chmod', f'{path} ({old:04o} -> {new:04o})')
+    else:
+        unchanged += 1
+plan('unchanged', f'chmod +x ({unchanged} files already executable)')
+plan_dir(state)
+backend_codex = (os.environ.get('CC_ORCH_BACKEND') or 'claude') == 'codex'
+if backend_codex:
+    plan('state-dependent', state + '/ (CC_ORCH_BACKEND=codex: Codex budget refresh only)')
+else:
+    plan('state-dependent', state + '/ (orch-model-guard check: polls Claude usage; refreshes .lock state guard.log last-usage.txt budget-state .budget.lock)')
+    plan('state-dependent', agents + '/lead-*.md (a quota switch rewrites model lines)')
+plan_dir(agents)
+plan_dir(os.path.dirname(manifest))
+
+# Resolve symlinks before choosing scratch space: even create+delete would change target metadata.
+targets = [os.path.realpath(p) for p in
+           (home, state, agents, os.path.dirname(manifest), units, bin_dir,
+            os.path.dirname(h), os.path.dirname(s), repo)]
+base = next((os.path.realpath(p) for p in (os.environ.get('TMPDIR') or '/tmp', '/tmp')
+             if os.path.isdir(p) and os.access(p, os.W_OK | os.X_OK)
+             and not any(os.path.commonpath((os.path.realpath(p), t)) == t for t in targets)), None)
+
+def compare(path, data, mode=None, through=False):
+    exists = os.path.lexists(path)
+    equal = False
+    if os.path.isfile(path):
+        equal = pathlib.Path(path).read_bytes() == data
+        if not through:
+            equal = equal and not os.path.islink(path) and stat.S_IMODE(os.stat(path).st_mode) == mode
+    action = 'unchanged' if equal else 'replace' if exists else 'create'
+    detail = ''
+    if action == 'replace':
+        detail = (f' (writes through symlink to {os.path.realpath(path)})'
+                  if through and os.path.islink(path) else ' (replaced, no backup)')
+    return action, path + detail
+
+if base is None:
+    plan('state-dependent', agents + '/ (profiles not pre-rendered: no temporary directory outside the install targets)')
+else:
+    tmp = None
+    try:
+        tmp = tempfile.mkdtemp(prefix='cc-orchestra-plan.', dir=base)
+        scratch_agents = tmp + '/agents'
+        scratch_manifest = scratch_agents + '/.install-manifest.json'
+        os.mkdir(tmp + '/state')
+        if os.access(state + '/state', os.R_OK):
+            shutil.copyfile(state + '/state', tmp + '/state/state')
+        env = dict(os.environ, CC_ORCH_AGENTS_DIR=scratch_agents,
+                   CC_ORCH_MANIFEST=scratch_manifest, CC_ORCH_STATE_DIR=tmp + '/state', TMPDIR=tmp)
+        env.pop('CC_ORCH_MANIFEST_NO_COMMIT', None)
+        env.pop('CC_ORCH_MANIFEST_STAGING', None)
+        rendered = subprocess.run(['bash', repo + '/build-roster-runtime.sh'], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if rendered.returncode:
+            raise ValueError(rendered.stderr.strip() or f'builder exit {rendered.returncode}')
+        counts = dict(create=0, replace=0, unchanged=0)
+        profiles = sorted(pathlib.Path(scratch_agents).glob('*.md'))
+        for profile in profiles:
+            action, detail = compare(agents + '/' + profile.name, profile.read_bytes(),
+                                     stat.S_IMODE(profile.stat().st_mode), profile.name.startswith('route-lead-'))
+            counts[action] += 1
+            if action != 'unchanged':
+                plan(action, detail)
+        leads = sum(p.name.startswith('lead-') for p in profiles)
+        plan('generate-profiles', f'{agents}/ ({len(profiles)} profiles: {counts["create"]} create, '
+             f'{counts["replace"]} replace, {counts["unchanged"]} unchanged; {leads} lead-*.md and '
+             'the manifest use the current guard state — state-dependent)')
+        # The builder records absolute destinations even when overrides were relative.
+        # Manifest paths are JSON escaped by the real builder.
+        data = pathlib.Path(scratch_manifest).read_text()
+        for old, new in ((scratch_manifest, manifest), (scratch_agents, agents)):
+            data = data.replace(json.dumps(old, ensure_ascii=False)[1:-1], json.dumps(new, ensure_ascii=False)[1:-1])
+        plan(*compare(manifest, data.encode(), stat.S_IMODE(os.stat(scratch_manifest).st_mode)))
+    except (OSError, ValueError) as exc:
+        plan('state-dependent', f'{agents}/ (profiles could not be pre-rendered: {str(exc).replace(chr(10), "; ")})')
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp)
+
+if backend_codex:
+    plan('error', 'orch-model-guard install (CC_ORCH_BACKEND=codex refuses it; the real install stops here: no units, hooks or status line)')
+    raise SystemExit(1)
+if not os.access(claude, os.X_OK):
+    plan('unchanged', 'orch-model-guard install (claude not on PATH: skips units and the notice hook)')
+else:
+    plan_dir(units)
+    source = pathlib.Path(guard_repo + '/bin/orch-model-guard').read_text()
+    for ext in ('service', 'timer'):
+        path = units + '/orch-model-guard.' + ext
+        marker = '  cat > "$UNIT_DIR/orch-model-guard.' + ext + '" <<EOF\n'
+        if marker not in source or '\nEOF\n' not in source.split(marker, 1)[1]:
+            plan('replace', path + ' (content not previewed)')
+            continue
+        body = source.split(marker, 1)[1].split('\nEOF\n', 1)[0] + '\n'
+        body = body.replace('$(dirname "$bin")', os.path.dirname(claude) or '.').replace('$REPO_DIR', guard_repo).replace('${POLL_MINUTES}', poll)
+        plan(*compare(path, body.encode(), through=True))
+    detail = ('systemctl --user daemon-reload; enable --now' if shutil.which('systemctl') else
+              'systemctl not found; the install will report an error here')
+    plan('enable-unit', f'orch-model-guard.timer ({detail})')
+PY
+  dry_run_settings "$bin" "$refresh"
+  # The settings planner already reports creation of a missing settings file.
+  install_safety_hooks plan | sed '/^create /d'
+}
+
+dry_run_settings() {
+  python3 - "$REPO_DIR" "$BIN_DIR" "$1" "$2" <<'PY'
+import copy, json, os, pathlib, sys
+repo, bin_dir, claude, refresh = sys.argv[1:]
+guard_repo = os.path.realpath(repo)
+bin_dir = os.path.abspath(bin_dir)
+home = os.environ['HOME']
+h = os.path.abspath(home + '/.claude/settings.json')
+raw_settings = os.environ.get('CC_ORCH_SETTINGS') or h
+s = os.path.abspath(raw_settings)
+state = os.path.abspath(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state')
+agents = os.path.abspath(os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents')
+manifest = os.path.abspath(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json')
+units = os.path.abspath(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user')
+settings = {}
+created = set()
+planned_dirs = set()
+
+# Account for mkdir -p from every preceding install step, including shared ancestors.
+def remember(path):
+    directory = pathlib.Path(os.path.abspath(path))
+    planned_dirs.update(os.path.realpath(p) for p in (directory, *directory.parents))
+
+for directory in (home + '/.claude/agents', bin_dir, state, agents, os.path.dirname(manifest)):
+    remember(directory)
+if os.access(claude, os.X_OK):
+    remember(units)
+
+def plan(action, detail):
+    print(f'{action:20s} {detail}')
+
+def plan_dir(path):
+    path = os.path.abspath(path)
+    if os.path.lexists(path) and not os.path.isdir(path):
+        plan('error', path + ' (exists and is not a directory; the install would stop here)')
+        raise SystemExit(1)
+    if os.path.realpath(path) in planned_dirs or os.path.isdir(path):
+        return
+    plan_dir(os.path.dirname(path))
+    plan('create', path + '/')
+    remember(path)
+
+def load(path):
+    if path not in settings:
+        settings[path] = {}
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as source:
+                settings[path] = json.load(source)
+    return settings[path]
+
+def create(path):
+    plan_dir(os.path.dirname(path))
+    if not os.path.exists(path) and path not in created:
+        plan('create', path)
+        created.add(path)
+
+path = s
+try:
+    current = load(s)
+    if os.access(claude, os.X_OK):
+        if os.path.realpath(os.path.dirname(s)) not in planned_dirs and not os.path.isdir(os.path.dirname(s)):
+            plan('merge-json', s + ' hooks.UserPromptSubmit: skipped orch-model-notice.sh (parent directory missing; orch-model-guard install cannot write it — existing behaviour)')
+        else:
+            if os.path.exists(s):
+                plan_dir(home + '/.claude/backups')
+                plan('backup-then-replace', s + ' -> ' + home + '/.claude/backups/settings.json.<timestamp>.bak')
+            create(s)
+            hooks = current.setdefault('hooks', {})
+            before = copy.deepcopy(hooks.get('UserPromptSubmit', []))
+            removed = [e for e in before if any('orch-model-notice.sh' in hook.get('command', '') for hook in e.get('hooks', []))]
+            kept = [e for e in before if e not in removed]
+            canonical = {'matcher': '*', 'hooks': [{'type': 'command', 'command': "bash '%s'" % (guard_repo + '/hooks/orch-model-notice.sh'), 'timeout': 10}]}
+            after = kept + [canonical]
+            hooks['UserPromptSubmit'] = after
+            action = 'unchanged' if before == after else 'replace' if removed else 'add'
+            detail = ''
+            if action == 'replace':
+                detail = f' ({len(removed)} entries removed; entry re-appended last; order changes or registration canonicalised)'
+                other = sum('orch-model-notice.sh' not in hook.get('command', '') for e in removed for hook in e.get('hooks', []))
+                if other:
+                    detail += f' (WARNING: removed entries also carried {other} other hook(s))'
+            plan('merge-json', f'{s} hooks.UserPromptSubmit: {action} orch-model-notice.sh{detail}; keep {len(kept)} other UserPromptSubmit entries')
+    if not os.path.dirname(raw_settings):
+        # register_statusline calls makedirs(dirname(raw_settings)); the facade continues on failure.
+        plan('merge-json', s + ' statusLine: unchanged (settings path has no parent component; registration fails before writing)')
+    else:
+        create(s)
+        cur = current.get('statusLine')
+        ours = isinstance(cur, dict) and 'orch-statusline.sh' in str(cur.get('command', ''))
+        replacement = dict(cur) if isinstance(cur, dict) else {}
+        replacement.update(type='command', command='bash ' + repr(guard_repo + '/hooks/orch-statusline.sh'))
+        replacement.setdefault('refreshInterval', int(refresh))
+        detail = 'unchanged (already orch-statusline.sh)' if replacement == cur else 'replace ' + str(cur.get('command', 'none') if isinstance(cur, dict) else 'none')
+        previous = state + '/statusline.previous.json'
+        if not ours:
+            detail += f' (previous saved to {previous})'
+        plan('merge-json', s + ' statusLine: ' + detail)
+        if not ours:
+            plan('replace' if os.path.lexists(previous) else 'create', previous)
+        current['statusLine'] = replacement
+    path = h
+    current = load(h)
+    create(h)
+    entries = current.setdefault('hooks', {}).setdefault('UserPromptSubmit', [])
+    if not isinstance(entries, list):
+        raise ValueError('settings hooks.UserPromptSubmit must be a list')
+    command = repo + '/hooks/orch-runtime-context.sh'
+    found = any(isinstance(hook, dict) and hook.get('command') == command
+                for entry in entries if isinstance(entry, dict) for hook in entry.get('hooks', []))
+    if not found:
+        entries.append({'hooks': [{'type': 'command', 'command': command}]})
+    plan('merge-json', h + ' hooks.UserPromptSubmit: ' + ('unchanged' if found else 'add') + ' orch-runtime-context.sh')
+    # Safety repair uses an absolute path and can create S even if guard registration failed.
+    create(s)
+except (OSError, ValueError, AttributeError, TypeError) as exc:
+    plan('merge-json', f'{path} ERROR: {exc} (the install would stop here)')
+    raise SystemExit(1)
+PY
+}
+
 install_repo() {
-  echo "cc-orchestra @ $REPO_DIR"
+  [[ "$DRY_RUN" == 1 ]] || echo "cc-orchestra @ $REPO_DIR"
   command -v python3 >/dev/null 2>&1 || { echo "ERROR: Python 3 is required." >&2; exit 1; }
-  mkdir -p "$CLAUDE_DIR/agents" "$BIN_DIR"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    plan_dir "$CLAUDE_DIR/agents"
+    plan_dir "$BIN_DIR"
+  else
+    mkdir -p "$CLAUDE_DIR/agents" "$BIN_DIR"
+  fi
 
   link "$REPO_DIR"                              "$CLAUDE_DIR/orchestra"
   link "$REPO_DIR/agents/orchestrator.md"       "$CLAUDE_DIR/agents/orchestrator.md"
@@ -548,6 +906,11 @@ install_repo() {
   link "$REPO_DIR/bin/cc-orch-codex"             "$BIN_DIR/cc-orch-codex"
   link "$REPO_DIR/bin/codex-run-codex"           "$BIN_DIR/codex-run-codex"
   link "$REPO_DIR/bin/orch-codex-route"          "$BIN_DIR/orch-codex-route"
+
+  if [[ "$DRY_RUN" == 1 ]]; then
+    dry_run_install_rest
+    return
+  fi
 
   chmod +x "$REPO_DIR"/*.sh "$REPO_DIR/bin/"* "$REPO_DIR/hooks/"*.sh
 
@@ -572,13 +935,17 @@ install_repo() {
 install_codex_only() {
   command -v python3 >/dev/null || die 'Python 3 is required'
   command -v codex >/dev/null || die 'Codex CLI is required; install and log in before using this mode'
-  mkdir -p "$BIN_DIR"
+  if [[ "$DRY_RUN" == 1 ]]; then plan_dir "$BIN_DIR"; else mkdir -p "$BIN_DIR"; fi
   link "$REPO_DIR/bin/cc-orch-codex" "$BIN_DIR/cc-orch"
   link "$REPO_DIR/bin/cc-orch-codex" "$BIN_DIR/cc-orch-codex"
   link "$REPO_DIR/bin/codex-run-codex" "$BIN_DIR/codex-run"
   link "$REPO_DIR/bin/codex-run-codex" "$BIN_DIR/codex-run-codex"
   link "$REPO_DIR/bin/orch-codex-route" "$BIN_DIR/orch-codex-route"
   link "$REPO_DIR/bin/orch-summary-check" "$BIN_DIR/orch-summary-check"
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo 'codex-only: no Claude settings, agents or timer would change.'
+    return
+  fi
   echo 'Codex-only launchers installed. No Claude settings, agents or timer changed.'
   echo 'Start: cc-orch-codex <project-name> [project-dir]'
 }
@@ -641,12 +1008,21 @@ bootstrap() {
   say "  orch-model-guard budget"
 }
 
+if [[ "$DRY_RUN" == 1 ]]; then
+  printf '%s\n' "cc-orchestra dry-run @ $REPO_DIR — no changes made"
+fi
+
 case "$MODE" in
   codex-only)
     install_codex_only
     ;;
   safety-hooks-only)
-    install_safety_hooks
+    if [[ "$DRY_RUN" == 1 ]]; then
+      plan_dir "$(dirname "${CC_ORCH_SETTINGS:-$CLAUDE_DIR/settings.json}")"
+      install_safety_hooks plan
+    else
+      install_safety_hooks
+    fi
     ;;
   check)
     echo "cc-orchestra @ $REPO_DIR"

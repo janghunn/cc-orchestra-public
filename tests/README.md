@@ -7,6 +7,7 @@ through Bash (the CI workflow does the same):
 bash tests/test-policy.sh
 bash tests/test-runtime.sh
 bash tests/test-accepted-status.sh
+bash tests/test-install-dry-run.sh
 ```
 
 `bash tests/test-mods-observer.sh` needs `node`; set `MODS_OBSERVER_CLAUDE=1` to also run `claude plugin validate/test`.
