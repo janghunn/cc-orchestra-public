@@ -3,6 +3,8 @@
 cc-orchestra is a self-hosting, multi-agent delivery harness. This guide is for coding
 agents editing the harness's own source in a task checkout.
 
+Read [GLOSSARY.md](GLOSSARY.md) for the harness's own terms and where one word has several meanings.
+
 ## Directory map
 
 | Path | Contents |

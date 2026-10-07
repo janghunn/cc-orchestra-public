@@ -240,6 +240,7 @@ Tier 4  executable verify ──────────────────
 
 - 전체 운영 절차: [한국어](OPERATIONS.ko.md) · [English](OPERATIONS.md)
 - 저장소 자체 수정: [AGENTS.md](AGENTS.md) — self-hosting checkout, 정책 원본과 산출물 규칙
+- 용어 정의(영문): [GLOSSARY.md](GLOSSARY.md)
 - Codex 전용 실행과 혼합 모드 전환: [CODEX-ONLY.ko.md](CODEX-ONLY.ko.md)
 - 처음부터 따라 하기: [GETTING-STARTED.ko.md](GETTING-STARTED.ko.md)
 - 새 서버 설치: [BOOTSTRAP.ko.md](BOOTSTRAP.ko.md)
