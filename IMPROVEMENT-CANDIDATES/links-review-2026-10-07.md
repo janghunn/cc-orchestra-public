@@ -20,7 +20,7 @@ This file follows the entry shape and append-only rules of ../IMPROVEMENT-CANDID
 - **Critical assessment (cc-orchestra-specific):** Design before code is already the lead's `plan.md` plus the plan cross-check, and review as verification is the Tier 4 gate. The gap is that harness terms (`lead`, `slot`, `profile`, `route`, `pin`, `ACCEPTED`) are defined across README, OPERATIONS and agent prompts, and some words mean different things in different places. Task 69 adds `GLOSSARY.md` for that. Caveat: the post suggests markdown files close to the code as a starting point for getting domain language into agent context; a single root `GLOSSARY.md` is this repo's choice. Whether agents read the glossary and behave differently is not measured.
 - **Status:** USER APPROVED — see orch/69
 
-### 2026-10-07 — "Brand as Software" post (X link): not readable, not relevant
+### 2026-10-07 — "Brand as Software" post (X link): blocked for WebFetch, not relevant
 - **Source:** https://x.com/PaulJun_/status/2098386367898079729 (WebFetch returned HTTP 402 Payment Required with no body; a later plain fetch with a browser User-Agent by the verifier returned the article, so the block depends on the client).
 - **Summary:** WebFetch could not read the page. The article, read via a browser-UA fetch, is an essay titled "Brand as software" by Paul Jun about brand teams, matching what a mirror showed Tier 1 earlier.
 - **Critical assessment (cc-orchestra-specific):** Nothing readable ties this link to code orchestration, delivery gates or model routing, so no change is proposed. The article text was checked for orchestration, Claude Code, Codex and worktree terms and has none; replies under the post were not read.
