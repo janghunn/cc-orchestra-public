@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import time
+import unicodedata
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
 import orch_archive
@@ -18,6 +19,7 @@ import orch_archive
 INACTIVE = {"PASS", "FAIL", "BLOCKED", "ACCEPTED", "CLOSED", "IDLE", "UNASSIGNED"}
 TERMINAL = re.compile(r"(?:" + "|".join(sorted(INACTIVE)) + r")(?:[^A-Za-z0-9_-]|\Z)")
 COMPLETE = re.compile(r"(?:ACCEPTED|CLOSED|PASS)(?:[^A-Za-z0-9_-]|\Z)")
+SESSION_DAEMONS = {"(sd-pam)", "sshd", "ssh-agent", "gpg-agent", "fusermount", "fusermount3"}
 
 
 class Refused(Exception):
@@ -97,20 +99,25 @@ class Item:
 
 
 def process_table():
-    paths, incomplete = [], False
+    paths, incomplete = [], []
     try:
         pids = os.listdir("/proc")
     except OSError:
-        return [], True
+        return [], ["process scan incomplete"]
     for pid in pids:
         if not pid.isdigit():
             continue
         base = "/proc/" + pid
+        comm = "unknown"
         try:
-            if (os.lstat(base + "/fd").st_uid != os.getuid()
-                    or os.lstat(base + "/cwd").st_uid != os.getuid()):
+            if os.stat(base).st_uid != os.getuid():
                 continue
             comm = Path(base, "comm").read_text().strip()
+            if (os.lstat(base + "/fd").st_uid != os.getuid()
+                    or os.lstat(base + "/cwd").st_uid != os.getuid()):
+                if comm not in SESSION_DAEMONS:
+                    incomplete.append(f"process scan incomplete: pid {pid} ({comm}) not inspectable")
+                continue
             links = [base + "/" + name for name in ("cwd", "exe", "root")]
             links += [base + "/fd/" + name for name in os.listdir(base + "/fd")]
             found = []
@@ -125,7 +132,7 @@ def process_table():
         except (FileNotFoundError, ProcessLookupError):
             continue
         except (OSError, UnicodeError):
-            incomplete = True
+            incomplete.append(f"process scan incomplete: pid {pid} ({comm}) not inspectable")
     return paths, incomplete
 
 
@@ -153,6 +160,7 @@ class Context:
     def __init__(self, options):
         self.options, self.policy = options, orch_archive.load_policy()
         self.incomplete, self.sessions, self.rows = [], [], []
+        self.incomplete_by_top, self.item_common, self.borrowed_objects = {}, {}, set()
         self.items, self.roots, self.reference = [], {}, None
         self.states = sorted({os.path.realpath(p) for p in
                               ([os.environ["CC_ORCH_STATE_DIR"]] if os.environ.get("CC_ORCH_STATE_DIR") else [])
@@ -164,20 +172,23 @@ class Context:
             common = git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
             self.reference = {"top": os.path.realpath(top), "common": os.path.realpath(common)}
         except GitError:
-            pass
+            if options.repo or os.path.lexists(candidate):
+                self.incomplete_at(candidate)
         self.discover()
         self.processes, self.proc_incomplete = process_table()
         self.mounts, self.mounts_incomplete = mount_table()
         self.read_registries()
+        self.read_alternates()
         try:
             self.notes = set(os.listdir(self.policy["VAULT_DIR"] / "tasks"))
         except OSError:
             self.notes = set()
 
-    def incomplete_at(self, path):
+    def incomplete_at(self, path, top=None):
         message = f"activity records incomplete: {path}"
-        if message not in self.incomplete:
-            self.incomplete.append(message)
+        messages = self.incomplete if top is None else self.incomplete_by_top.setdefault(top, [])
+        if message not in messages:
+            messages.append(message)
 
     def entries(self, path):
         try:
@@ -264,26 +275,31 @@ class Context:
 
     def read_registries(self):
         repos = {p for p, _, _ in self.sessions}
-        common_dirs = set()
+        common_dirs = {}
         if self.reference:
             repos.add(self.reference["top"])
-            common_dirs.add(self.reference["common"])
+            common_dirs[self.reference["common"]] = {None}
         for item in self.items:
             if not contained(item.path, item):
                 continue
             repos.add(item.path)
-            if os.path.isfile(os.path.join(item.path, ".git")):
+            dotgit = os.path.join(item.path, ".git")
+            if os.path.lexists(dotgit):
                 try:
-                    common_dirs.add(git(item.path, "rev-parse", "--path-format=absolute",
-                                        "--git-common-dir").strip())
+                    common = os.path.realpath(git(item.path, "rev-parse", "--path-format=absolute",
+                                                  "--git-common-dir").strip())
+                    self.item_common[item.path] = common
+                    if os.path.isfile(dotgit):
+                        common_dirs.setdefault(common, set()).add(item.top)
                 except GitError:
-                    self.incomplete_at(item.path)
+                    self.incomplete_at(item.path, item.top)
         for common in sorted(common_dirs):
             repos.add(os.path.dirname(common))
             try:
                 repos.update(w["worktree"] for w in worktrees(common, common=True))
             except GitError:
-                self.incomplete_at(common)
+                for top in common_dirs[common]:
+                    self.incomplete_at(common, top)
         seen = set()
         for repo in sorted(repos):
             path = os.path.join(repo, ".orchestra", "REGISTRY.md")
@@ -305,6 +321,38 @@ class Context:
                 if len(parts) == 9 and parts[0] == parts[-1] == "" and parts[1].startswith("lead-"):
                     self.rows.append(dict(zip(("slot", "agentId", "task", "branch", "dir",
                                                "status", "updated"), parts[1:-1]), registry=path))
+
+    def read_alternates(self):
+        common_dirs = set(self.item_common.values())
+        if self.reference:
+            common_dirs.add(self.reference["common"])
+        for common in sorted(common_dirs):
+            stack, seen = [(os.path.join(common, "objects"), 0)], {}
+            while stack:
+                objects, depth = stack.pop()
+                if depth >= 5 or seen.get(objects, 5) <= depth:
+                    continue
+                seen[objects] = depth
+                path = os.path.join(objects, "info", "alternates")
+                try:
+                    lines = Path(path).read_text().splitlines()
+                    for line in lines:
+                        if not line:
+                            continue
+                        # Git permits quoted paths; unsupported quoting fails closed.
+                        if line.startswith('"'):
+                            line = json.loads(line)
+                            if not isinstance(line, str):
+                                raise ValueError("invalid alternate path")
+                        alternate = os.path.realpath(os.path.join(objects, line))
+                        self.borrowed_objects.add((alternate, common))
+                        stack.append((alternate, depth + 1))
+                except FileNotFoundError:
+                    if not os.path.lexists(path):
+                        continue
+                    self.incomplete.append(f"alternates unreadable: {path}")
+                except (OSError, UnicodeError, ValueError):
+                    self.incomplete.append(f"alternates unreadable: {path}")
 
 
 def walk_item(item, context):
@@ -396,6 +444,9 @@ def inspect_git(item, context):
         for name in os.listdir(directory):
             if name.endswith(".lock"):
                 item.add("CAUTION", f"git lock present: {name}")
+    for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"):
+        if os.path.lexists(os.path.join(git_dir, name)):
+            item.add("CAUTION", f"git operation in progress: {name}")
     head = git(path, "rev-parse", "--verify", "-q", "HEAD^{commit}", allowed=(0, 1)).strip()
     if not head:
         item.add("CAUTION", "no commits")
@@ -408,7 +459,7 @@ def inspect_git(item, context):
         if item.kind == "clone":
             if name.startswith("refs/remotes/"):
                 continue
-        elif not name.startswith(("refs/worktree/", "refs/bisect/")):
+        elif not name.startswith(("refs/worktree/", "refs/bisect/", "refs/rewritten/")):
             continue
         if name == "refs/stash":
             item.add("CAUTION", "stash present")
@@ -457,9 +508,9 @@ def activity(item, context):
     for path, pid, comm in context.processes:
         if under(path, os.path.realpath(item.path)):
             item.add("DANGER", f"in use by pid {pid} ({comm})")
-    if context.proc_incomplete:
-        item.add("CAUTION", "process scan incomplete")
-    for message in context.incomplete:
+    for message in context.proc_incomplete:
+        item.add("CAUTION", message)
+    for message in context.incomplete + context.incomplete_by_top.get(item.top, []):
         item.add("CAUTION", message)
     for path, source, _ in context.sessions:
         if under(path, item.path) or under(os.path.realpath(path), os.path.realpath(item.path)):
@@ -519,6 +570,11 @@ def classify(item, context):
         walk_item(item, context)
     except OSError:
         item.add("CAUTION", "unreadable: .")
+    for objects, common in sorted(context.borrowed_objects):
+        own_repo = (os.path.isdir(os.path.join(item.path, ".git"))
+                    and common == context.item_common.get(item.path))
+        if not own_repo and under(objects, os.path.realpath(item.path)):
+            item.add("DANGER", f"objects borrowed by {common}")
     archive(item, context)
     if item.backup:
         item.add("CAUTION", "temp backup (report-only)")
@@ -582,6 +638,13 @@ def human(size):
         value /= 1024
 
 
+def table_field(value):
+    text = "".join(" " if unicodedata.category(char) in ("Cc", "Zl", "Zp") else
+                   f"\\x{ord(char) - 0xdc00:02x}" if 0xdc80 <= ord(char) <= 0xdcff else char
+                   for char in str(value))
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def report(context, as_json):
     totals = {key: {"count": 0, "bytes": 0} for key in ("SAFE", "CAUTION", "DANGER", "all")}
     for item in context.items:
@@ -595,7 +658,8 @@ def report(context, as_json):
         return
     print("CLASS  SIZE  AGE  ARCHIVE  ID  REASON")
     for item in context.items:
-        print(f"{item.classification}  {human(item.bytes)}  {item.age_days}d  {item.archive}  {item.id}  {item.reason()}")
+        print("  ".join(table_field(value) for value in (item.classification, human(item.bytes),
+                       f"{item.age_days}d", item.archive, item.id, item.reason())))
     print("totals: " + " · ".join(f"{key} {v['count']} ({v['bytes']} bytes)" for key, v in totals.items()))
     print("note: only SAFE items can be deleted, with: orch-gc apply --class safe --yes (or --item ID --yes)")
     print("note: archive=yes means orch-archive holds a vault note per task directory; the archive is not a full copy (checkpoints, original images and oversized payloads are not stored), and deleting a checkout also deletes its git-ignored .orchestra/ artifacts")

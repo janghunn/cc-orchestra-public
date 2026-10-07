@@ -22,8 +22,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # The helper lives outside each fixture so logs and test imports cannot affect its hash.
 cat > "$TMP/cases.py" <<'PY'
 import hashlib
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -86,8 +88,14 @@ def fixture_setup():
         stream.write('\n.orchestra/\n')
     write(L / '.orchestra/REGISTRY.md', '# Registry\n')
     for name in ('merged', 'dirty', 'unmerged', 'open', 'stale', 'secret', 'norow', 'blocked',
-                 'branch2', 'tagged', 'stash', 'ignored', 'hidden', 'filter', 'proc', 'parent', 'archive-tmp-x'):
+                 'branch2', 'tagged', 'stash', 'ignored', 'hidden', 'filter', 'proc', 'parent', 'archive-tmp-x',
+                 'lent', 'shared', 'midop'):
         make_merged(name)
+    write(L / '.git/objects/info/alternates', str(R / 'lent/.git/objects') + '\n')
+    git(F, 'clone', '--shared', str(R / 'shared'), str(R / 'borrower'))
+    # Keep the borrower independent of shared's completion row and the exact SAFE set.
+    git(R / 'borrower', 'checkout', '-b', 'orch/borrower')
+    write(R / 'midop/.git/MERGE_HEAD', git(R / 'midop', 'rev-parse', 'HEAD') + '\n')
     write(R / 'dirty/tracked', 'changed dirty\n')
     write(R / 'unmerged/tracked', 'changed unmerged\n')
     git(R / 'unmerged', 'commit', '-am', 'unmerged')
@@ -116,6 +124,11 @@ def fixture_setup():
     git(L, 'fetch', str(R / 'ignored'), 'orch/ignored')
     git(L, 'merge', '--no-ff', 'FETCH_HEAD', '-m', 'merge ignore')
     write(R / 'ignored/out/model.ckpt', 'only checkpoint')
+    fd = os.open(os.fsencode(R / 'ignored/out') + b'/0-\xff.ckpt', os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, b'non-UTF-8 ignored checkpoint')
+    finally:
+        os.close(fd)
     write(R / 'hidden/tracked', 'changed hidden\n')
     git(R / 'hidden', 'update-index', '--assume-unchanged', 'tracked')
     git(R / 'filter', 'config', 'filter.evil.clean', f"sh -c 'touch {F}/filter-ran; cat'")
@@ -125,12 +138,18 @@ def fixture_setup():
     write(F / 'outside/victim/file', 'must survive')
     (F / 'outside/.orchestra/wt/x').mkdir(parents=True)
     (R / 'escape').symlink_to(F / 'outside')
-    for name, path in [('wtsafe', R / 'wtsafe'), ('orch', R / 'orch'), ('coord', F / 'coord'),
+    for name, path in [('wtsafe', R / 'wtsafe'), ('wtrewritten', R / 'wtrewritten'),
+                       ('orch', R / 'orch'), ('coord', F / 'coord'),
                        ('lead-y', L / '.orchestra/wt/lead-y')]:
         git(L, 'worktree', 'add', '-b', 'wt/' + name, str(path))
-        if name == 'wtsafe':
+        if name in ('wtsafe', 'wtrewritten'):
             artifacts(path)
-            row(L, 'wt/wtsafe', directory=str(path / '.orchestra' / TASK))
+            row(L, 'wt/' + name, directory=str(path / '.orchestra' / TASK))
+    private = git(L, 'commit-tree', git(L, 'rev-parse', 'HEAD^{tree}'),
+                  '-p', git(L, 'rev-parse', 'HEAD'), '-m', 'worktree-private commit')
+    git(R / 'wtrewritten', 'update-ref', 'refs/rewritten/keep', private)
+    write(F / 'state/worktrees/other/broken/.git', f'gitdir: {F}/missing/.git/worktrees/broken\n')
+    write(F / 'state/worktrees/other/broken/plain', 'broken worktree')
     row(R / 'orch', 'orch/open', 'RUNNING', 'open/.orchestra/' + TASK + '/')
     row(F / 'coord', 'orch/stale', 'RUNNING', str(R / 'stale/.orchestra' / TASK))
     write(F / 'state/sessions/orch.conf', f'WORKDIR={R}/orch\nREPO={L}\n')
@@ -188,9 +207,11 @@ def case1():
                     'blocked': 'BLOCKED', 'branch2': 'not merged', 'tagged': 'not merged',
                     'stash': 'stash', 'ignored': 'git-ignored', 'hidden': 'index flags',
                     'filter': 'git filter', 'nogit': 'not a git checkout',
-                    'parent': 'nested checkout', 'archive-tmp-x': 'temp backup'},
+                    'parent': 'nested checkout', 'archive-tmp-x': 'temp backup',
+                    'wtrewritten': 'not merged', 'midop': 'git operation in progress: MERGE_HEAD'},
         'DANGER': {'open': 'open registry row', 'stale': 'open registry row', 'secret': 'secret-shaped',
-                   'escape': 'escapes root', 'proc': 'in use by pid', 'orch': 'session record'}}
+                   'escape': 'escapes root', 'proc': 'in use by pid', 'orch': 'session record',
+                   'lent': 'objects borrowed by', 'shared': 'objects borrowed by'}}
     # The specified relative-dir matching also places orch's own RUNNING row under orch.
     for category, names in expected.items():
         for name, keyword in names.items():
@@ -200,16 +221,33 @@ def case1():
     assert {i['id'] for i in items.values() if i['class'] == 'SAFE'} == {'proj/merged', 'proj/wtsafe'}
     assert 'proj/parent/.orchestra/wt/lead-x' in items
     assert not any(id.startswith('proj/escape/') for id in items)
-    assert len(items) == sum(map(len, expected.values())) + 1, items.keys()
+    assert len(items) == sum(map(len, expected.values())) + 2, items.keys()  # nested worktree and borrower
     assert items['proj/merged']['archive'] == 'yes'
     assert not (F / 'filter-ran').exists()
     table = run('--root', str(R), '--repo', str(L))
     assert table.startswith('CLASS  SIZE  AGE  ARCHIVE  ID  REASON\n')
     assert len([line for line in table.splitlines() if line.startswith(('SAFE ', 'CAUTION ', 'DANGER '))]) == len(items)
     assert 'totals: SAFE 2 (' in table and 'archive is not a full copy' in table
+    assert r'0-\xff.ckpt' in table, table
     assert report['totals']['all']['count'] == len(items)
     assert report['totals']['all']['bytes'] == sum(i['bytes'] for i in items.values())
     assert before == snapshot(), 'scan changed fixture'
+
+    mod = module()
+    context = mod.scan(options(mod))
+    item = next(i for i in context.items if i.id == 'proj/merged')
+    item.reasons = [{'severity': 'CAUTION', 'text': 'first\nsecond\tpart'}]
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        mod.report(context, False)
+    rows = [line for line in output.getvalue().splitlines() if line.startswith(('SAFE ', 'CAUTION ', 'DANGER '))]
+    assert len(rows) == len(context.items), output.getvalue()
+    assert any('proj/merged  first second part' in line for line in rows), rows
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        mod.report(context, True)
+    raw_item = next(i for i in json.loads(output.getvalue())['items'] if i['id'] == 'proj/merged')
+    assert raw_item['reasons'][0]['text'] == 'first\nsecond\tpart'
 
 def case2():
     before = snapshot()
@@ -315,6 +353,17 @@ def case7():
     assert any(path == cwd and found_pid == pid for path, found_pid, _ in paths), paths
     print('process scan: vanished fd retains cwd')
 
+    write(F / 'state/sessions/bad.conf', 'this is not a record\n')
+    item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
+    assert item.classification == 'CAUTION' and 'activity records incomplete' in item.reason(), item.reasons
+    (F / 'state/sessions/bad.conf').unlink()
+    write(F / 'state/codex-projects/bad/project.json', '{')
+    item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
+    assert item.classification == 'CAUTION' and 'activity records incomplete' in item.reason(), item.reasons
+
+def nondumpable(daemon):
+    mod = module()
+    opts = options(mod)
     child_pid = (F.parent / (F.name + '.nondumpable.pid')).read_text().strip()
     deadline = time.monotonic() + 5
     observable = False
@@ -328,19 +377,23 @@ def case7():
         time.sleep(0.05)
     if observable:
         item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
-        assert item.classification == 'SAFE', item.reasons
-        assert not any('process scan incomplete' in r['text'] for r in item.reasons), item.reasons
-        print('process scan: non-dumpable ownership observed; merged stays SAFE')
+        if daemon:
+            assert item.classification == 'SAFE', item.reasons
+            assert not any('process scan incomplete' in r['text'] for r in item.reasons), item.reasons
+            print('process scan: non-dumpable sshd skipped; merged stays SAFE')
+        else:
+            assert item.classification == 'CAUTION', item.reasons
+            assert any(f'process scan incomplete: pid {child_pid} (python3)' in r['text']
+                       for r in item.reasons), item.reasons
+            print('process scan: non-dumpable python3 makes merged CAUTION')
     else:
         print('skip: non-dumpable ownership not observable here')
 
-    write(F / 'state/sessions/bad.conf', 'this is not a record\n')
-    item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
-    assert item.classification == 'CAUTION' and 'activity records incomplete' in item.reason(), item.reasons
-    (F / 'state/sessions/bad.conf').unlink()
-    write(F / 'state/codex-projects/bad/project.json', '{')
-    item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
-    assert item.classification == 'CAUTION' and 'activity records incomplete' in item.reason(), item.reasons
+def case7python():
+    nondumpable(False)
+
+def case7daemon():
+    nondumpable(True)
 
 def case8():
     shim = F.parent / ('shim-' + F.name)
@@ -387,6 +440,9 @@ def case9():
     report = json.loads(run('scan', '--json'))
     items = {i['id']: i for i in report['items']}
     assert 'proj/merged' in items and 'L/.orchestra/wt/lead-y' in items, items.keys()
+    assert items['other/broken']['class'] == 'CAUTION', items['other/broken']
+    assert items['proj/merged']['class'] == 'SAFE', items['proj/merged']
+    assert not any('activity records incomplete' in r['text'] for r in items['proj/merged']['reasons'])
     assert items['backup/archive-tmp']['class'] == 'CAUTION'
     assert any('temp backup' in r['text'] for r in items['backup/archive-tmp']['reasons'])
     out = run('apply', '--yes', '--item', 'backup/archive-tmp', code=1)
@@ -417,7 +473,21 @@ for number in {1..9}; do
       exec python3 -c 'import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(300)'
     ) &
     worker_pids+=("$!")
-    printf '%s\n' "$!" > "$fixture.nondumpable.pid"
+    child_pid="$!"
+    printf '%s\n' "$child_pid" > "$fixture.nondumpable.pid"
+    case_run 7python "$fixture" || fail 'non-dumpable python3'
+    kill "$child_pid"
+    wait "$child_pid" 2>/dev/null || true
+    (
+      cd "$fixture"
+      exec python3 -c 'import ctypes,time; libc=ctypes.CDLL(None); libc.prctl(15,b"sshd",0,0,0); libc.prctl(4,0,0,0,0); time.sleep(300)'
+    ) &
+    worker_pids+=("$!")
+    child_pid="$!"
+    printf '%s\n' "$child_pid" > "$fixture.nondumpable.pid"
+    case_run 7daemon "$fixture" || fail 'non-dumpable sshd'
+    kill "$child_pid"
+    wait "$child_pid" 2>/dev/null || true
   fi
   case_run "$number" "$fixture" || fail "case $number"
   ok "case $number"

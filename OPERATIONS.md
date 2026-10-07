@@ -1223,9 +1223,11 @@ are included; `--root` replaces default discovery.
   target ref, completion registry rows (PASS/ACCEPTED/CLOSED), and complete idle evidence.
 - CAUTION: uncertain recovery or activity, dirty/unmerged work, missing/inactive registry
   rows, ignored outputs, checkpoints, hidden index flags, Git filters, locks, nested
-  checkouts, session records or temp backups. These cannot be selected for deletion.
+  checkouts, session records, temp backups, in-progress Git operations or non-inspectable
+  processes. These cannot be selected for deletion.
 - DANGER: open registry rows, running processes, secret-shaped files, mounts, escaped
-  paths or a checkout containing the reference repository. These cannot be deleted.
+  paths, objects borrowed by another repository or a checkout containing the reference
+  repository. These cannot be deleted.
 
 ```bash
 orch-gc                                  # read-only scan (default)
