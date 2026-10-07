@@ -9,23 +9,23 @@ Terms the harness uses with a specific meaning, each with the file that defines 
 - **lead** — The Tier 2 agent that owns exactly one task end to end: investigates, writes `plan.md`, dispatches implementation, reviews the diff, runs the gates. Template: `templates/lead.md.tpl`.
 - **slot** — A named seat for a lead (`lead-alpha`, `lead-bravo`, `lead-charlie`, `lead-delta`) or a dev (`dev-1` to `dev-3`). The slot name is the human-facing label. `agents/orchestrator.md`, README "Git / worktree 원칙".
 - **agentId** — The `a…` id returned when an agent is spawned. `SendMessage` routes by agentId, not by slot name, so Tier 1 records it in the registry the moment a lead starts. `agents/orchestrator.md`.
-- **registry** — `.orchestra/REGISTRY.md` in the project, one row per task (slot, full agentId, task, branch, dir, status, last update). It is the source of truth for routing. `agents/orchestrator.md`.
-- **DIRECTIVES** — `.orchestra/DIRECTIVES.md`: one dated line per standing directive the user stated explicitly, changed only on the user's word. Re-injected after compaction by `hooks/orch-compact-context.sh`. `agents/orchestrator.md`.
+- **registry** — `REGISTRY.md` in the project's `.orchestra/` directory (created at runtime, not tracked in this repo), one row per task (slot, full agentId, task, branch, dir, status, last update). It is the source of truth for routing. `agents/orchestrator.md`.
+- **DIRECTIVES** — `DIRECTIVES.md` in the project's `.orchestra/` directory (runtime file, optional): one dated line per standing directive the user stated explicitly, changed only on the user's word. Re-injected after compaction by `hooks/orch-compact-context.sh`. `agents/orchestrator.md`.
 
 ## Work and artifacts
 
 - **brief** — `brief.md`, written by Tier 1: goal, scope, acceptance, verification, risk. README "작업 산출물".
 - **intake** — The read-only `codex-run intake` call Tier 1 uses to map ownership, tests and risk before writing a brief; its output is `codex-intake.md`. `agents/orchestrator.md`.
 - **plan** — `plan.md`, written by the lead: findings and the final design a developer with no context could execute. `templates/lead.md.tpl` (Phase B).
-- **summary** — `summary.md`: the lead's final report block, saved verbatim by Tier 1. Leads cannot write it. `templates/lead.md.tpl` (Phase G), README "작업 산출물".
+- **summary** — `summary.md`: the lead's final report block, saved verbatim by Tier 1. A Claude lead cannot write it; a Codex-only lead writes it itself (`agents/codex-lead.md`). `templates/lead.md.tpl` (Phase G), README "작업 산출물".
 - **task directory** — `.orchestra/<NN>-<slug>/`, holding a task's artifacts. README "작업 산출물".
-- **round** — One implement-then-verify cycle after a gate fails. The cap is 2 for trivial/low/normal and 3 for critical, plus one more only if `brief.md` contains `EXTRA GATE ROUND: approved`. `templates/lead.md.tpl` (Phase F), README "Gate 정책".
+- **round** — One implement-then-gate attempt, counted from 1: `orch-summary-check` rejects `ROUNDS: 0`. The cap is 2 for trivial/low/normal and 3 for critical, plus one more only if `brief.md` contains `EXTRA GATE ROUND: approved`. `templates/lead.md.tpl` (Phase F), README "Gate 정책".
 
 ## Lanes, gates and risk
 
 - **lane** — A route for Tier 3 work. The Codex lanes (`codex-run implement`, `--mech`, a named `--lane <name>`) are the default; a Claude **dev** (`dev-1` to `dev-3`, `dev-opus-*`) is used only for a recorded exception. `templates/lead.md.tpl` ("Provider lanes").
-- **gate** — An independent Tier 4 check that must pass before a task reports PASS: `codex-verify` (executes the contract), `codex-review` (hunts semantic defects) and, for critical risk, `claude-verifier` (the Opus `verifier`). `README.md` "Gate 정책", `templates/lead.md.tpl` (Phase E).
-- **RISK** — The brief's risk level: `trivial` (lead self-check only), `low` and `normal` (Codex verify plus review), `critical` (also the Opus verifier). `README.md` "Gate 정책", `agents/orchestrator.md`.
+- **gate** — An independent Tier 4 check that must pass before a task reports PASS: `codex-verify` (executes the contract), `codex-review` (hunts semantic defects) and, for critical risk, `claude-verifier` (the Opus `verifier`; Codex-only mode uses an `orch_auditor` instead, `agents/codex-lead.md`). `README.md` "Gate 정책", `templates/lead.md.tpl` (Phase E).
+- **RISK** — The brief's risk level: `trivial` (lead self-check only), `low` and `normal` (Codex verify plus review), `critical` (also a third gate: the Opus verifier, or a Codex `orch_auditor` in Codex-only mode, `agents/codex-lead.md`). `README.md` "Gate 정책", `agents/orchestrator.md`.
 - **profile (lead profile)** — Which model and effort a lead runs on: `light`, `normal`, `critical`, `critical-xhigh`. Chosen per task from risk and quota pressure; table in `OPERATIONS.md` "Dynamic routing", values in `model-policy.conf`.
 - **pressure** — A quota state (healthy, watch, tight, critical) computed from usage and time to reset; it drives routing and dispatch. `OPERATIONS.md` "Dynamic routing", `budget-policy.conf`.
 - **pin (Codex pressure pin)** — `CODEX_PRESSURE_PIN="healthy"` in `budget-policy.conf` holds Codex routing on the healthy rows regardless of real usage. The real state is still recorded. `OPERATIONS.md` "Codex pressure pin".
@@ -46,5 +46,5 @@ Terms the harness uses with a specific meaning, each with the file that defines 
 - **route** — Model routing (`orch-model-guard route lead <risk> <slot>`, which picks a lead profile; `OPERATIONS.md`) versus the `route-lead-*` agent types, which are the immutable rendered agents it returns. Related, but one is a decision and the other a file.
 - **pin** — The Codex pressure pin above versus `orch-model-guard set <model>`, which forces and pins the Claude model (`bin/orch-model-guard` usage text). Separate settings.
 - **slot** — A named lead or dev seat (above) versus the "one slot" of the local Jev model server in `OPERATIONS.md`; unrelated.
-- **round** — A fix round after a failed gate (above), not a round trip to the orchestrator (the template's "full round trip" is ordinary English).
+- **round** — A gate round (above), not a round trip to the orchestrator (the template's "full round trip" is ordinary English).
 - **gate** — Tier 4 verification (above), not the `orch-stop-gate.sh` hook in `hooks/`, which is a runtime safety stop-gate (`hooks/orch-stop-gate.sh`).
