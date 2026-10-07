@@ -1268,5 +1268,6 @@ Unpriced calls lack surviving token data; coverage counts calls with tokens and 
 Fast multipliers are unknown by default (Standard-rate estimates); per-request long-context surcharges are not applied.
 `codex-run` appends a unique run identifier and captured token usage for each attempt to `<state>/codex-runs.jsonl`; `codex.log` stays byte-identical.
 The report joins sidecar records by log byte offset and line text and labels their attribution exact. Captured usage survives fallback attempts and repeated runs overwriting the same event file.
+Each attempt writes a uniquely created file that is atomically renamed onto the events path and reads usage from that attempt's own file so an overlapping same-lane run cannot replace it; an overlapping pre-upgrade wrapper can still affect it by truncating in place.
 The sidecar defaults to `codex-runs.jsonl` beside the selected log; override it with `CC_ORCH_CODEX_RUNS`.
 Calls without a matching sidecar record retain estimated attribution using event-file mtimes and wrapper log order. Crossing same-mode runs, copied or touched task directories, and concurrent log appends can still misattribute legacy tokens; overwritten legacy events can leave calls unpriced.

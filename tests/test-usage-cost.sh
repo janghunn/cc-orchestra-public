@@ -602,6 +602,10 @@ printf 'private-brief-sentinel\n' > "$WRAP_TASK/brief.md"
 cat > "$FAKEBIN/codex" <<'CODEX'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then echo 'codex-cli 0.159.0'; exit 0; fi
+if [ "${FAKE_CHECK_FD7:-0}" = 1 ] && [ -e "/proc/$$/fd/7" ]; then
+  echo 'events descriptor 7 leaked into Codex' >&2
+  exit 91
+fi
 model="" output=""
 while [ $# -gt 0 ]; do
   case "$1" in -m) shift; model="$1" ;; -o) shift; output="$1" ;; esac
@@ -620,6 +624,7 @@ printf 'ok\n' > "$output"
 if [ "${FAKE_LEGACY_APPEND:-0}" = 1 ]; then
   printf '%s\n' "$RACE_LINE" >> "$CC_ORCH_STATE_DIR/codex.log"
 fi
+exit "${FAKE_FINISH_EXIT:-0}"
 CODEX
 cat > "$FAKEBIN/claude" <<'CLAUDE'
 #!/usr/bin/env bash
@@ -768,5 +773,200 @@ PY
   fi
 done
 ok 'legacy append races cannot claim the run identifier, including identical UTF-8 lines'
+
+# Run B completely while run A waits to lock its sidecar, reusing the events path.
+export REAL_FLOCK="$(command -v flock)"
+cat > "$FAKEBIN/flock" <<'FLOCK'
+#!/usr/bin/env bash
+if [ "${OVERLAP_RUN:-0}" = 1 ] && [ ! -e "$OVERLAP_MARKER" ]; then
+  : > "$OVERLAP_MARKER"
+  FAKE_USAGE_IN=2000000 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+    > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+fi
+exec "$REAL_FLOCK" "$@"
+FLOCK
+chmod +x "$FAKEBIN/flock"
+WRAP_STATE="$TMP/overlap-state"
+export OVERLAP_MARKER="$WRAP_STATE/overlap-fired" OVERLAP_WRAPPER="$ROOT/bin/codex-run-runtime"
+export OVERLAP_REPO="$WRAP_REPO" OVERLAP_TASK="$WRAP_TASK"
+OVERLAP_RUN=1 FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+  wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+python3 - "$WRAP_STATE" "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+state, events = Path(sys.argv[1]), Path(sys.argv[2])
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2, records
+assert [r['usage']['input_tokens'] for r in records] == [2000000, 1000000], 'overlap replaced attempt usage: ' + repr([r['usage'] for r in records])
+assert len({r['run_id'] for r in records}) == 2
+assert len({r['pid'] for r in records}) == 2
+offset = 0
+for row, line in zip(records, lines):
+    assert row['log_offset'] == offset, row
+    assert row['log_line'].encode() + b'\n' == line
+    assert row['events'] == str(events)
+    assert row['events_mtime_ns'] > 0 and row['events_size'] > 0, row
+    offset += len(line)
+surviving = [json.loads(line) for line in events.read_text().splitlines()]
+assert surviving[-1]['usage']['input_tokens'] == 2000000, surviving
+assert records[0]['events_mtime_ns'] == events.stat().st_mtime_ns
+assert records[0]['events_size'] == events.stat().st_size
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'same-lane overlap'
+assert_row $'gpt-6.1-sol\t2\t0\t3000000\t0\t0\t6.0000\t30.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'both overlapping calls priced'
+attribution 2 0
+ok 'each overlapping same-lane attempt retains its own events and token usage'
+
+# Published events retain ordinary redirect permissions and exact Codex stdout.
+check_events() {
+  local expected_input="$1"
+  FAKE_USAGE_IN="$expected_input" "$FAKEBIN/codex" -m gpt-6.1-sol -o "$TMP/expected-artifact" > "$TMP/expected-events"
+  python3 - "$WRAP_TASK" "$TMP/expected-events" "$TMP/event-mode-reference" <<'PY'
+import stat, sys
+from pathlib import Path
+task, expected, reference = map(Path, sys.argv[1:])
+events = task / 'codex-implement.jsonl'
+assert not list(task.glob('.codex-*.jsonl')), list(task.glob('.codex-*.jsonl'))
+assert events.read_bytes() == expected.read_bytes()
+assert stat.S_IMODE(events.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+PY
+}
+for mask in 0022 0027 0077; do
+  WRAP_STATE="$TMP/events-mode-$mask"
+  rm -f "$TMP/event-mode-reference"
+  (
+    umask "$mask"
+    : > "$TMP/event-mode-reference"
+    FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+      wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+  )
+  check_events 1000000
+done
+ok 'unique events leave no temporary files and preserve stdout bytes and umask permissions'
+
+# Inject setup failures only for the private events file; other commands run normally.
+export REAL_MKTEMP="$(command -v mktemp)" REAL_CHMOD="$(command -v chmod)" REAL_MV="$(command -v mv)"
+export REAL_TIMEOUT="$(command -v timeout)"
+cat > "$FAKEBIN/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+if [ "${FAKE_SETUP_FAIL:-}" = mktemp ] && [[ "${1:-}" == */.codex-*.jsonl ]]; then exit 1; fi
+exec "$REAL_MKTEMP" "$@"
+MKTEMP
+cat > "$FAKEBIN/chmod" <<'CHMOD'
+#!/usr/bin/env bash
+if [ "${FAKE_SETUP_FAIL:-}" = chmod ] && [[ "${2:-}" == */.codex-*.jsonl ]]; then exit 1; fi
+exec "$REAL_CHMOD" "$@"
+CHMOD
+cat > "$FAKEBIN/mv" <<'MV'
+#!/usr/bin/env bash
+if [[ "${3:-}" == */.codex-*.jsonl ]]; then
+  if [ "${FAKE_SETUP_FAIL:-}" = mv ]; then exit 1; fi
+  if [ "${CREATE_OVERLAP:-0}" = 1 ] && [ ! -e "$OVERLAP_MARKER" ]; then
+    : > "$OVERLAP_MARKER"
+    "$REAL_STAT" -c %i "$3" > "$CC_ORCH_STATE_DIR/inode-a"
+    FAKE_USAGE_IN=2000000 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+      > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+    "$REAL_STAT" -c %i "$4" > "$CC_ORCH_STATE_DIR/inode-b"
+  fi
+fi
+exec "$REAL_MV" "$@"
+MV
+cat > "$FAKEBIN/timeout" <<'TIMEOUT'
+#!/usr/bin/env bash
+if [ "${FAKE_TIMEOUT:-0}" = 1 ]; then
+  shift
+  "$@"
+  exit 124
+fi
+exec "$REAL_TIMEOUT" "$@"
+TIMEOUT
+chmod +x "$FAKEBIN/mktemp" "$FAKEBIN/chmod" "$FAKEBIN/mv" "$FAKEBIN/timeout"
+cat > "$TMP/fail-events-exec" <<'EXEC'
+exec() {
+  if [ "$#" = 0 ] && [ "${FUNCNAME[1]:-}" = run_once ]; then
+    unset -f exec
+    return 1
+  fi
+  builtin exec "$@"
+}
+EXEC
+for failure in mktemp chmod exec mv codex timeout; do
+  WRAP_STATE="$TMP/events-failure-$failure"
+  # Start with no shared file so the fallback redirect also uses the current umask.
+  rm -f "$WRAP_TASK/codex-implement.jsonl" "$TMP/event-mode-reference"
+  (
+    umask 0027
+    : > "$TMP/event-mode-reference"
+    expected_rc=0; codex_exit=0; timed_out=0
+    bash_env=/dev/null
+    if [ "$failure" = exec ]; then bash_env="$TMP/fail-events-exec"; fi
+    if [ "$failure" = codex ]; then expected_rc=1; codex_exit=1; fi
+    if [ "$failure" = timeout ]; then expected_rc=5; timed_out=1; fi
+    actual_rc=0
+    BASH_ENV="$bash_env" FAKE_SETUP_FAIL="$failure" FAKE_FINISH_EXIT="$codex_exit" FAKE_TIMEOUT="$timed_out" \
+      FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+      wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high || actual_rc=$?
+    assert_eq "$actual_rc" "$expected_rc" "events cleanup after $failure"
+  )
+  check_events 1000000
+  python3 - "$WRAP_STATE/codex-runs.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+row = json.loads(Path(sys.argv[1]).read_text())
+assert row['usage']['input_tokens'] == 1000000, row
+PY
+done
+ok 'setup fallback, Codex failure and timeout clean temporary events and retain captured usage'
+
+# A is paused after opening its private file; B creates, publishes and completes first.
+WRAP_STATE="$TMP/creation-overlap"
+mkdir -p "$WRAP_STATE"
+export OVERLAP_MARKER="$WRAP_STATE/creation-fired"
+rm -f "$TMP/event-mode-reference"
+(
+  umask 0027
+  : > "$TMP/event-mode-reference"
+  CREATE_OVERLAP=1 FAKE_CHECK_FD7=1 FAKE_USAGE_IN=1000000 \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+)
+check_events 1000000
+python3 - "$WRAP_STATE" "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+state, events = map(Path, sys.argv[1:])
+assert (state / 'creation-fired').exists(), 'creation interleave did not run'
+inode_a, inode_b = (int((state / name).read_text()) for name in ('inode-a', 'inode-b'))
+assert inode_a != inode_b, 'attempts shared an inode during creation'
+assert events.stat().st_ino == inode_a
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2
+assert [r['usage']['input_tokens'] for r in records] == [2000000, 1000000], records
+assert len({r['run_id'] for r in records}) == 2
+offset = 0
+for row, line in zip(records, lines):
+    assert row['log_offset'] == offset, row
+    assert row['log_line'].encode() + b'\n' == line
+    offset += len(line)
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'atomic creation overlap'
+assert_row $'gpt-6.1-sol\t2\t0\t3000000\t0\t0\t6.0000\t30.0000'
+assert_has "$RUN_OUTPUT" 'coverage: 2/2 calls priced (100.0%)' 'atomic creation preserves both calls'
+attribution 2 0
+ok 'unique creation and atomic rename keep interleaved attempts on distinct inodes'
+
+# Include the earlier real fallback/repeat fixtures in the final cleanup audit.
+python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+strays = list(Path(sys.argv[1]).rglob('.codex-*.jsonl'))
+assert not strays, strays
+PY
 
 echo "PASS: $pass usage-cost test groups"

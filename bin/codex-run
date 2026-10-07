@@ -544,8 +544,24 @@ mkdir -p "$STATE_DIR"
 RUN_ATTEMPT=0
 run_once() {
   local start LOG_LINE LOG_OFFSET LOG_POS FDINFO_KEY FDINFO_VALUE RUNS_LOCKED RUNS_UMASK
+  local EVENTS_SOURCE="$EVENTS" EVENTS_TMP="" EVENTS_MODE EVENTS_UMASK
   start="$(date -Is)"
-  env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null > "$EVENTS" 2> "$STDERR"
+  EVENTS_UMASK="$(umask)"
+  printf -v EVENTS_MODE '%03o' "$((0666 & ~8#$EVENTS_UMASK))"
+  # A private inode plus atomic publication prevents simultaneous creators sharing it.
+  if {
+    EVENTS_TMP="$(mktemp "$TASK_DIR/.codex-$RUN_TAG.XXXXXX.jsonl")" &&
+      chmod "$EVENTS_MODE" "$EVENTS_TMP" &&
+      exec 7>"$EVENTS_TMP" &&
+      mv -fT -- "$EVENTS_TMP" "$EVENTS"
+  } 2>/dev/null; then
+    EVENTS_SOURCE=/dev/fd/7
+    env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null >&7 7>&- 2> "$STDERR"
+  else
+    exec 7>&-
+    [ -z "$EVENTS_TMP" ] || rm -f -- "$EVENTS_TMP"
+    env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null > "$EVENTS" 2> "$STDERR"
+  fi
   RC=$?
   MODEL_SPEC="$MODEL@$EFFORT"
   [ "$FAST_MODE" = "1" ] && MODEL_SPEC="$MODEL_SPEC+fast-mode"
@@ -584,45 +600,43 @@ run_once() {
     fi
     if ! python3 - "$RUNS_LOG" "$RUN_ATTEMPT" "$$" "$start" "$(date -Is)" \
         "$MODE" "$LANE" "$RUN_TAG" "$MODEL" "$EFFORT" "$FAST_MODE" "$FALLBACK_NOTE" \
-        "$RC" "$WORKDIR" "$TASK_DIR" "$EVENTS" "$LOG_OFFSET" "$LOG_LINE" "$RUNS_LOCKED" \
+        "$RC" "$WORKDIR" "$TASK_DIR" "$EVENTS" "$LOG_OFFSET" "$LOG_LINE" "$RUNS_LOCKED" "$EVENTS_SOURCE" \
         >/dev/null 2>&1 <<'PY'
 import fcntl, json, os, sys, uuid
 from pathlib import Path
 
 (path, attempt, pid, start, end, mode, lane, run_tag, model, effort, fast_mode,
- fallback, exit_code, workdir, task_dir, events, offset, log_line, locked) = sys.argv[1:]
+ fallback, exit_code, workdir, task_dir, events, offset, log_line, locked, events_source) = sys.argv[1:]
 keys = ("input_tokens", "cached_input_tokens", "output_tokens")
 
-def token_usage():
+def token_usage(stream):
     total = [0, 0, 0]
     completed = False
-    try:
-        with Path(events).open(errors="replace") as stream:
-            for line in stream:
-                try:
-                    event = json.loads(line)
-                except (ValueError, RecursionError):
-                    continue
-                if not isinstance(event, dict) or event.get("type") != "turn.completed":
-                    continue
-                usage = event.get("usage")
-                if not isinstance(usage, dict):
-                    return None
-                values = [usage.get(k) for k in keys]
-                if any(type(v) is not int or v < 0 for v in values) or values[1] > values[0]:
-                    return None
-                total = [a + b for a, b in zip(total, values)]
-                completed = True
-    except OSError:
-        return None
+    for line in stream:
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        values = [usage.get(k) for k in keys]
+        if any(type(v) is not int or v < 0 for v in values) or values[1] > values[0]:
+            return None
+        total = [a + b for a, b in zip(total, values)]
+        completed = True
     return dict(zip(keys, total)) if completed else None
 
-usage = token_usage()
+usage = mtime_ns = size = None
 try:
-    stat = os.stat(events)
-    mtime_ns, size = stat.st_mtime_ns, stat.st_size
+    with Path(events_source).open(errors="replace") as stream:
+        usage = token_usage(stream)
+        stat = os.fstat(stream.fileno())
+        mtime_ns, size = stat.st_mtime_ns, stat.st_size
 except OSError:
-    mtime_ns = size = None
+    pass
 record = dict(v=1, run_id=uuid.uuid4().hex, attempt=int(attempt), pid=int(pid),
               start=start, end=end, mode=mode, lane=lane if mode in ("implement", "resume") else mode,
               run_tag=run_tag, model=model, effort=effort, fast_mode=fast_mode == "1",
@@ -646,6 +660,7 @@ PY
       printf 'codex-run: warning: run record not written to %s\n' "$RUNS_LOG" >&2
     fi
   )
+  exec 7>&-
 }
 run_once
 

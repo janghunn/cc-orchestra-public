@@ -1365,5 +1365,6 @@ unpriced는 남아 있는 토큰 데이터가 없는 호출이며, coverage는 �
 Fast 배수는 기본적으로 미상이라 Standard 요금으로 추정하며, 요청별 긴 컨텍스트 할증은 적용하지 않습니다.
 `codex-run`은 각 시도의 고유 실행 식별자와 토큰 사용량을 `<state>/codex-runs.jsonl`에 추가하며, `codex.log`의 바이트 형식은 그대로 유지합니다.
 보고서는 로그의 바이트 위치와 행 내용으로 sidecar 레코드를 연결하고 exact로 표시합니다. 저장된 사용량은 fallback이나 반복 실행이 같은 이벤트 파일을 덮어써도 유지됩니다.
+각 시도는 고유하게 생성한 파일을 이벤트 경로로 원자적으로 rename하여 쓰고 해당 시도 자체의 파일에서 사용량을 읽으므로 같은 lane의 겹치는 실행이 이를 교체할 수 없지만, 업그레이드 이전 wrapper가 겹쳐 실행되어 기존 파일을 truncate하면 여전히 영향을 줄 수 있습니다.
 sidecar 기본 경로는 선택한 로그 옆의 `codex-runs.jsonl`이며 `CC_ORCH_CODEX_RUNS`로 바꿀 수 있습니다.
 연결되는 sidecar 레코드가 없는 호출은 기존 이벤트 파일 mtime과 wrapper 로그 순서로 추정하여 estimated로 표시합니다. 같은 mode의 교차 실행, 작업 디렉터리 복사나 touch, 동시 로그 추가는 여전히 과거 토큰을 다른 호출에 연결할 수 있으며, 덮어쓴 과거 이벤트는 unpriced로 남을 수 있습니다.
