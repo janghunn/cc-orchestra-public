@@ -137,7 +137,7 @@ def process_table():
                 for line in Path(base, "maps").read_bytes().decode("utf-8", "surrogateescape").split("\n"):
                     fields = line.split(None, 5)
                     if len(fields) == 6:
-                        target = fields[5].removesuffix(" (deleted)")
+                        target = fields[5].removesuffix(" (deleted)").replace(r"\012", "\n")
                         if os.path.isabs(target):
                             found.append((target, pid, comm))
                 paths.extend(found)
@@ -529,6 +529,27 @@ def inspect_git(item, context):
             item.add("CAUTION", f"ref {name} is not a commit")
         else:
             tips.append((sha, name))
+    for name in sorted(os.listdir(git_dir)):
+        if not re.fullmatch(r"[A-Z_]+_HEAD", name) or name in (
+                "FETCH_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+            continue
+        pseudo_ref = Path(git_dir, name)
+        try:
+            if not stat.S_ISREG(pseudo_ref.lstat().st_mode):
+                continue
+            ids = [match[1].lower() for line in pseudo_ref.read_text().splitlines()
+                   if (match := re.match(r"([0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?=\s|$)", line))]
+        except (OSError, UnicodeError):
+            item.add("CAUTION", f"{name} unreadable")
+            continue
+        if not ids:
+            item.add("CAUTION", f"{name} unreadable")
+        for sha in ids:
+            commit = git(path, "rev-parse", "--verify", "-q", sha + "^{commit}", allowed=(0, 1, 128)).strip()
+            if commit != sha:
+                item.add("CAUTION", f"{name} is not a commit")
+            else:
+                tips.append((sha, name))
     if item.kind == "clone":
         records, errors = worktrees(item.common_dir)
         for wt in records:
@@ -732,10 +753,10 @@ def report(context, as_json):
     for item in context.items:
         print("  ".join(table_field(value) for value in (item.classification, human(item.bytes),
                        f"{item.age_days}d", item.archive, item.id, item.reason())))
-    print("totals: " + " · ".join(f"{key} {v['count']} ({v['bytes']} bytes)" for key, v in totals.items()))
-    print("note: only SAFE items can be deleted, with: orch-gc apply --class safe --yes (or --item ID --yes)")
-    print("note: archive=yes means orch-archive holds a vault note per task directory; the archive is not a full copy (checkpoints, original images and oversized payloads are not stored), and deleting a checkout also deletes its git-ignored .orchestra/ artifacts")
-    print("note: orch-gc never deletes remote refs, refs or registries of other repositories, session records or temp backups; deleting a clone also deletes its own merged refs and its git-ignored .orchestra/ (including its registry)")
+    print_line("totals: " + " · ".join(f"{key} {v['count']} ({v['bytes']} bytes)" for key, v in totals.items()))
+    print_line("note: only SAFE items can be deleted, with: orch-gc apply --class safe --yes (or --item ID --yes)")
+    print_line("note: archive=yes means orch-archive holds a vault note per task directory; the archive is not a full copy (checkpoints, original images and oversized payloads are not stored), and deleting a checkout also deletes its git-ignored .orchestra/ artifacts")
+    print_line("note: orch-gc never deletes remote refs, refs or registries of other repositories, session records or temp backups; deleting a clone also deletes its own merged refs and its git-ignored .orchestra/ (including its registry)")
 
 
 def apply(context, options):
@@ -757,6 +778,9 @@ def apply(context, options):
             print_line(f"dry run: would delete {id} {item.path} ({item.bytes} bytes)")
         print_line("dry run: nothing deleted; re-run with --yes to delete")
         return 0
+    if sys.version_info < (3, 11):  # GUARD:python
+        print_line(f"error: apply --yes requires Python 3.11 or newer (found {sys.version_info[0]}.{sys.version_info[1]}); nothing deleted")
+        return 2
     freed, count = 0, 0
     for id in selected:
         try:

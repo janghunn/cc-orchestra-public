@@ -1241,6 +1241,7 @@ orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
 
 `--merged-into` defaults to `local/installed-main`; `--repo` defaults to the repository
 at `~/.claude/orchestra`. Every selected item must be SAFE; deletion rechecks each item.
+Deletion with `orch-gc apply --yes` requires Python 3.11 or newer.
 CAUTION/DANGER items, branches in the owning/live repo, remote refs, external registries,
 session records, temp backups and anything outside a scanned root are never deleted.
 Removing a clone does remove its local refs and git-ignored `.orchestra/` artifacts,

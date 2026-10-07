@@ -1284,6 +1284,7 @@ orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
 
 `--merged-into` 기본값은 `local/installed-main`, `--repo` 기본값은
 `~/.claude/orchestra`의 저장소다. 선택 항목은 모두 SAFE여야 하며 삭제 직전에 재검사한다.
+`orch-gc apply --yes`로 삭제하려면 Python 3.11 이상이 필요하다.
 CAUTION/DANGER 항목, 소유·live 저장소의 브랜치, 원격 ref, 외부 레지스트리, 세션 기록,
 임시 백업과 스캔 루트 밖의 경로는 삭제하지 않는다. 클론을 삭제하면 그 클론의 로컬 ref와
 자체 레지스트리를 포함한 git-ignored `.orchestra/` 산출물도 삭제된다.

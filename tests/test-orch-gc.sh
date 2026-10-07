@@ -89,7 +89,7 @@ def fixture_setup():
     write(L / '.orchestra/REGISTRY.md', '# Registry\n')
     for name in ('merged', 'dirty', 'unmerged', 'open', 'stale', 'secret', 'norow', 'blocked',
                  'branch2', 'tagged', 'stash', 'ignored', 'hidden', 'filter', 'proc', 'parent', 'archive-tmp-x',
-                 'lent', 'shared', 'midop', 'submod', 'nlstale', 'stalereg', 'badrow', 'ancestor', 'reflogonly'):
+                 'lent', 'shared', 'midop', 'submod', 'nlstale', 'stalereg', 'badrow', 'ancestor', 'reflogonly', 'orighead'):
         make_merged(name)
     make_merged('trail ', 'orch/trail')
     git(F, 'init', '--bare', str(R / 'submod/.git/modules/sub'))
@@ -100,6 +100,10 @@ def fixture_setup():
     write(R / 'reflogonly/tracked', 'reflog-only change\n')
     git(R / 'reflogonly', 'commit', '-am', 'reflog-only commit')
     git(R / 'reflogonly', 'reset', '--hard', 'HEAD~1')
+    write(R / 'orighead/tracked', 'ORIG_HEAD-only change\n')
+    git(R / 'orighead', 'commit', '-am', 'ORIG_HEAD-only commit')
+    git(R / 'orighead', 'reset', '--hard', 'HEAD~1')
+    git(R / 'orighead', 'reflog', 'expire', '--expire=now', '--all')
     write(L / '.git/objects/info/alternates', str(R / 'lent/.git/objects') + '\n')
     git(F, 'clone', '--shared', str(R / 'shared'), str(R / 'borrower'))
     # Keep the borrower independent of shared's completion row and the exact SAFE set.
@@ -233,7 +237,8 @@ def case1():
                     'wtrewritten': 'not merged', 'midop': 'git operation in progress: MERGE_HEAD',
                     'submod': 'submodule repository present', 'stalereg': 'has linked worktree registration',
                     'sepdir': 'separate git dir', 'badrow': 'unparseable registry row',
-                    'reflogonly': 'reflog-only commits', 'wtlocked': 'worktree locked'},
+                    'reflogonly': 'reflog-only commits', 'wtlocked': 'worktree locked',
+                    'orighead': 'ORIG_HEAD not merged'},
         'DANGER': {'open': 'open registry row', 'stale': 'open registry row', 'secret': 'secret-shaped',
                    'escape': 'escapes root', 'proc': 'in use by pid', 'orch': 'session record',
                    'lent': 'objects borrowed by', 'shared': 'objects borrowed by',
@@ -257,6 +262,7 @@ def case1():
     assert r'0-\xff.ckpt' in table, table
     assert report['totals']['all']['count'] == len(items)
     assert report['totals']['all']['bytes'] == sum(i['bytes'] for i in items.values())
+    case1ascii()
     assert before == snapshot(), 'scan changed fixture'
 
     mod = module()
@@ -274,6 +280,12 @@ def case1():
         mod.report(context, True)
     raw_item = next(i for i in json.loads(output.getvalue())['items'] if i['id'] == 'proj/merged')
     assert raw_item['reasons'][0]['text'] == 'first\nsecond\tpart'
+
+def case1ascii():
+    table = run('--root', str(R), '--repo', str(L), env=dict(os.environ, PYTHONIOENCODING='ascii'))
+    totals = next(line for line in table.splitlines() if line.startswith('totals: '))
+    assert r' \xb7 ' in totals, totals
+    print('scan output: ASCII totals separator escaped')
 
 def case2():
     before = snapshot()
@@ -473,6 +485,22 @@ def case7mapped():
     assert any(f'in use by pid {pid} ' in r['text'] for r in item.reasons), item.reasons
     print('process scan: closed-fd mapping makes merged DANGER')
 
+def case7nlsetup():
+    (R / 'merged').rename(R / 'mapped\ncheckout')
+
+def case7nlmapped():
+    ready = F.parent / (F.name + '.nlmapped.ready')
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ready.exists(), 'newline-mapped-file child did not become ready'
+    pid = (F.parent / (F.name + '.nlmapped.pid')).read_text().strip()
+    mod = module()
+    item = next(i for i in mod.scan(options(mod)).items if i.id == 'proj/mapped\ncheckout')
+    assert item.classification == 'DANGER', item.reasons
+    assert any(f'in use by pid {pid} ' in r['text'] for r in item.reasons), item.reasons
+    print('process scan: closed-fd mapping in newline checkout makes it DANGER')
+
 def case8():
     shim = F.parent / ('shim-' + F.name)
     shim.mkdir()
@@ -552,6 +580,21 @@ def case11():
     assert 'freed ' in out and not (R / safe).exists(), out
     print('apply output: non-UTF-8 refusal and deletion reported')
 
+def case12():
+    mod = module()
+    original_version = mod.sys.version_info
+    output = io.StringIO()
+    mod.sys.version_info = (3, 10, 12)
+    try:
+        with contextlib.redirect_stdout(output):
+            code = mod.main(['apply', '--root', str(R), '--repo', str(L), '--yes', '--item', 'proj/merged'])
+    finally:
+        mod.sys.version_info = original_version
+    assert code == 2, (code, output.getvalue())
+    assert 'error: apply --yes requires Python 3.11 or newer (found 3.10); nothing deleted' in output.getvalue(), output.getvalue()
+    assert (R / 'merged').is_dir(), 'Python version guard allowed deletion'
+    print('apply version: Python 3.10 refused; merged preserved')
+
 if action == 'fixture':
     fixture_setup()
 elif action == 'preflight':
@@ -584,6 +627,18 @@ for number in {1..9}; do
     case_run 7mapped "$fixture" || fail 'mapped-file activity'
     kill "$child_pid"
     wait "$child_pid" 2>/dev/null || true
+    case_run 7nlsetup "$fixture" || fail 'newline-mapped-file setup'
+    (
+      exec python3 -c 'import mmap,os,sys,time; f=open(sys.argv[1],"rb"); mapping=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ,trackfd=False); f.close(); os.chdir("/"); open(sys.argv[2],"w").close(); time.sleep(300)' \
+        "$fixture/state/worktrees/proj/"$'mapped\ncheckout/tracked' "$fixture.nlmapped.ready"
+    ) &
+    worker_pids+=("$!")
+    child_pid="$!"
+    printf '%s\n' "$child_pid" > "$fixture.nlmapped.pid"
+    case_run 7nlmapped "$fixture" || fail 'newline-mapped-file activity'
+    kill "$child_pid"
+    wait "$child_pid" 2>/dev/null || true
+    mv "$fixture/state/worktrees/proj/"$'mapped\ncheckout' "$fixture/state/worktrees/proj/merged"
     (
       cd "$fixture"
       exec python3 -c 'import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(300)'
@@ -610,7 +665,7 @@ for number in {1..9}; do
 done
 
 original_gc="$GC"
-for marker in yes selection recheck contain-tree contain-worktree; do
+for marker in yes selection recheck contain-tree contain-worktree python; do
   [[ $(grep -c "# GUARD:$marker\$" "$original_gc") == 1 ]] || fail "guard marker $marker"
   mutant="$TMP/mut-$marker"
   mkdir -p "$mutant/bin"
@@ -623,6 +678,7 @@ for marker in yes selection recheck contain-tree contain-worktree; do
     selection) number=3 ;;
     recheck) number=6 ;;
     contain-*) number=5 ;;
+    python) number=12 ;;
   esac
   GC="$mutant/bin/orch-gc"
   fixture="$TMP/mutation-$marker"
@@ -637,9 +693,13 @@ for marker in yes selection recheck contain-tree contain-worktree; do
   echo "mutation caught: $marker"
 done
 GC="$original_gc"
-ok "case 10: all five guard mutations caught"
+ok "case 10: all six guard mutations caught"
 fixture="$TMP/case-11"
 make_fixture "$fixture"
 case_run 11 "$fixture" || fail 'case 11'
 ok 'case 11: non-UTF-8 apply output'
+fixture="$TMP/case-12"
+make_fixture "$fixture"
+case_run 12 "$fixture" || fail 'case 12'
+ok 'case 12: Python version guard'
 echo "PASS: $pass orch-gc cases"
