@@ -469,7 +469,7 @@ Codex healthy 행(Astra, Fast 켜짐)을 선택하고 실제 Codex 압력과 관
 hook/compact 상태에는 `codex=healthy(pinned; real=watch, …)`가 표시되며, `budget`, `lanes`, `route codex`의 reason에도 고정 여부와 실제 상태가 표시됩니다. 실제 상태는 `budget-state`에 계속 기록됩니다.
 `healthy`만 허용하며, 잘못된 값은 stderr 경고를 출력하고 동적 라우팅으로 처리합니다.
 `CODEX_PRESSURE_PIN_UNTIL`은 epoch 초 또는 로컬 절대 날짜/시간 `YYYY-MM-DD[ HH:MM[:SS]]`을 받으며, 해당 시각부터 고정을 무시합니다. 잘못된 날짜나 상대 날짜는 경고 후 동적으로 처리합니다.
-저장소 경로의 레거시 `bin/orch-model-guard lanes`도 동일한 검증으로 같은 압력 고정을 적용합니다.
+저장소 경로의 레거시 `bin/orch-model-guard lanes`는 압력 고정을 포함한 디스패치 결정을 런타임 `lanes`에서 받아 두 진입점이 같은 규칙을 적용하며, 자체 사용률 표시 줄만 유지합니다.
 명시적인 `--model`, `--effort`, `--critical`, `--fast` 플래그가 계속 우선합니다.
 고정 중에는 review/verify 예비 quota가 보존되지 않습니다. quota가 소진되면 provider에서 실패하고 기존 exit-code 처리를 따릅니다. Astra가 없으면 `model-policy.conf`에 따라 fallback합니다.
 정책을 호출마다 읽고 policy revision에서 제외하므로 `cc-orch --reload`는 필요 없습니다. `CODEX_PRESSURE_PIN=""`로 바꾸면 동적 라우팅이 복구됩니다.

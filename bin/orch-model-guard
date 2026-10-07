@@ -18,7 +18,7 @@
 #   orch-model-guard check              poll usage and switch if the thresholds say so
 #   orch-model-guard status             what is active, why, and what the roster actually says
 #   orch-model-guard active             print the active model (for scripts; always prints one)
-#   orch-model-guard lanes              dispatch=codex-first unless Codex is near its reserve
+#   orch-model-guard lanes              runtime reset-aware dispatch with legacy usage display
 #   orch-model-guard set <m>|primary|fallback|auto
 #                                       force a model and pin it (auto un-pins, resumes polling)
 #   orch-model-guard install            install the systemd timer + the in-session notice hook
@@ -279,13 +279,10 @@ cmd_check() {
   exit 0
 }
 
-# Tier 3 / Phase A dispatch hint for leads, from BOTH providers' buckets:
-#   codex-sparing  Codex's own week is nearly spent — keep what is left for the Tier 4 review
-#                  gate (mandatory per task): implement on dev-*, investigate yourself, review
-#                  with --fast. Checked first: it is the only state where Claude is the answer.
-#   codex-first    the default — serialize a third unit rather than spill merely for speed.
+# Tier 3 / Phase A dispatch hint delegates to bin/orch-model-guard-runtime lanes, which applies
+# reset-aware provider ranks and the pressure pin. Legacy only keeps its own usage display lines.
 # Polls Claude live (~2s, zero tokens) and falls back to the last snapshot; the Codex reading is
-# a file read of the newest rollout, and unknown reads as headroom.
+# a file read of the newest rollout. An unavailable runtime reads as unknown pressure/headroom.
 cmd_lanes() {
   local panel session all fable src="live"
   if ! panel="$(poll_usage)" || ! printf '%s' "$panel" | grep -q 'Current session'; then
@@ -302,29 +299,33 @@ cmd_lanes() {
   if refresh_codex_usage; then cx="$CODEX_PCT"; else cx="$(st codex_pct)"; csrc="state"; fi
   case "$cx" in ''|*[!0-9]*) cx=""; csrc="unknown" ;; esac
 
-  local CODEX_PIN_ACTIVE=0 CODEX_PIN_NOTE="" CODEX_PIN_WARNED=0
-  if [ -r "$REPO_DIR/lib/orch-budget-metrics.sh" ]; then
-    # Share runtime pin validation without replacing legacy usage/state helpers.
-    # shellcheck source=/dev/null
-    [ ! -r "$REPO_DIR/budget-policy.conf" ] || . "$REPO_DIR/budget-policy.conf"
-    # shellcheck source=/dev/null
-    . "$REPO_DIR/lib/orch-budget-metrics.sh"
-    if ! declare -F now_epoch >/dev/null; then
-      now_epoch() { printf '%s\n' "${CC_ORCH_NOW_EPOCH:-$(date +%s)}"; }
+  local rt_output="" rt_err="" rt_rc="?" rt_first="" rt_why="" pinned=0
+  if [ -x "$REPO_DIR/bin/orch-model-guard-runtime" ] && rt_err="$(mktemp 2>/dev/null)"; then
+    if rt_output="$("$REPO_DIR/bin/orch-model-guard-runtime" lanes 2> "$rt_err")"; then
+      rt_rc=0
+    else
+      rt_rc=$?
     fi
-    : "${CODEX_STATE:=unknown}" "${CODEX_RANK:=-1}"
-    resolve_codex_pin
+    rt_first="${rt_output%%$'\n'*}"
   fi
 
-  local hint="codex-first" why pin_pressure=""
+  local hint="codex-first" why="" pin_pressure=""
   why="default policy — Codex owns heavy work; serialize instead of Claude spill"
-  if [ "$CODEX_PIN_ACTIVE" != 1 ] && [ -n "$cx" ] && [ "$cx" -ge "$LANES_CODEX_SPARE_PCT" ]; then
-    hint="codex-sparing"; why="codex week at ${cx}% (>= ${LANES_CODEX_SPARE_PCT}) — reserve the rest for the Tier 4 gate"
+  if [ "$rt_rc" = 0 ] && [[ "$rt_first" = dispatch=codex-first || "$rt_first" = dispatch=codex-sparing ]]; then
+    cat "$rt_err" >&2
+    hint="${rt_first#dispatch=}"
+    if grep -q '^codex:  pressure=healthy(pinned;' <<< "$rt_output"; then pinned=1; fi
+    rt_why="$(sed -n -e '/^reason: /{s/^reason: //;p;q;}' -e '/^reason=/{s/^reason=//;p;q;}' <<< "$rt_output")"
+    if [ "$pinned" = 1 ]; then
+      pin_pressure=" pressure=healthy(pinned; real=week ${cx:-?}%)"
+      why+="; Codex pressure pinned to healthy by CODEX_PRESSURE_PIN (real week=${cx:-?}%), so Codex pressure cannot trigger codex-sparing"
+    else
+      why="${rt_why:-$why}"
+    fi
+  else
+    why="runtime lanes unavailable (exit $rt_rc) — unknown pressure reads as headroom; default codex-first"
   fi
-  if [ "$CODEX_PIN_ACTIVE" = 1 ]; then
-    pin_pressure=" pressure=healthy(pinned; real=week ${cx:-?}%)"
-    why+="; Codex pressure pinned to healthy by CODEX_PRESSURE_PIN (real week=${cx:-?}%), so Codex pressure cannot trigger codex-sparing"
-  fi
+  [ -z "$rt_err" ] || rm -f "$rt_err"
 
   echo "dispatch=$hint"
   echo "claude: session=${session:-?}% week_all=${all:-?}% week_fable=${fable:-?}%  ($src)"
