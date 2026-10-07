@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report recoverable task checkouts; deletion requires an explicit SAFE selection."""
+"""Report recoverable task checkouts; deletion is disabled in this release."""
 import sys
 sys.dont_write_bytecode = True
 import argparse
@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import subprocess
 import time
@@ -20,10 +19,6 @@ INACTIVE = {"PASS", "FAIL", "BLOCKED", "ACCEPTED", "CLOSED", "IDLE", "UNASSIGNED
 TERMINAL = re.compile(r"(?:" + "|".join(sorted(INACTIVE)) + r")(?:[^A-Za-z0-9_-]|\Z)")
 COMPLETE = re.compile(r"(?:ACCEPTED|CLOSED|PASS)(?:[^A-Za-z0-9_-]|\Z)")
 SESSION_DAEMONS = {"(sd-pam)", "sshd", "ssh-agent", "gpg-agent", "fusermount", "fusermount3"}
-
-
-class Refused(Exception):
-    pass
 
 
 class GitError(Exception):
@@ -686,38 +681,6 @@ def scan(options):
     return context
 
 
-def remove_tree(item):
-    if not contained(item.path, item):  # GUARD:contain-tree
-        raise Refused("path escapes root")
-    fd = os.open(os.path.realpath(item.root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        if not os.path.samestat(os.fstat(fd), os.stat(item.root)):
-            raise Refused("parent directory changed")
-        shutil.rmtree(os.path.basename(item.path), dir_fd=fd)
-    finally:
-        os.close(fd)
-
-
-def remove_worktree(item, common_dir):
-    if not contained(item.path, item):  # GUARD:contain-worktree
-        raise Refused("path escapes root")
-    git(common_dir, "worktree", "remove", item.path, common=True)
-    if os.path.lexists(item.path):
-        raise Refused("worktree directory still exists")
-
-
-def delete_item(item, options):
-    context = Context(options)
-    fresh = classify(Item(item.id, item.path, item.root, item.top), context)
-    if fresh.classification != "SAFE" or fresh.backup:  # GUARD:recheck
-        raise Refused(f"{item.id} is no longer SAFE: {fresh.reason()}")
-    if fresh.kind == "worktree":
-        remove_worktree(fresh, fresh.common_dir)
-    else:
-        remove_tree(fresh)
-    return fresh.bytes
-
-
 def human(size):
     value = float(size)
     for unit in "BKMG":
@@ -754,62 +717,29 @@ def report(context, as_json):
         print("  ".join(table_field(value) for value in (item.classification, human(item.bytes),
                        f"{item.age_days}d", item.archive, item.id, item.reason())))
     print_line("totals: " + " · ".join(f"{key} {v['count']} ({v['bytes']} bytes)" for key, v in totals.items()))
-    print_line("note: only SAFE items can be deleted, with: orch-gc apply --class safe --yes (or --item ID --yes)")
+    print_line("note: deletion is disabled in this release; apply refuses and nothing is deleted - SAFE marks checkouts that could be removed manually after review")
     print_line("note: archive=yes means orch-archive holds a vault note per task directory; the archive is not a full copy (checkpoints, original images and oversized payloads are not stored), and deleting a checkout also deletes its git-ignored .orchestra/ artifacts")
-    print_line("note: orch-gc never deletes remote refs, refs or registries of other repositories, session records or temp backups; deleting a clone also deletes its own merged refs and its git-ignored .orchestra/ (including its registry)")
+    print_line("note: orch-gc never deletes anything in this release")
 
 
-def apply(context, options):
-    by_id = {item.id: item for item in context.items}
-    selected = list(dict.fromkeys(options.item + ([i.id for i in context.items if i.classification == "SAFE"]
-                                                 if options.selection_class else [])))
-    invalid = [id for id in selected if id not in by_id or by_id[id].classification != "SAFE" or by_id[id].backup]
-    if invalid:  # GUARD:selection
-        for id in invalid:
-            print_line(f"refused {id}: " + (f"{by_id[id].classification}: {by_id[id].reason()}" if id in by_id else "unknown item"))
-        print_line("nothing deleted")
-        return 1
-    if not selected:
-        print_line("nothing to delete")
-        return 0
-    if not options.yes:  # GUARD:yes
-        for id in selected:
-            item = by_id[id]
-            print_line(f"dry run: would delete {id} {item.path} ({item.bytes} bytes)")
-        print_line("dry run: nothing deleted; re-run with --yes to delete")
-        return 0
-    if sys.version_info < (3, 11):  # GUARD:python
-        print_line(f"error: apply --yes requires Python 3.11 or newer (found {sys.version_info[0]}.{sys.version_info[1]}); nothing deleted")
-        return 2
-    freed, count = 0, 0
-    for id in selected:
-        try:
-            item = by_id[id]
-            size = delete_item(item, options)
-            freed += size
-            count += 1
-            print_line(f"deleted {id} {item.path} ({size} bytes)")
-        except (Refused, GitError, OSError, ValueError, orch_archive.ArchiveError) as error:
-            print_line(f"error: {id}: {error}")
-            break
-    print_line(f"freed {freed} bytes ({human(freed)}) from {count} item(s)")
-    return 0 if count == len(selected) else 1
+def apply():
+    print("orch-gc: apply is disabled in this release; nothing was deleted.", file=sys.stderr)
+    print('orch-gc: deletion stays off until open review findings are fixed (--repo vs worktree items, "(deleted)" path names, "~N" id collisions, partial-clone fetch); a follow-up task re-enables it. Clean up manually after reading \'orch-gc scan\'.', file=sys.stderr)
+    return 1
 
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
     for command in ("scan", "apply"):
-        sub = commands.add_parser(command)
+        sub = commands.add_parser(command, add_help=command == "scan")
+        if command == "apply":
+            sub.add_argument("args", nargs=argparse.REMAINDER)
+            continue
         sub.add_argument("--root", action="append", default=[])
         sub.add_argument("--merged-into", default="local/installed-main")
         sub.add_argument("--repo")
-        if command == "scan":
-            sub.add_argument("--json", action="store_true")
-        else:
-            sub.add_argument("--item", action="append", default=[])
-            sub.add_argument("--class", dest="selection_class", choices=["safe"])
-            sub.add_argument("--yes", action="store_true")
+        sub.add_argument("--json", action="store_true")
     return result
 
 
@@ -817,15 +747,14 @@ def main(argv):
     if not argv or argv[0] not in ("scan", "apply", "-h", "--help"):
         argv = ["scan", *argv]
     cli = parser()
-    options = cli.parse_args(argv)
-    if options.command == "apply" and not options.item and not options.selection_class:
-        cli.error("apply requires --item or --class safe")
+    # Treat even unknown flags and --help as positional arguments to the disabled command.
+    options = cli.parse_args(["apply", "--", *argv[1:]] if argv[0] == "apply" else argv)
+    if options.command == "apply":
+        return apply()
     try:
         context = scan(options)
-        if options.command == "scan":
-            report(context, options.json)
-            return 0
-        return apply(context, options)
+        report(context, options.json)
+        return 0
     except (OSError, ValueError, orch_archive.ArchiveError) as error:
         print(table_field(f"error: {error}"), file=sys.stderr)
         return 2

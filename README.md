@@ -50,7 +50,7 @@ Codex CLI의 로그인도 확인한다. 자세한 준비와 확인 명령은
 | 작업 폴더 찾기 | `cc-orch session path main` |
 | 사용량·모델 배정 상태 | `orch-usage-report --days 1` · `orch-model-guard budget` · `orch-model-guard lanes` (PATH의 `orch-model-guard`는 런타임 래퍼 `bin/orch-model-guard-runtime`) |
 | 작업 기록 보관(아카이브) | `orch-archive` · `orch-archive apply` · `orch-archive verify` |
-| 끝난 작업 클론 정리(디스크 회수) | `orch-gc` · `orch-gc apply --class safe --yes` |
+| 끝난 작업 클론 정리 후보 확인 | `orch-gc` · `orch-gc scan --json` |
 
 ### 막혔을 때
 

@@ -187,6 +187,20 @@ def run(*args, code=0, env=None):
 def scan_json(*args):
     return json.loads(run('scan', '--root', str(R), '--repo', str(L), '--json', *args))
 
+DISABLED = ('orch-gc: apply is disabled in this release; nothing was deleted.\n'
+            'orch-gc: deletion stays off until open review findings are fixed (--repo vs worktree items, '
+            '"(deleted)" path names, "~N" id collisions, partial-clone fetch); a follow-up task re-enables it. '
+            "Clean up manually after reading 'orch-gc scan'.\n")
+
+def refuse_apply(*args, env=None):
+    before = snapshot()
+    argv = [os.fsencode(arg) for arg in ('python3', gc, 'apply', *args)]
+    result = subprocess.run(argv, capture_output=True, env=env)
+    assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout == b'', result.stdout
+    assert result.stderr == DISABLED.encode('ascii'), result.stderr
+    assert before == snapshot(), 'disabled apply changed fixture'
+
 def snapshot(exclude=(), ignore_mtime=()):
     result = {}
     def visit(path):
@@ -290,65 +304,54 @@ def case1ascii():
 def case2():
     before = snapshot()
     for selection in [('--class', 'safe'), ('--item', 'proj/merged')]:
-        out = run('apply', '--root', str(R), '--repo', str(L), *selection)
-        assert 'dry run: would delete proj/merged ' in out and 'dry run: nothing deleted' in out, out
-        assert before == snapshot(), 'dry run changed fixture'
+        refuse_apply('--root', str(R), '--repo', str(L), *selection)
+        assert before == snapshot(), 'disabled apply changed fixture'
+    print('apply refusal: no --yes; fixture unchanged')
 
 def case3():
     before = snapshot()
     for ids in [('proj/dirty',), ('proj/open',), ('proj/escape',), ('proj/archive-tmp-x',),
                 ('proj/../outside',), ('unknown',), ('proj/merged', 'proj/dirty')]:
         args = [word for id in ids for word in ('--item', id)]
-        out = run('apply', '--root', str(R), '--repo', str(L), '--yes', *args, code=1)
-        assert 'refused ' in out and 'nothing deleted' in out, out
+        refuse_apply('--root', str(R), '--repo', str(L), '--yes', *args)
         assert before == snapshot(), 'invalid selection changed fixture'
     for category in ('caution', 'danger'):
-        run('apply', '--root', str(R), '--repo', str(L), '--class', category, code=2)
-    run('apply', '--root', str(R), '--repo', str(L), code=2)
+        refuse_apply('--root', str(R), '--repo', str(L), '--class', category)
+    refuse_apply('--root', str(R), '--repo', str(L), '--item', 'proj/dirty')
+    refuse_apply('--root', str(R), '--repo', str(L))
+    refuse_apply()
+    refuse_apply('--unknown-flag', 'value', '--yes')
+    refuse_apply('--help')
     run('scan', '--root', str(F / 'absent'), '--repo', str(L), code=2)
     assert before == snapshot()
+    print('apply refusal: invalid selections, bare apply and unknown flags; fixture unchanged')
 
 def case4():
-    exclude = ('state/worktrees/proj/merged', 'state/worktrees/proj/wtsafe', 'state/worktrees/proj/trail ',
-               'L/.git/worktrees/wtsafe')
-    ignore = ('state/worktrees/proj', 'L/.git/worktrees')
-    before = snapshot(exclude, ignore)
+    before = snapshot()
     refs = git(L, 'for-each-ref')
-    out = run('apply', '--root', str(R), '--repo', str(L), '--yes', '--class', 'safe')
-    assert 'deleted proj/merged ' in out and 'deleted proj/wtsafe ' in out, out
-    assert 'deleted proj/trail ' in out, out
-    assert re.search(r'freed \d+ bytes .* from 3 item\(s\)', out), out
-    assert not (R / 'merged').exists() and not (R / 'wtsafe').exists()
-    assert not (R / 'trail ').exists()
-    after = snapshot(exclude, ignore)
+    for selection in [('--class', 'safe'), ('--item', 'proj/merged'),
+                      ('--item', 'proj/wtsafe'), ('--item', 'proj/trail ')]:
+        refuse_apply('--root', str(R), '--repo', str(L), '--yes', *selection)
+    assert (R / 'merged').is_dir() and (R / 'wtsafe').is_dir()
+    assert (R / 'trail ').is_dir()
+    after = snapshot()
     assert before == after, [(p, before.get(p), after.get(p)) for p in before.keys() | after.keys() if before.get(p) != after.get(p)]
     assert refs == git(L, 'for-each-ref'), 'live refs changed'
-    assert str(R / 'wtsafe') not in git(L, 'worktree', 'list', '--porcelain')
+    assert str(R / 'wtsafe') in git(L, 'worktree', 'list', '--porcelain')
+    print('apply refusal: --yes with SAFE selections; all checkouts and refs preserved')
 
 def case5():
     mod = module()
     paths = [(str(R) + '/../outside/victim', str(R) + '/../outside'), (str(R / 'escape'), str(R)),
              (str(R / 'escape/.orchestra/wt/x'), str(R / 'escape/.orchestra/wt'))]
-    # The textual traversal target must exist, so deletion without the guard would succeed.
+    # Keep the textual traversal target present for the containment checks.
     write(R.parent / 'outside/victim/file', 'must survive traversal')
     for path, root in paths:
         item = mod.Item('crafted', path, root, str(R))
         assert not mod.contained(item.path, item)
-        try:
-            mod.remove_tree(item)
-        except mod.Refused:
-            pass
-        else:
-            raise AssertionError('remove_tree did not refuse ' + path)
         assert os.path.exists(path)
     item = mod.Item('outside-worktree', str(F / 'coord'), str(R), str(R))
     assert not mod.contained(item.path, item)
-    try:
-        mod.remove_worktree(item, str(L / '.git'))
-    except mod.Refused:
-        pass
-    else:
-        raise AssertionError('remove_worktree did not refuse')
     assert (F / 'coord').is_dir()
 
 def case6():
@@ -356,13 +359,6 @@ def case6():
     opts = options(mod)
     item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
     assert item.classification == 'SAFE', item.reasons
-    write(R / 'merged/tracked', 'changed after selection\n')
-    try:
-        mod.delete_item(item, opts)
-    except mod.Refused as error:
-        assert 'no longer SAFE' in str(error)
-    else:
-        raise AssertionError('recheck did not refuse')
     assert (R / 'merged').is_dir()
 
 def case7():
@@ -540,6 +536,12 @@ def case8():
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['totals']['SAFE']['count'] == 3
     assert before == snapshot()
+    scan_log = log.read_bytes()
+    for args in [(), ('--yes', '--class', 'safe'), ('--yes', '--item', 'proj/merged'),
+                 ('--item', 'proj/dirty'), ('--class', 'caution'), ('--unknown-flag',), ('--help',)]:
+        refuse_apply(*args, env=env)
+        assert log.read_bytes() == scan_log, 'disabled apply called git'
+    print('apply refusal: zero git calls under the git shim')
 
 def case9():
     before = snapshot()
@@ -551,9 +553,35 @@ def case9():
     assert not any('activity records incomplete' in r['text'] for r in items['proj/merged']['reasons'])
     assert items['backup/archive-tmp']['class'] == 'CAUTION'
     assert any('temp backup' in r['text'] for r in items['backup/archive-tmp']['reasons'])
-    out = run('apply', '--yes', '--item', 'backup/archive-tmp', code=1)
-    assert 'refused backup/archive-tmp' in out and 'nothing deleted' in out
+    refuse_apply('--yes', '--item', 'backup/archive-tmp')
     assert before == snapshot()
+
+def case10():
+    source = Path(gc).read_text()
+    assert not re.search(r'rmtree|os\.(remove|unlink|rmdir)|shutil|worktree remove|"remove"', source)
+    assert '# GUARD:' not in source
+    mod = module()
+    assert not any(hasattr(mod, name) for name in ('delete_item', 'remove_tree', 'remove_worktree', 'Refused'))
+    originals = {name: getattr(mod, name) for name in ('Context', 'scan', 'git')}
+    def unexpected(*args, **kwargs):
+        raise AssertionError('disabled apply reached Context, scan or git')
+    before = snapshot()
+    try:
+        for name in originals:
+            setattr(mod, name, unexpected)
+        for args in [[], ['--root', str(R), '--repo', str(L), '--yes', '--class', 'safe'],
+                     ['--unknown-flag'], ['--help']]:
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = mod.main(['apply', *args])
+            assert code == 1, (code, errors.getvalue())
+            assert output.getvalue() == '', output.getvalue()
+            assert errors.getvalue() == DISABLED, errors.getvalue()
+    finally:
+        for name, original in originals.items():
+            setattr(mod, name, original)
+    assert before == snapshot()
+    print('apply refusal: no deletion primitives; returns before Context, scan or git')
 
 def byte_items():
     names = [os.fsdecode(b'bytes-safe-\xff'), os.fsdecode(b'bytes-dirty-\xff')]
@@ -563,37 +591,14 @@ def byte_items():
     write(R / names[1] / 'tracked', 'changed dirty bytes fixture\n')
     return names
 
-def byte_apply(name, code, keyword):
-    argv = [os.fsencode(s) for s in ('python3', gc, 'apply', '--root', str(R), '--repo', str(L),
-                                    '--yes', '--item', 'proj/' + name)]
-    result = subprocess.run(argv, capture_output=True)
-    assert result.returncode == code, (result.returncode, result.stdout, result.stderr)
-    text = result.stdout.decode('utf-8')
-    assert keyword in text and r'\xff' in text, text
-    return text
-
 def case11():
     safe, dirty = byte_items()
-    out = byte_apply(dirty, 1, 'refused ')
-    assert 'nothing deleted' in out and (R / dirty).is_dir(), out
-    out = byte_apply(safe, 0, 'deleted ')
-    assert 'freed ' in out and not (R / safe).exists(), out
-    print('apply output: non-UTF-8 refusal and deletion reported')
-
-def case12():
-    mod = module()
-    original_version = mod.sys.version_info
-    output = io.StringIO()
-    mod.sys.version_info = (3, 10, 12)
-    try:
-        with contextlib.redirect_stdout(output):
-            code = mod.main(['apply', '--root', str(R), '--repo', str(L), '--yes', '--item', 'proj/merged'])
-    finally:
-        mod.sys.version_info = original_version
-    assert code == 2, (code, output.getvalue())
-    assert 'error: apply --yes requires Python 3.11 or newer (found 3.10); nothing deleted' in output.getvalue(), output.getvalue()
-    assert (R / 'merged').is_dir(), 'Python version guard allowed deletion'
-    print('apply version: Python 3.10 refused; merged preserved')
+    before = snapshot()
+    for name in (dirty, safe):
+        refuse_apply('--root', str(R), '--repo', str(L), '--yes', '--item', 'proj/' + name)
+        assert (R / name).is_dir()
+        assert before == snapshot()
+    print('apply refusal: non-UTF-8 SAFE and CAUTION ids; fixture unchanged')
 
 if action == 'fixture':
     fixture_setup()
@@ -664,42 +669,12 @@ for number in {1..9}; do
   ok "case $number"
 done
 
-original_gc="$GC"
-for marker in yes selection recheck contain-tree contain-worktree python; do
-  [[ $(grep -c "# GUARD:$marker\$" "$original_gc") == 1 ]] || fail "guard marker $marker"
-  mutant="$TMP/mut-$marker"
-  mkdir -p "$mutant/bin"
-  ln -s "$ROOT/lib" "$mutant/lib"
-  sed "s/^\( *\)if .*:  # GUARD:$marker\$/\1if False:  # GUARD:$marker/" \
-    "$original_gc" > "$mutant/bin/orch-gc"
-  ! cmp -s "$original_gc" "$mutant/bin/orch-gc" || fail "mutant unchanged: $marker"
-  case "$marker" in
-    yes) number=2 ;;
-    selection) number=3 ;;
-    recheck) number=6 ;;
-    contain-*) number=5 ;;
-    python) number=12 ;;
-  esac
-  GC="$mutant/bin/orch-gc"
-  fixture="$TMP/mutation-$marker"
-  make_fixture "$fixture"
-  if case_run "$number" "$fixture" > "$TMP/mutation-$marker.log" 2>&1; then
-    fail "guard mutation survived: $marker"
-  fi
-  grep -q 'AssertionError' "$TMP/mutation-$marker.log" || {
-    cat "$TMP/mutation-$marker.log"
-    fail "mutation failed for an unrelated reason: $marker"
-  }
-  echo "mutation caught: $marker"
-done
-GC="$original_gc"
-ok "case 10: all six guard mutations caught"
+fixture="$TMP/case-10"
+make_fixture "$fixture"
+case_run 10 "$fixture" || fail 'case 10'
+ok 'case 10: disabled apply has no deletion path'
 fixture="$TMP/case-11"
 make_fixture "$fixture"
 case_run 11 "$fixture" || fail 'case 11'
-ok 'case 11: non-UTF-8 apply output'
-fixture="$TMP/case-12"
-make_fixture "$fixture"
-case_run 12 "$fixture" || fail 'case 12'
-ok 'case 12: Python version guard'
+ok 'case 11: non-UTF-8 apply refusal'
 echo "PASS: $pass orch-gc cases"
