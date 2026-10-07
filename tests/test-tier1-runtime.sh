@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
+assert_has() { grep -qF -- "$2" <<<"$1" || fail "missing '$2' ($3)"; }
 
 bash -n "$ROOT/bin/cc-orch" "$ROOT/bin/cc-orch-runtime"
 # install.sh normalizes executable bits for bin/*; mirror that installed environment in CI.

@@ -50,6 +50,46 @@ check() { # <exit> <label> [non-strict]
   printf 'ok %s - %s\n' "$pass" "$2"
 }
 
+PADDING="$(python3 -c '[print("filler %06d" % i) for i in range(80000)]')"
+[ "${#PADDING}" -gt 1048576 ] || fail 'large-input padding must exceed 1 MiB'
+
+# Large-input regression: a valid trivial declaration must survive an early match.
+base
+printf 'RISK: trivial\n%s\n' "$PADDING" > "$TASK/brief.md"
+summary 'STATUS: PASS' 'self-check only (trivial) — bash -n ok'
+sed -i 's/normal opus@high/light sonnet@medium/' "$TASK/summary.md"
+check 0 'large trivial brief retains its self-check gates' non-strict
+has 'WARN:  brief.md is '
+has 'B (budget '
+lacks 'malformed-trivial'
+lacks 'invalid or missing RISK'
+lacks 'executable verification did not PASS'
+last_line 'CHECK: WARN (1 warning(s))'
+
+# Large-input regression: an approved extra round must survive an early match.
+base
+printf 'RISK: normal\nEXTRA GATE ROUND: approved\n%s\n' "$PADDING" > "$TASK/brief.md"
+summary 'STATUS: PASS' 'codex-verify PASS · codex-review CLEAR · claude-verifier not-required'
+sed -i 's/ROUNDS: 1/ROUNDS: 3/' "$TASK/summary.md"
+check 0 'large brief retains its extra-round approval' non-strict
+has 'WARN:  brief.md is '
+has 'B (budget '
+lacks 'exceeds normal cap=2'
+last_line 'CHECK: WARN (1 warning(s))'
+
+# Large-input regression: splitting a long GATES line must preserve both claims.
+base
+printf 'RISK: normal\n' > "$TASK/brief.md"
+GATE_PADDING="$(python3 -c 'print(" · note" * 200000)')"
+[ "${#GATE_PADDING}" -gt 1048576 ] || fail 'large GATES padding must exceed 1 MiB'
+summary 'STATUS: PASS' "codex-verify PASS · codex-review CLEAR · claude-verifier not-required$GATE_PADDING"
+check 0 'large GATES line retains PASS and CLEAR claims' non-strict
+has 'WARN:  summary.md is '
+has 'B (budget '
+lacks 'executable verification did not PASS'
+lacks 'adversarial review is not CLEAR'
+last_line 'CHECK: WARN (1 warning(s))'
+
 for gates in pending 'codex-review CLEAR'; do
   base
   summary 'STATUS: ACCEPTED' "$gates"

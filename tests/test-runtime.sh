@@ -8,9 +8,9 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0
 ok() { echo "ok $((++pass)) - $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
-assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
+assert_has() { grep -qF -- "$2" <<<"$1" || fail "missing '$2' ($3)"; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
-assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
+assert_not_has() { ! grep -qF -- "$2" <<<"$1" || fail "unexpected '$2' ($3)"; }
 route_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 
 for script in \
@@ -250,7 +250,7 @@ TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
   "$HARNESS/bin/codex-run-runtime" implement "$TMP" "$TMP" --mech --dry-run
 args_out="$(cat "$TMP/codex-args")"
 assert_has "$args_out" "--mech" "explicit Luna-compatible mechanical path preserved"
-if printf '%s' "$args_out" | grep -q -- '--fast-mode'; then fail "--mech must not receive incompatible Fast mode"; fi
+if grep -q -- '--fast-mode' <<<"$args_out"; then fail "--mech must not receive incompatible Fast mode"; fi
 for model in gpt-6-luna luna gpt-6-sol gpt-6.1-sol sol; do
   TEST_ARGS="$TMP/codex-args" HOME="$TMP/home" CC_ORCH_STATE_DIR="$TMP/state" \
     CC_ORCH_ALWAYS_FAST_MODE=1 CC_ORCH_CODEX_ROUTE= \

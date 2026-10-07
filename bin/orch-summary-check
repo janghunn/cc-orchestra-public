@@ -97,7 +97,7 @@ if [ -r "$BRIEF" ]; then
       # The gate-skipping declaration must be column-0, unique, and stand-alone.
       if [ "$(printf '%s\n' "$nofence" | grep -c '^RISK:')" != 1 ]; then
         parsed="undeclared-trivial"
-      elif ! printf '%s\n' "$nofence" | grep -qE '^RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))'; then
+      elif ! grep -qE '^RISK:[[:space:]]*\*{0,2}trivial\*{0,2}($|[[:space:]]+(—|–|-))' <<<"$nofence"; then
         parsed="malformed-trivial"
       fi
     fi
@@ -180,8 +180,9 @@ if [ -r "$SUMMARY" ]; then
     else
       tokend='([^A-Za-z0-9_-]|$)'
       gate_claim() { # <label> <status regex>; claims must begin a separator-delimited segment
-        printf '%s\n' "${gates#GATES:}" | sed 's/·/\n/g;s/[;,]/\n/g' \
-          | grep -qiE "^[[:space:]]*$1[[:space:]]+($2)$tokend"
+        local segs
+        segs="$(sed 's/·/\n/g;s/[;,]/\n/g' <<<"${gates#GATES:}")"
+        grep -qiE "^[[:space:]]*$1[[:space:]]+($2)$tokend" <<<"$segs"
       }
       codex_verify_ok=0; codex_review_ok=0; claude_verify_ok=0; codex_audit_ok=0
       gate_claim codex-verify PASS && codex_verify_ok=1
@@ -315,7 +316,7 @@ if [ -r "$SUMMARY" ]; then
     [ "$rounds" -ge 1 ] || problem error "ROUNDS must be at least 1"
     # trivial and low share the normal cap.
     cap="$NORMAL_GATE_ROUNDS"; [ "$risk" = "critical" ] && cap="$CRITICAL_GATE_ROUNDS"
-    if [ "$rounds" -gt "$cap" ] && ! printf '%s\n' "${nofence:-}" | grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved'; then
+    if [ "$rounds" -gt "$cap" ] && ! grep -qi '^EXTRA GATE ROUND:[[:space:]]*approved' <<<"${nofence:-}"; then
       gate_problem "ROUNDS=$rounds exceeds $risk cap=$cap without EXTRA GATE ROUND: approved" ""
     fi
   else

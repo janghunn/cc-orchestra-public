@@ -65,6 +65,7 @@ jobs:
         run: bash tests/test-jev-stage1.sh
       - name: Mods observer suite
         run: bash tests/test-mods-observer.sh
-      # Not run here (fail in a runner-like simulation, see task 75):
-      # - tests/test-orch-gc.sh: needs Python 3.13 (mmap trackfd=), ubuntu-latest ships 3.12.
-      # - tests/test-install-dry-run.sh: fails under a clean env/fresh HOME ("unplanned .../home/.cache"); passes only un-sandboxed on the host.
+      - name: Orchestra GC suite
+        run: bash tests/test-orch-gc.sh
+      - name: Installer dry-run suite
+        run: bash tests/test-install-dry-run.sh

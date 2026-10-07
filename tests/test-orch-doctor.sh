@@ -20,7 +20,7 @@ pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok $((++pass)) - $*"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1' ($3)"; }
-assert_has() { printf '%s\n' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
+assert_has() { grep -qF -- "$2" <<<"$1" || fail "missing '$2' ($3)"; }
 field() { printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
 hash() { sha256sum < "$1" | awk '{print $1}'; }
 fixture_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -73,7 +73,7 @@ assert_complete "$MANIFEST" 39
 run_doctor "$MANIFEST"
 assert_eq "$rc" 0 "runtime all-clear"
 assert_eq "$(printf '%s\n' "$out" | grep -c '^OK ')" 39 "runtime OK count"
-if printf '%s\n' "$out" | grep -Eq '^(MISSING|DRIFTED|STALE-TEMPLATE|REPO-VERSION-MISMATCH) '; then
+if grep -Eq '^(MISSING|DRIFTED|STALE-TEMPLATE|REPO-VERSION-MISMATCH) ' <<<"$out"; then
   fail "fresh runtime install has problem markers"
 fi
 assert_has "$out" 'SUMMARY: 39 entries, 39 ok, 0 missing, 0 drifted, 0 stale-template, 0 repo-version-mismatch' "runtime summary"

@@ -39,14 +39,14 @@ out="$(run_notice 'opus[1m]' high normal 1 1)"
 [ -z "$out" ] || { echo "FAIL: explicit runtime normal model override must be accepted" >&2; echo "$out" >&2; exit 1; }
 
 out="$(run_notice 'fable[1m]' high critical 1)"
-printf '%s' "$out" | grep -qF 'critical orchestrator는 opus[1m]@xhigh' || {
+grep -qF 'critical orchestrator는 opus[1m]@xhigh' <<<"$out" || {
   echo "FAIL: critical runtime must retain legacy Fable exhaustion fallback warning" >&2
   echo "$out" >&2
   exit 1
 }
 
 out="$(run_notice 'sonnet[1m]' high normal 0)"
-printf '%s' "$out" | grep -qF 'normal orchestrator는 opus[1m]@high' || {
+grep -qF 'normal orchestrator는 opus[1m]@high' <<<"$out" || {
   echo "FAIL: direct legacy normal launch compatibility must remain unchanged" >&2
   echo "$out" >&2
   exit 1

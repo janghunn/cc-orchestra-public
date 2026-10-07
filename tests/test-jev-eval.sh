@@ -11,8 +11,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok $((++pass)) - $*"; }
 field() { sed -n "s/^$2: //p" "$1" | head -1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
-assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
-assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
+assert_has() { grep -qF -- "$2" <<<"$1" || fail "missing '$2' ($3)"; }
+assert_not_has() { ! grep -qF -- "$2" <<<"$1" || fail "unexpected '$2' ($3)"; }
 run() {
   RUN_STATUS=0
   RUN_OUTPUT="$("$@" 2>&1)" || RUN_STATUS=$?
