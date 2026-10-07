@@ -13,6 +13,8 @@ cleanup() {
 }
 trap cleanup EXIT
 export HOME="$TMP/home" PYTHONDONTWRITEBYTECODE=1
+# Test-only ownership marker; bin/orch-gc never reads it.
+export GC_TEST_OWNER_PID=$$
 unset ORCH_ARCHIVE_POLICY CC_ORCH_WORKTREE_ROOT
 while IFS= read -r name; do unset "$name"; done < <(compgen -v GIT_)
 pass=0
@@ -20,11 +22,61 @@ ok() { echo "ok $((++pass)) - $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # The helper lives outside each fixture so logs and test imports cannot affect its hash.
+cat > "$TMP/gc_hermetic.py" <<'PY'
+"""Test-only loader: drop incompleteness outside this suite's process tree so
+host processes cannot change results. bin/orch-gc stays unchanged and fail-closed.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import re
+import sys
+
+def owned(pid):
+    try:
+        owner = int(os.environ['GC_TEST_OWNER_PID'])
+        for _ in range(4096):
+            if pid <= 0:
+                return False
+            if pid == owner:
+                return True
+            with open(f'/proc/{pid}/stat', 'rb') as stream:
+                fields = stream.read().rpartition(b') ')[2].split()
+            if len(fields) < 2:
+                return False
+            pid = int(fields[1])
+    except (OSError, ValueError):
+        return False
+    return False
+
+def hermetic_incomplete(messages):
+    result = []
+    for message in messages:
+        match = re.match(r'^process scan incomplete: pid (\d+) \(', message)
+        if match is None or owned(int(match[1])):
+            result.append(message)
+    return result
+
+def load(gc):
+    loader = importlib.machinery.SourceFileLoader('orch_gc', gc)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    real = mod.process_table
+    def table():
+        paths, incomplete = real()
+        return paths, hermetic_incomplete(incomplete)
+    mod.process_table = table
+    return mod
+
+if __name__ == '__main__':
+    sys.exit(load(sys.argv[1]).main(sys.argv[2:]))
+PY
+
 cat > "$TMP/cases.py" <<'PY'
 import hashlib
 import contextlib
-import importlib.machinery
-import importlib.util
+import gc_hermetic
 import io
 import json
 import os
@@ -38,6 +90,7 @@ import sys
 import time
 
 action, fixture, gc = sys.argv[1:]
+HERMETIC = str(Path(__file__).with_name('gc_hermetic.py'))
 F = Path(fixture)
 L, R = F / 'L', F / 'state/worktrees/proj'
 TASK = '01-task'
@@ -181,7 +234,7 @@ def fixture_setup():
     write(F.parent / (F.name + '.pid'), str(process.pid))
 
 def run(*args, code=0, env=None):
-    result = subprocess.run(['python3', gc, *args], capture_output=True, text=True, env=env)
+    result = subprocess.run(['python3', HERMETIC, gc, *args], capture_output=True, text=True, env=env)
     assert result.returncode == code, (args, result.returncode, result.stdout, result.stderr)
     return result.stdout
 
@@ -221,22 +274,129 @@ def snapshot(exclude=(), ignore_mtime=()):
     return result
 
 def module():
-    loader = importlib.machinery.SourceFileLoader('orch_gc', gc)
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+    return gc_hermetic.load(gc)
 
 def options(mod):
     return mod.parser().parse_args(['scan', '--root', str(R), '--repo', str(L)])
 
-def preflight():
-    _, incomplete = module().process_table()
+def process_json(report):
+    items = {item['id']: item for item in report['items']}
+    escape = items['proj/escape']
+    assert escape['class'] == 'DANGER', escape
+    assert any('escapes root' in reason['text'] for reason in escape['reasons']), escape
+    activity = [item for item in items.values()
+                if not any('escapes root' in reason['text'] for reason in item['reasons'])]
+    assert activity, items
+    messages = [[reason['text'] for reason in item['reasons']
+                 if 'process scan incomplete' in reason['text']] for item in activity]
+    assert all(message == messages[0] for message in messages), messages
+    safe = {item['id'] for item in items.values() if item['class'] == 'SAFE'}
+    if messages[0]:
+        assert not safe, safe
+        assert report['totals']['SAFE']['count'] == 0, report['totals']
+    else:
+        assert safe == {'proj/merged', 'proj/wtsafe', 'proj/trail '}, safe
+        proc = items['proj/proc']
+        assert proc['class'] == 'DANGER', proc
+        assert any('in use by pid' in reason['text'] for reason in proc['reasons']), proc
+    return messages[0]
+
+def process_table_output(table):
+    rows = [line for line in table.splitlines() if line.startswith(('SAFE ', 'CAUTION ', 'DANGER '))]
+    assert rows, table
+    incomplete = any('process scan incomplete' in line for line in rows)
     if incomplete:
-        for message in incomplete:
-            print('preflight: external ' + message, flush=True)
-        raise AssertionError('preflight: external process scan incomplete')
-    print('preflight: process scan complete')
+        assert 'totals: SAFE 0 (' in table, table
+        assert not any(line.startswith('SAFE ') for line in rows), table
+    else:
+        assert 'totals: SAFE 3 (' in table, table
+    return incomplete
+
+def real_process_scan(required=None):
+    before = snapshot()
+    args = ['python3', gc, 'scan', '--root', str(R), '--repo', str(L)]
+    result = subprocess.run([*args, '--json'], capture_output=True, text=True)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    messages = process_json(json.loads(result.stdout))
+    assert before == snapshot(), 'real JSON scan changed fixture'
+    result = subprocess.run(args, capture_output=True, text=True)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    # Each invocation reads /proc independently; a foreign process can exit between scans.
+    table_incomplete = process_table_output(result.stdout)
+    assert before == snapshot(), 'real table scan changed fixture'
+    if required is not None:
+        assert required in messages, messages
+        assert table_incomplete, result.stdout
+        # Tables show only the first reason: another incomplete pid can hide required.
+    return messages
+
+def casereal():
+    messages = real_process_scan()
+    if messages:
+        print('real process scan: incomplete (' + '; '.join(messages) + '); fail-closed, no SAFE')
+    else:
+        print('real process scan: complete; SAFE set as expected')
+
+def caserealforced():
+    child_pid = (F.parent / (F.name + '.realforced.pid')).read_text().strip()
+    if not nondumpable_observable(child_pid):
+        print('skip: non-dumpable ownership not observable here')
+        return
+    required = f'process scan incomplete: pid {child_pid} (python3) not inspectable'
+    messages = real_process_scan(required)
+    print('realforced process scan: incomplete (' + '; '.join(messages) + '); fail-closed, no SAFE')
+
+def casefakeworld():
+    before = snapshot()
+    owner = int(os.environ['GC_TEST_OWNER_PID'])
+    with open(f'/proc/{owner}/stat', 'rb') as stream:
+        foreign = int(stream.read().rpartition(b') ')[2].split()[1])
+    if foreign == 0:
+        reaped = subprocess.Popen(['true'])
+        reaped.wait()
+        foreign = reaped.pid
+    child = subprocess.Popen(['sleep', '30'])
+    try:
+        foreign_message = f'process scan incomplete: pid {foreign} (foreign) not inspectable'
+        owned_message = f'process scan incomplete: pid {child.pid} (sleep) not inspectable'
+        messages = ['other message', foreign_message, owned_message, 'process scan incomplete']
+        assert gc_hermetic.hermetic_incomplete(messages) == [messages[0], owned_message, messages[3]]
+    finally:
+        child.terminate()
+        child.wait()
+
+    mod = module()
+    original = mod.process_table
+    paths, incomplete = original()
+    assert not incomplete, incomplete
+    message = 'process scan incomplete: pid 1130 (systemd) not inspectable'
+    args = ['scan', '--root', str(R), '--repo', str(L)]
+    def main(*extra):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = mod.main([*args, *extra])
+        assert code == 0, (code, output.getvalue())
+        return output.getvalue()
+    try:
+        # Reuse the same real paths for both worlds; only incompleteness changes.
+        mod.process_table = lambda: (paths, incomplete)
+        complete = json.loads(main('--json'))
+        assert process_json(complete) == []
+        mod.process_table = lambda: (paths, [message])
+        forced = json.loads(main('--json'))
+        assert process_json(forced) == [message]
+        classes = {item['id']: item['class'] for item in complete['items']}
+        assert {item['id'] for item in forced['items']} == set(classes)
+        for item in forced['items']:
+            expected = 'CAUTION' if classes[item['id']] == 'SAFE' else classes[item['id']]
+            assert item['class'] == expected, item
+        table = main()
+        assert message in table, table
+        assert process_table_output(table), table
+    finally:
+        mod.process_table = original
+    assert before == snapshot(), 'fake process scan changed fixture'
+    print('fake process scan: complete SAFE set; incomplete fail-closed; ownership filter preserves suite reasons')
 
 def case1():
     before = snapshot()
@@ -435,10 +595,7 @@ def case7():
     item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
     assert item.classification == 'CAUTION' and 'activity records incomplete' in item.reason(), item.reasons
 
-def nondumpable(daemon):
-    mod = module()
-    opts = options(mod)
-    child_pid = (F.parent / (F.name + '.nondumpable.pid')).read_text().strip()
+def nondumpable_observable(child_pid):
     deadline = time.monotonic() + 5
     observable = False
     while time.monotonic() < deadline:
@@ -449,7 +606,13 @@ def nondumpable(daemon):
         if observable:
             break
         time.sleep(0.05)
-    if observable:
+    return observable
+
+def nondumpable(daemon):
+    mod = module()
+    opts = options(mod)
+    child_pid = (F.parent / (F.name + '.nondumpable.pid')).read_text().strip()
+    if nondumpable_observable(child_pid):
         item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
         if daemon:
             assert item.classification == 'SAFE', item.reasons
@@ -534,7 +697,7 @@ def case8():
         if command[0] == 'merge-base':
             assert command[1] == '--is-ancestor', args
     code = 'import sys,runpy; sys.modules["socket"]=sys.modules["ssl"]=None; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")'
-    result = subprocess.run(['python3', '-c', code, gc, 'scan', '--root', str(R), '--repo', str(L), '--json'],
+    result = subprocess.run(['python3', '-c', code, HERMETIC, gc, 'scan', '--root', str(R), '--repo', str(L), '--json'],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['totals']['SAFE']['count'] == 3
@@ -827,8 +990,6 @@ def case12zombie():
 
 if action == 'fixture':
     fixture_setup()
-elif action == 'preflight':
-    preflight()
 else:
     globals()['case' + action]()
 PY
@@ -877,9 +1038,23 @@ make_fixture() {
   worker_pids+=("$(cat "$fixture.pid")")
 }
 case_run() { python3 "$TMP/cases.py" "$1" "$2" "$GC"; }
-python3 "$TMP/cases.py" preflight "$TMP/preflight" "$GC" || fail 'external process preflight'
 fixture="$TMP/case-12"
 make_fixture "$fixture"
+case_run real "$fixture" || fail 'real process scan'
+ok 'real process scan: conditional fail-closed'
+(
+  cd /
+  exec python3 -c 'import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(300)'
+) &
+worker_pids+=("$!")
+child_pid="$!"
+printf '%s\n' "$child_pid" > "$fixture.realforced.pid"
+case_run realforced "$fixture" || fail 'real process scan with uninspectable process'
+kill "$child_pid"
+wait "$child_pid" 2>/dev/null || true
+ok 'real process scan: controlled uninspectable process fails closed'
+case_run fakeworld "$fixture" || fail 'fake incomplete process table'
+ok 'fake process scan: complete and incomplete worlds'
 failed=()
 for finding in 12repo 12deleted 12ids 12partial 12zombie; do
   if case_run "$finding" "$fixture"; then ok "case $finding"; else echo "FAIL: case $finding" >&2; failed+=("$finding"); fi
