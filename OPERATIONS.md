@@ -1068,8 +1068,10 @@ negatives are possible. Withheld content stays in the private raw store. `_meta/
 lists hashes and locations, never matched content. To release an item, append
 `sha256:<full hash from the report>` to `~/.claude/orchestra-archive/allowlist.txt`
 (or the configured allow-list) and re-run apply. Raw logs are lossless and are not scanned.
-The full-text backstop honors released values in both raw and JSON-escaped metadata while
-rejecting other secret-shaped lines.
+The full-text backstop honors released values in both raw and JSON-escaped metadata, but only
+span by span: a flagged line passes only when every secret-shaped match on it lies entirely
+inside one occurrence of a released value, so a released value never exempts another secret
+on the same line (including the one-line catalog).
 The tool makes no network or model calls, configures no remote, and never pushes.
 
 The managed `.obsidian/graph.json` is regenerated on apply and excludes artifacts, metadata
