@@ -837,6 +837,7 @@ PY
 }
 for mask in 0022 0027 0077; do
   WRAP_STATE="$TMP/events-mode-$mask"
+  rm -f "$WRAP_TASK/codex-implement.jsonl"
   rm -f "$TMP/event-mode-reference"
   (
     umask "$mask"
@@ -913,14 +914,19 @@ for failure in mktemp chmod exec mv codex timeout; do
     assert_eq "$actual_rc" "$expected_rc" "events cleanup after $failure"
   )
   check_events 1000000
-  python3 - "$WRAP_STATE/codex-runs.jsonl" <<'PY'
+  python3 - "$WRAP_STATE/codex-runs.jsonl" "$failure" <<'PY'
 import json, sys
 from pathlib import Path
 row = json.loads(Path(sys.argv[1]).read_text())
-assert row['usage']['input_tokens'] == 1000000, row
+if sys.argv[2] in ('mktemp', 'chmod', 'exec', 'mv'):
+    assert row['usage'] is None, row
+    assert row['log_offset'] is None, row
+else:
+    assert row['usage']['input_tokens'] == 1000000, row
+    assert type(row['log_offset']) is int, row
 PY
 done
-ok 'setup fallback, Codex failure and timeout clean temporary events and retain captured usage'
+ok 'setup fallback stays estimated; Codex failure and timeout retain exact usage; temporary events are cleaned'
 
 # A is paused after opening its private file; B creates, publishes and completes first.
 WRAP_STATE="$TMP/creation-overlap"
@@ -968,5 +974,74 @@ from pathlib import Path
 strays = list(Path(sys.argv[1]).rglob('.codex-*.jsonl'))
 assert not strays, strays
 PY
+
+# A shared-path fallback must not capture or consume a later attempt's tokens.
+mv "$FAKEBIN/mktemp" "$FAKEBIN/mktemp.saved"
+mv "$FAKEBIN/flock" "$FAKEBIN/flock.saved"
+cat > "$FAKEBIN/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */.codex-*.jsonl ]] && [ ! -e "$FALLBACK_SETUP_MARKER" ]; then
+  : > "$FALLBACK_SETUP_MARKER"
+  exit 1
+fi
+exec "$REAL_MKTEMP" "$@"
+MKTEMP
+cat > "$FAKEBIN/flock" <<'FLOCK'
+#!/usr/bin/env bash
+if [ ! -e "$OVERLAP_MARKER" ]; then
+  : > "$OVERLAP_MARKER"
+  FAKE_USAGE_IN=200 "$OVERLAP_WRAPPER" implement "$OVERLAP_REPO" "$OVERLAP_TASK" --model sol --effort high \
+    > "$CC_ORCH_STATE_DIR/overlap-b.out" 2> "$CC_ORCH_STATE_DIR/overlap-b.err" || exit "$?"
+fi
+exec "$REAL_FLOCK" "$@"
+FLOCK
+chmod +x "$FAKEBIN/mktemp" "$FAKEBIN/flock"
+WRAP_STATE="$TMP/fallback-overlap"
+mkdir -p "$WRAP_STATE"
+export FALLBACK_SETUP_MARKER="$WRAP_STATE/setup-failed" OVERLAP_MARKER="$WRAP_STATE/overlap-fired"
+FAKE_USAGE_IN=100 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+python3 - "$WRAP_STATE" <<'PY'
+import json, sys
+from pathlib import Path
+state = Path(sys.argv[1])
+assert (state / 'setup-failed').exists() and (state / 'overlap-fired').exists()
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(lines) == len(records) == 2, records
+b, a = records
+assert a['usage'] is None and a['log_offset'] is None, ('fallback must stay estimated', a)
+assert b['usage'] == dict(input_tokens=200, cached_input_tokens=0, output_tokens=0), b
+assert b['log_offset'] == 0 and b['log_line'].encode() + b'\n' == lines[0], b
+assert a['log_line'].encode() + b'\n' == lines[1], a
+assert len({row['run_id'] for row in records}) == 2
+assert [row['attempt'] for row in records] == [1, 1]
+PY
+CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+run --cost
+assert_success 'estimated fallback overlap'
+assert_row $'gpt-6.1-sol\t1\t0\t200\t0\t0\t0.0004\t0.0020'
+assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'only private attempt priced'
+assert_has "$RUN_OUTPUT" 'unpriced: 1 call(s) without surviving token data (gpt-6.1-sol 1)' 'fallback cannot reuse consumed private events'
+attribution 1 0
+mv "$FAKEBIN/mktemp.saved" "$FAKEBIN/mktemp"
+mv "$FAKEBIN/flock.saved" "$FAKEBIN/flock"
+ok 'shared-path setup fallback remains unidentified and cannot duplicate exact tokens'
+
+# Replacing an existing events file preserves its mode instead of applying a new umask.
+WRAP_STATE="$TMP/existing-events-mode"
+printf 'previous events\n' > "$WRAP_TASK/codex-implement.jsonl"
+chmod 0600 "$WRAP_TASK/codex-implement.jsonl"
+(
+  umask 0022
+  FAKE_USAGE_IN=1000000 wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+)
+python3 - "$WRAP_TASK/codex-implement.jsonl" <<'PY'
+import stat, sys
+from pathlib import Path
+events = Path(sys.argv[1])
+assert stat.S_IMODE(events.stat().st_mode) == 0o600, oct(stat.S_IMODE(events.stat().st_mode))
+assert not list(events.parent.glob('.codex-*.jsonl'))
+PY
+ok 'existing events mode 0600 survives replacement under umask 0022'
 
 echo "PASS: $pass usage-cost test groups"

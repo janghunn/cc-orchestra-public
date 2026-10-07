@@ -551,7 +551,8 @@ run_once() {
   # A private inode plus atomic publication prevents simultaneous creators sharing it.
   if {
     EVENTS_TMP="$(mktemp "$TASK_DIR/.codex-$RUN_TAG.XXXXXX.jsonl")" &&
-      chmod "$EVENTS_MODE" "$EVENTS_TMP" &&
+      { { [ -e "$EVENTS" ] && chmod --reference="$EVENTS" "$EVENTS_TMP"; } ||
+        chmod "$EVENTS_MODE" "$EVENTS_TMP"; } &&
       exec 7>"$EVENTS_TMP" &&
       mv -fT -- "$EVENTS_TMP" "$EVENTS"
   } 2>/dev/null; then
@@ -632,11 +633,14 @@ def token_usage(stream):
 usage = mtime_ns = size = None
 try:
     with Path(events_source).open(errors="replace") as stream:
-        usage = token_usage(stream)
+        if events_source == "/dev/fd/7":
+            usage = token_usage(stream)
         stat = os.fstat(stream.fileno())
         mtime_ns, size = stat.st_mtime_ns, stat.st_size
 except OSError:
     pass
+if events_source != "/dev/fd/7":
+    offset = ""
 record = dict(v=1, run_id=uuid.uuid4().hex, attempt=int(attempt), pid=int(pid),
               start=start, end=end, mode=mode, lane=lane if mode in ("implement", "resume") else mode,
               run_tag=run_tag, model=model, effort=effort, fast_mode=fast_mode == "1",
