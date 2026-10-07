@@ -46,6 +46,7 @@ The main installed paths are:
 ~/.local/bin/orch-summary-check
 ~/.local/bin/orch-usage-report
 ~/.local/bin/orch-archive
+~/.local/bin/orch-gc
 ```
 
 The installer also configures the legacy Fable guard timer, Claude 5h/7d status-line quota tap,
@@ -1209,6 +1210,41 @@ Open limitations:
 - Only PNG is supported; `.bmp`, `.tif` and other raster formats follow the payload limits.
 - Pillow 9.0.1 compatibility is by construction (no newer-only calls) and has not been run;
   Obsidian embed rendering of the thumbnails has not been checked visually.
+
+## Cleanup (orch-gc)
+
+`orch-gc` reports checkout size, age, archive coverage and deletion eligibility without
+writing files or contacting remotes. It scans project directories under each configured
+state `worktrees/` root, `.orchestra/wt/<slot>` worktrees, and `archive-tmp*` directories
+under the archive policy's extra bases. `CC_ORCH_STATE_DIR` and `CC_ORCH_WORKTREE_ROOT`
+are included; `--root` replaces default discovery.
+
+- SAFE: clean checkout, HEAD and all disposable refs merged into the reference repo's
+  target ref, completion registry rows (PASS/ACCEPTED/CLOSED), and complete idle evidence.
+- CAUTION: uncertain recovery or activity, dirty/unmerged work, missing/inactive registry
+  rows, ignored outputs, checkpoints, hidden index flags, Git filters, locks, nested
+  checkouts, session records or temp backups. These cannot be selected for deletion.
+- DANGER: open registry rows, running processes, secret-shaped files, mounts, escaped
+  paths or a checkout containing the reference repository. These cannot be deleted.
+
+```bash
+orch-gc                                  # read-only scan (default)
+orch-gc scan --json
+orch-gc scan --root DIR
+orch-gc apply --class safe                # dry run
+orch-gc apply --class safe --yes
+orch-gc apply --item cc-orchestra/self-hosting-40 --yes
+orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
+```
+
+`--merged-into` defaults to `local/installed-main`; `--repo` defaults to the repository
+at `~/.claude/orchestra`. Every selected item must be SAFE; deletion rechecks each item.
+CAUTION/DANGER items, branches in the owning/live repo, remote refs, external registries,
+session records, temp backups and anything outside a scanned root are never deleted.
+Removing a clone does remove its local refs and git-ignored `.orchestra/` artifacts,
+including its own registry. Archive coverage is informational: the archive is not a
+full copy (checkpoints, original images and oversized payloads are not stored).
+Codex-only installs do not link it; run `~/.claude/orchestra/bin/orch-gc` or `<repo>/bin/orch-gc`.
 
 ## Tuning
 

@@ -6,6 +6,7 @@ through Bash (the CI workflow does the same):
 ```bash
 bash tests/test-policy.sh
 bash tests/test-runtime.sh
+bash tests/test-orch-gc.sh
 bash tests/test-accepted-status.sh
 ```
 

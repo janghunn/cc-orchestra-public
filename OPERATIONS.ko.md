@@ -46,6 +46,7 @@ cc-orchestra 자체를 수정할 때는 [AGENTS.md](AGENTS.md)를 읽습니다.
 ~/.local/bin/orch-summary-check
 ~/.local/bin/orch-usage-report
 ~/.local/bin/orch-archive
+~/.local/bin/orch-gc
 ```
 
 이 밖에 Fable legacy guard timer, Claude 5h/7d status-line quota tap, live runtime routing
@@ -1252,6 +1253,41 @@ inode만 바뀐 재수집은 허용한다. inventory가 없거나 읽을 수 없
 - PNG만 지원한다. `.bmp`, `.tif` 등 다른 래스터 형식은 payload 한도를 따른다.
 - Pillow 9.0.1 호환은 (신규 전용 호출을 쓰지 않는) 구조로 확보했으며 실행해 보지는 않았다.
   thumbnail의 Obsidian embed 렌더링도 시각적으로 확인하지 않았다.
+
+## 정리 (orch-gc)
+
+`orch-gc`는 파일을 쓰거나 원격에 접속하지 않고 체크아웃 크기, 경과 일수, 아카이브
+포함 여부와 삭제 가능 여부를 보고한다. 각 설정된 state의 `worktrees/` 아래 프로젝트
+디렉터리, `.orchestra/wt/<slot>` worktree, 아카이브 정책의 extra bases 아래
+`archive-tmp*` 디렉터리를 찾는다. `CC_ORCH_STATE_DIR`, `CC_ORCH_WORKTREE_ROOT`도
+반영하며 `--root`를 지정하면 기본 탐색을 대신한다.
+
+- SAFE: 깨끗한 체크아웃이며 HEAD와 삭제될 모든 ref가 기준 저장소의 대상 ref에
+  병합됨. 완료 레지스트리 행(PASS/ACCEPTED/CLOSED)과 완전한 비활성 증거가 필요하다.
+- CAUTION: 복구·활동 여부가 불확실하거나 dirty/미병합 작업, 누락·비활성 레지스트리,
+  ignored 출력, 체크포인트, 숨김 index 플래그, Git 필터, lock, 중첩 체크아웃,
+  세션 기록 또는 임시 백업이 있음. 삭제 대상으로 선택할 수 없다.
+- DANGER: 열린 레지스트리 행, 실행 중인 프로세스, 비밀 파일 형태의 이름, mount,
+  루트 밖 경로 또는 기준 저장소를 포함하는 체크아웃. 삭제할 수 없다.
+
+```bash
+orch-gc                                  # 읽기 전용 스캔 (기본)
+orch-gc scan --json
+orch-gc scan --root DIR
+orch-gc apply --class safe                # dry run
+orch-gc apply --class safe --yes
+orch-gc apply --item cc-orchestra/self-hosting-40 --yes
+orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
+```
+
+`--merged-into` 기본값은 `local/installed-main`, `--repo` 기본값은
+`~/.claude/orchestra`의 저장소다. 선택 항목은 모두 SAFE여야 하며 삭제 직전에 재검사한다.
+CAUTION/DANGER 항목, 소유·live 저장소의 브랜치, 원격 ref, 외부 레지스트리, 세션 기록,
+임시 백업과 스캔 루트 밖의 경로는 삭제하지 않는다. 클론을 삭제하면 그 클론의 로컬 ref와
+자체 레지스트리를 포함한 git-ignored `.orchestra/` 산출물도 삭제된다.
+아카이브 포함 여부는 참고 정보이며 전체 복사본을 뜻하지 않는다
+(체크포인트, 원본 이미지와 크기 제한을 넘는 payload는 저장하지 않음).
+Codex-only 설치는 링크를 만들지 않으므로 `~/.claude/orchestra/bin/orch-gc` 또는 `<repo>/bin/orch-gc`로 실행한다.
 
 ## 설정 튜닝
 
