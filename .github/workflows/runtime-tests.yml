@@ -51,3 +51,20 @@ jobs:
         run: bash tests/test-jev-local.sh
       - name: Codex-only orchestration and backend switching
         run: bash tests/test-codex-only.sh
+      - name: Accepted-status gate suite
+        run: bash tests/test-accepted-status.sh
+      - name: Compact-context hook suite
+        run: bash tests/test-compact-context.sh
+      - name: Compaction replay suite
+        run: bash tests/test-compaction-replay.sh
+      - name: Diff triage suite
+        run: bash tests/test-diff-triage.sh
+      - name: Jev eval suite
+        run: bash tests/test-jev-eval.sh
+      - name: Jev stage-1 shadow analysis suite
+        run: bash tests/test-jev-stage1.sh
+      - name: Mods observer suite
+        run: bash tests/test-mods-observer.sh
+      # Not run here (fail in a runner-like simulation, see task 75):
+      # - tests/test-orch-gc.sh: needs Python 3.13 (mmap trackfd=), ubuntu-latest ships 3.12.
+      # - tests/test-install-dry-run.sh: fails under a clean env/fresh HOME ("unplanned .../home/.cache"); passes only un-sandboxed on the host.
