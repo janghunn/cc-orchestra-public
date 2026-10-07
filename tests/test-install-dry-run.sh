@@ -471,4 +471,232 @@ PY
 )
 done
 echo 'PASS: bare settings filename predicts the existing statusLine registration failure without writes'
+# T1a: BIN follows a symlink before climbing through .. .
+(
+  fresh_home physical-bin
+  mkdir -p "$HOME/elsewhere/child"
+  ln -s "$HOME/elsewhere/child" "$HOME/link"
+  export CC_ORCH_BIN_DIR="$HOME/link/../x"
+  snap "$HOME" content > "$TMP/physical-bin-initial"
+  preview 0 "$TMP/physical-bin-first.out" --dry-run
+  grep -Eq "^create +$HOME/elsewhere/x/cc-orch -> " "$TMP/physical-bin-first.out"
+  real_install
+  snap "$HOME" content > "$TMP/physical-bin-installed"
+  assert_created_paths "$TMP/physical-bin-initial" "$TMP/physical-bin-installed" "$TMP/physical-bin-first.out"
+  [[ -L "$HOME/elsewhere/x/cc-orch" && ! -e "$HOME/x" ]]
+  real_install
+  preview 0 "$TMP/physical-bin-stable.out" --dry-run
+  assert_stable_plan "$TMP/physical-bin-stable.out" stable
+)
+echo 'PASS: BIN symlink/.. preview matches physical installation and stabilizes'
+
+# T1b: AGENTS and its default manifest follow the same physical path.
+(
+  fresh_home physical-agents
+  mkdir -p "$HOME/elsewhere/child"
+  ln -s "$HOME/elsewhere/child" "$HOME/link"
+  export CC_ORCH_AGENTS_DIR="$HOME/link/../x"
+  unset CC_ORCH_MANIFEST
+  snap "$HOME" content > "$TMP/physical-agents-initial"
+  preview 0 "$TMP/physical-agents-first.out" --dry-run
+  grep -Eq "^generate-profiles +$HOME/elsewhere/x/ \(39 profiles: 39 create" "$TMP/physical-agents-first.out"
+  real_install
+  snap "$HOME" content > "$TMP/physical-agents-installed"
+  assert_created_paths "$TMP/physical-agents-initial" "$TMP/physical-agents-installed" "$TMP/physical-agents-first.out"
+  real_install
+  preview 0 "$TMP/physical-agents-stable.out" --dry-run
+  assert_stable_plan "$TMP/physical-agents-stable.out" stable
+  grep -Eq "^unchanged +$HOME/elsewhere/x/.install-manifest.json\$" "$TMP/physical-agents-stable.out"
+)
+echo 'PASS: AGENTS symlink/.. preview matches physical profiles and manifest'
+
+# T1c: Settings writers split when the lexical temporary-file parent is missing.
+(
+  fresh_home physical-settings-missing
+  mkdir -p "$HOME/elsewhere/child" "$HOME/elsewhere/x"
+  ln -s "$HOME/elsewhere/child" "$HOME/link"
+  export CC_ORCH_SETTINGS="$HOME/link/../x/settings.json"
+  snap "$HOME" content > "$TMP/physical-settings-missing-initial"
+  preview 0 "$TMP/physical-settings-missing.out" --dry-run
+  grep -Eq "^merge-json +$HOME/elsewhere/x/settings.json hooks.UserPromptSubmit: add" "$TMP/physical-settings-missing.out"
+  grep -F "statusLine: unchanged (registration writes its temporary file in $HOME/x/, which is missing" "$TMP/physical-settings-missing.out" >/dev/null
+  grep -Eq "^merge-json +$HOME/x/settings.json hooks.PreToolUse" "$TMP/physical-settings-missing.out"
+  real_install
+  snap "$HOME" content > "$TMP/physical-settings-missing-installed"
+  assert_created_paths "$TMP/physical-settings-missing-initial" "$TMP/physical-settings-missing-installed" "$TMP/physical-settings-missing.out"
+  python3 - <<'PY'
+import json, os
+home = os.environ['HOME']
+physical = json.load(open(home + '/elsewhere/x/settings.json'))
+lexical = json.load(open(home + '/x/settings.json'))
+assert 'UserPromptSubmit' in physical['hooks'] and 'statusLine' not in physical
+assert 'PreToolUse' in lexical['hooks']
+PY
+)
+echo 'PASS: settings preview splits notice and safety files and predicts missing temporary parent'
+
+# T1d: An existing lexical temporary-file parent permits statusLine registration.
+(
+  fresh_home physical-settings-present
+  mkdir -p "$HOME/elsewhere/child" "$HOME/elsewhere/x" "$HOME/x"
+  ln -s "$HOME/elsewhere/child" "$HOME/link"
+  export CC_ORCH_SETTINGS="$HOME/link/../x/settings.json"
+  snap "$HOME" content > "$TMP/physical-settings-present-initial"
+  preview 0 "$TMP/physical-settings-present.out" --dry-run
+  grep -F "$HOME/elsewhere/x/settings.json statusLine: replace none" "$TMP/physical-settings-present.out" >/dev/null
+  real_install
+  snap "$HOME" content > "$TMP/physical-settings-present-installed"
+  assert_created_paths "$TMP/physical-settings-present-initial" "$TMP/physical-settings-present-installed" "$TMP/physical-settings-present.out"
+  python3 - <<'PY'
+import json, os
+assert 'statusLine' in json.load(open(os.environ['HOME'] + '/elsewhere/x/settings.json'))
+PY
+)
+echo 'PASS: settings statusLine reaches the physical file when the lexical temporary parent exists'
+
+# T1e: A non-directory symlink before .. must retain the kernel failure.
+for kind in file-symlink dangling; do
+  for target in BIN AGENTS; do
+  (
+    fresh_home "physical-blocked-$kind-$target"
+    if [[ "$kind" == file-symlink ]]; then
+      printf x > "$HOME/f"
+      ln -s "$HOME/f" "$HOME/fl"
+      blocked="$HOME/fl"
+    else
+      ln -s "$HOME/nowhere" "$HOME/dl"
+      blocked="$HOME/dl"
+    fi
+    export "CC_ORCH_${target}_DIR=$blocked/../x"
+    unset CC_ORCH_MANIFEST
+    preview 1 "$TMP/physical-blocked.out" --dry-run
+    grep -Eq "^error +$blocked \(exists and is not a directory" "$TMP/physical-blocked.out"
+    if [[ "$target" == BIN ]]; then
+      if grep -q -- ' -> ' "$TMP/physical-blocked.out"; then
+        fail 'blocked BIN preview includes a link action'
+      fi
+    fi
+    if bash "$TMP/repo/install.sh" > "$TMP/physical-blocked-install.log" 2>&1; then
+      fail "real install accepted $kind before .. in $target"
+    fi
+  )
+  done
+done
+echo 'PASS: symlink-to-file and dangling symlink before .. fail for BIN and AGENTS'
+
+# T1f: Safety-only registration continues to use the lexical settings path.
+(
+  fresh_home physical-safety-only
+  mkdir -p "$HOME/elsewhere/child"
+  ln -s "$HOME/elsewhere/child" "$HOME/link"
+  export CC_ORCH_SETTINGS="$HOME/link/../x/settings.json"
+  snap "$HOME" content > "$TMP/physical-safety-initial"
+  preview 0 "$TMP/physical-safety.out" --dry-run --safety-hooks-only
+  grep -Eq "^create +$HOME/x/\$" "$TMP/physical-safety.out"
+  grep -Eq "^merge-json +$HOME/x/settings.json hooks.PreToolUse" "$TMP/physical-safety.out"
+  if grep -q elsewhere "$TMP/physical-safety.out"; then
+    fail 'safety-only preview includes the physical settings path'
+  fi
+  bash "$TMP/repo/install.sh" --safety-hooks-only > "$TMP/physical-safety-install.log" 2>&1
+  snap "$HOME" content > "$TMP/physical-safety-installed"
+  assert_created_paths "$TMP/physical-safety-initial" "$TMP/physical-safety-installed" "$TMP/physical-safety.out"
+  [[ -f "$HOME/x/settings.json" && ! -e "$HOME/elsewhere/x" ]]
+)
+echo 'PASS: safety-only symlink/.. settings stay lexical'
+
+# T1g: A temporary file on another filesystem cannot replace physical settings.
+(
+  fresh_home physical-settings-exdev
+  D=''
+  trap '[[ -z "$D" ]] || rm -rf "$D"; rm -rf "$TMP"' EXIT
+  for candidate in /dev/shm "${XDG_RUNTIME_DIR:-}"; do
+    if [[ -n "$candidate" && -d "$candidate" && -w "$candidate" &&
+          "$(stat -c %d "$candidate")" != "$(stat -c %d "$TMP")" ]]; then
+      if D="$(mktemp -d "$candidate/cc72.XXXXXX" 2>/dev/null)"; then break; fi
+    fi
+  done
+  if [[ -z "$D" ]]; then
+    echo 'SKIP: no second filesystem for the EXDEV statusLine case'
+  else
+    mkdir -p "$D/child" "$D/x" "$HOME/x"
+    ln -s "$D/child" "$HOME/xlink"
+    export CC_ORCH_SETTINGS="$HOME/xlink/../x/settings.json"
+    snap "$D" > "$TMP/exdev-before"
+    preview 0 "$TMP/physical-settings-exdev.out" --dry-run
+    snap "$D" > "$TMP/exdev-after"
+    diff -u "$TMP/exdev-before" "$TMP/exdev-after"
+    grep -F "$D/x/settings.json statusLine: unchanged (registration writes its temporary file in $HOME/x/, on a different filesystem" "$TMP/physical-settings-exdev.out" >/dev/null
+    real_install
+    python3 - "$D/x/settings.json" <<'PY'
+import json, sys
+settings = json.load(open(sys.argv[1]))
+assert 'UserPromptSubmit' in settings['hooks'] and 'statusLine' not in settings
+PY
+    rm -rf "$D"
+    D=''
+    echo 'PASS: settings preview predicts cross-filesystem statusLine failure'
+  fi
+  trap - EXIT
+)
+
+# T2: Manifest destinations retain the builder's spelling and logical PWD.
+for spelling in ./agents agents/ a//agents; do
+(
+  fresh_home "manifest-spelling-${spelling//\//_}"
+  cd "$HOME"
+  export CC_ORCH_AGENTS_DIR="$spelling"
+  unset CC_ORCH_MANIFEST
+  real_install
+  real_install
+  preview 0 "$TMP/manifest-spelling.out" --dry-run
+  assert_stable_plan "$TMP/manifest-spelling.out" stable
+  grep -Eq '^unchanged +.*/.install-manifest.json$' "$TMP/manifest-spelling.out"
+)
+done
+(
+  fresh_home manifest-logical-cwd
+  mkdir -p "$HOME/real"
+  ln -s "$HOME/real" "$HOME/cwdlink"
+  cd "$HOME/cwdlink"
+  export CC_ORCH_AGENTS_DIR=agents
+  unset CC_ORCH_MANIFEST
+  real_install
+  real_install
+  preview 0 "$TMP/manifest-logical-cwd.out" --dry-run
+  assert_stable_plan "$TMP/manifest-logical-cwd.out" stable
+  grep -Eq '^unchanged +.*/.install-manifest.json$' "$TMP/manifest-logical-cwd.out"
+)
+echo 'PASS: manifest comparison preserves ./, trailing and repeated slashes, and logical PWD'
+
+# T3: Generated-profile directories stop installation in either builder.
+(
+  fresh_home profile-directory
+  real_install
+  for name in route-lead-alpha-normal.md lead-alpha.md; do
+    for kind in dir symlink-to-dir; do
+      profile="$CC_ORCH_AGENTS_DIR/$name"
+      rm "$profile"
+      if [[ "$kind" == dir ]]; then
+        mkdir "$profile"
+      else
+        mkdir "$HOME/profile-target"
+        ln -s "$HOME/profile-target" "$profile"
+      fi
+      preview 1 "$TMP/profile-directory.out" --dry-run
+      grep -Eq "^error +$profile \(a directory occupies" "$TMP/profile-directory.out"
+      if grep -Eq "^replace +$profile" "$TMP/profile-directory.out"; then
+        fail 'profile-directory preview includes a profile replacement'
+      fi
+      if grep -q '^enable-unit' "$TMP/profile-directory.out"; then
+        fail 'profile-directory preview enables units after builder failure'
+      fi
+      if bash "$TMP/repo/install.sh" > "$TMP/profile-directory-install.log" 2>&1; then
+        fail "real install accepted $kind at $name"
+      fi
+      rm -rf "$profile" "$HOME/profile-target"
+      real_install
+    done
+  done
+)
+echo 'PASS: profile directories and directory symlinks predict builder failure before units and settings'
 echo 'PASS: all install dry-run tests'
