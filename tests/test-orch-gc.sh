@@ -733,11 +733,28 @@ def case12zombie():
     if syscall is None:
         print('skip: zombie leader syscall unavailable on ' + platform.machine())
         return
+    private_tables = hasattr(os, 'unshare') and hasattr(os, 'CLONE_FILES')
+    if not private_tables:
+        print('skip: private-table sub-checks require os.unshare and os.CLONE_FILES')
     ready = F.parent / (F.name + '.zombie.ready')
     code = ('import ctypes, os, sys, threading, time\n'
-            'held = open(sys.argv[1])\nos.chdir("/")\n'
-            'threading.Thread(target=time.sleep, args=(300,)).start()\n'
-            'open(sys.argv[2], "w").close()\n'
+            'os.chdir("/")\n'
+            'a_ready, b_ready = threading.Event(), threading.Event()\n'
+            'tids = [None, None]\n'
+            'def worker_a():\n'
+            '    tids[0] = threading.get_native_id()\n'
+            '    a_ready.set()\n'
+            '    time.sleep(300)\n'
+            'def worker_b():\n'
+            '    if hasattr(os, "unshare") and hasattr(os, "CLONE_FILES"):\n'
+            '        os.unshare(os.CLONE_FILES)\n'
+            '    held = open(sys.argv[1])\n'
+            '    tids[1] = threading.get_native_id()\n'
+            '    b_ready.set()\n'
+            '    time.sleep(300)\n'
+            'threading.Thread(target=worker_a).start()\na_ready.wait()\n'
+            'threading.Thread(target=worker_b).start()\nb_ready.wait()\n'
+            'with open(sys.argv[2], "w") as stream: stream.write(" ".join(map(str, tids)))\n'
             f'ctypes.CDLL(None).syscall({syscall}, 0)\n')
     holder = subprocess.Popen(['python3', '-c', code, str(R / 'merged/tracked'), str(ready)])
     pid = str(holder.pid)
@@ -749,12 +766,20 @@ def case12zombie():
             time.sleep(0.05)
         else:
             raise AssertionError('holder did not become a zombie leader')
+        tid_a, tid_b = ready.read_text().split()
+        worker_a = f'/proc/{pid}/task/{tid_a}'
+        worker_b = f'/proc/{pid}/task/{tid_b}'
+        if private_tables:
+            tracked = str(R / 'merged/tracked')
+            assert not any(os.readlink(worker_a + '/fd/' + fd) == tracked
+                           for fd in os.listdir(worker_a + '/fd'))
+            assert any(os.readlink(worker_b + '/fd/' + fd) == tracked
+                       for fd in os.listdir(worker_b + '/fd'))
         item = next(i for i in scan_json()['items'] if i['id'] == 'proj/merged')
         assert item['class'] == 'DANGER', item
         assert any(f'in use by pid {pid} ' in r['text'] for r in item['reasons']), item
         mod = module()
-        tid = next(t for t in sorted(os.listdir(f'/proc/{pid}/task')) if t != pid)
-        worker_fd = f'/proc/{pid}/task/{tid}/fd'
+        worker_fd = worker_b + '/fd'
         original_lstat = mod.os.lstat
         for persistent in (False, True):
             attempts = []
@@ -777,6 +802,24 @@ def case12zombie():
                 assert any(path.startswith(str(R / 'merged') + '/') and found_pid == pid
                            for path, found_pid, _ in paths), paths
                 assert not any(f'pid {pid} ' in message for message in incomplete), incomplete
+        original_read_bytes = mod.Path.read_bytes
+        vanished = []
+        def vanished_stat(path, *args, **kwargs):
+            if str(path) == worker_a + '/stat':
+                vanished.append(str(path))
+                if len(vanished) == 1:
+                    raise ProcessLookupError(str(path))
+            return original_read_bytes(path, *args, **kwargs)
+        mod.Path.read_bytes = vanished_stat
+        try:
+            paths, incomplete = mod.process_table()
+        finally:
+            mod.Path.read_bytes = original_read_bytes
+        assert len(vanished) == 1, vanished
+        assert any(path.startswith(str(R / 'merged') + '/') and found_pid == pid
+                   for path, found_pid, _ in paths), paths
+        assert not any(f'pid {pid} ' in message for message in incomplete), incomplete
+        print('process scan: all zombie workers inspected; vanished worker stat preserves surviving worker paths')
     finally:
         holder.terminate()
         holder.wait()

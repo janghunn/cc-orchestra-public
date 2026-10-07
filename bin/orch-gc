@@ -111,61 +111,65 @@ def process_table():
         base = "/proc/" + pid
         comm = "unknown"
         for attempt in range(4):
-            inspect = base
+            zombie = False
             try:
                 if os.stat(base).st_uid != os.getuid():
                     break
                 state = Path(base, "stat").read_bytes().rpartition(b") ")[2][:1]
                 if not state:
                     raise OSError("invalid process stat")
+                inspections = [base]
                 if state in (b"Z", b"X"):
+                    zombie = True
+                    inspections = []
                     for tid in sorted(os.listdir(base + "/task")):
                         if tid == pid:
                             continue
                         thread = base + "/task/" + tid
                         try:
                             state = Path(thread, "stat").read_bytes().rpartition(b") ")[2][:1]
-                        except FileNotFoundError:
+                        except (FileNotFoundError, ProcessLookupError):
                             continue
                         if state and state not in (b"Z", b"X"):
-                            inspect = thread
-                            break
-                    else:
+                            inspections.append(thread)
+                    if not inspections:
                         break
-                comm = Path(inspect, "comm").read_text().strip()
-                if (os.lstat(inspect + "/fd").st_uid != os.getuid()
-                        or os.lstat(inspect + "/cwd").st_uid != os.getuid()):
-                    if comm in SESSION_DAEMONS:
-                        break
-                    raise PermissionError("process entries not owned by current uid")
-                links = [inspect + "/" + name for name in ("cwd", "exe", "root")]
-                links += [inspect + "/fd/" + name for name in os.listdir(inspect + "/fd")]
                 found = []
-                for link in links:
-                    try:
-                        target = os.readlink(link)
-                    except FileNotFoundError:
-                        continue
-                    if os.path.isabs(target) and not (link.endswith("/root") and target == "/"):
-                        found.append((target, pid, comm))
-                    if target.endswith(" (deleted)"):
-                        stripped = target.removesuffix(" (deleted)")
-                        if os.path.isabs(stripped):
-                            found.append((stripped, pid, comm))
-                for line in Path(inspect, "maps").read_bytes().decode("utf-8", "surrogateescape").split("\n"):
-                    fields = line.split(None, 5)
-                    if len(fields) == 6:
-                        target = fields[5].replace(r"\012", "\n")
-                        if os.path.isabs(target):
+                for inspect in inspections:
+                    comm = Path(inspect, "comm").read_text().strip()
+                    if (os.lstat(inspect + "/fd").st_uid != os.getuid()
+                            or os.lstat(inspect + "/cwd").st_uid != os.getuid()):
+                        if comm in SESSION_DAEMONS:
+                            break
+                        raise PermissionError("process entries not owned by current uid")
+                    links = [inspect + "/" + name for name in ("cwd", "exe", "root")]
+                    links += [inspect + "/fd/" + name for name in os.listdir(inspect + "/fd")]
+                    for link in links:
+                        try:
+                            target = os.readlink(link)
+                        except FileNotFoundError:
+                            continue
+                        if os.path.isabs(target) and not (link.endswith("/root") and target == "/"):
                             found.append((target, pid, comm))
                         if target.endswith(" (deleted)"):
                             stripped = target.removesuffix(" (deleted)")
                             if os.path.isabs(stripped):
                                 found.append((stripped, pid, comm))
-                paths.extend(found)
+                    for line in Path(inspect, "maps").read_bytes().decode("utf-8", "surrogateescape").split("\n"):
+                        fields = line.split(None, 5)
+                        if len(fields) == 6:
+                            target = fields[5].replace(r"\012", "\n")
+                            if os.path.isabs(target):
+                                found.append((target, pid, comm))
+                            if target.endswith(" (deleted)"):
+                                stripped = target.removesuffix(" (deleted)")
+                                if os.path.isabs(stripped):
+                                    found.append((stripped, pid, comm))
+                else:
+                    paths.extend(found)
                 break
             except (FileNotFoundError, ProcessLookupError):
-                if inspect == base or not os.path.lexists(base):
+                if not zombie or not os.path.lexists(base):
                     break
                 if attempt < 3:
                     time.sleep(0.05)
