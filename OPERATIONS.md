@@ -47,6 +47,7 @@ The main installed paths are:
 ~/.local/bin/orch-summary-check
 ~/.local/bin/orch-usage-report
 ~/.local/bin/orch-archive
+~/.local/bin/orch-gc
 ```
 
 The installer also configures the legacy Fable guard timer, Claude 5h/7d status-line quota tap,
@@ -1267,6 +1268,44 @@ Open limitations:
 - Only PNG is supported; `.bmp`, `.tif` and other raster formats follow the payload limits.
 - Pillow 9.0.1 compatibility is by construction (no newer-only calls) and has not been run;
   Obsidian embed rendering of the thumbnails has not been checked visually.
+
+## Cleanup (orch-gc)
+
+`orch-gc` reports checkout size, age, archive coverage and candidates for manual cleanup.
+It scans project directories under each configured
+state `worktrees/` root, `.orchestra/wt/<slot>` worktrees, and `archive-tmp*` directories
+under the archive policy's extra bases. `CC_ORCH_STATE_DIR` and `CC_ORCH_WORKTREE_ROOT`
+are included; `--root` replaces default discovery.
+
+- SAFE: clean checkout, HEAD and all disposable refs merged into the reference repo's
+  target ref, completion registry rows (PASS/ACCEPTED/CLOSED), and complete idle evidence.
+- CAUTION: uncertain recovery or activity, dirty/unmerged work, missing/inactive registry
+  rows, ignored outputs, checkpoints, hidden index flags, Git filters, locks, nested
+  checkouts, session records, temp backups, in-progress Git operations or non-inspectable
+  processes, reflog-only commits or locked worktrees.
+- DANGER: open registry rows, running processes, secret-shaped files, mounts, escaped
+  paths, objects borrowed by another repository or a checkout containing the reference
+  repository.
+
+```bash
+orch-gc                                  # read-only scan (default)
+orch-gc scan --json
+orch-gc scan --root DIR
+orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
+```
+
+`--merged-into` defaults to `local/installed-main`; `--repo` defaults to the repository
+at `~/.claude/orchestra`. Scan is the supported mode; apply is disabled in this release
+and never deletes anything. Read the scan output and review candidates before cleaning up manually.
+Removing a clone does remove its local refs and git-ignored `.orchestra/` artifacts,
+including its own registry. Archive coverage is informational: the archive is not a
+full copy (checkpoints, original images and oversized payloads are not stored).
+Repositories outside the scanned roots that borrow a clone's objects are not detected.
+Known limits / follow-up: `--repo` does not override the reference repository for linked worktree items.
+Literal names ending in ` (deleted)` can be misread as deleted process paths.
+Generated `~N` item IDs can collide with literal directory names.
+Git 2.34 may fetch missing objects from a partial-clone reference repository during scan.
+Codex-only installs do not link it; run `~/.claude/orchestra/bin/orch-gc` or `<repo>/bin/orch-gc`.
 
 ## Tuning
 

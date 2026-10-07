@@ -47,6 +47,7 @@ cc-orchestra 자체를 수정할 때는 [AGENTS.md](AGENTS.md)를 읽습니다.
 ~/.local/bin/orch-summary-check
 ~/.local/bin/orch-usage-report
 ~/.local/bin/orch-archive
+~/.local/bin/orch-gc
 ```
 
 이 밖에 Fable legacy guard timer, Claude 5h/7d status-line quota tap, live runtime routing
@@ -1310,6 +1311,43 @@ inode만 바뀐 재수집은 허용한다. inventory가 없거나 읽을 수 없
 - PNG만 지원한다. `.bmp`, `.tif` 등 다른 래스터 형식은 payload 한도를 따른다.
 - Pillow 9.0.1 호환은 (신규 전용 호출을 쓰지 않는) 구조로 확보했으며 실행해 보지는 않았다.
   thumbnail의 Obsidian embed 렌더링도 시각적으로 확인하지 않았다.
+
+## 정리 (orch-gc)
+
+`orch-gc`는 체크아웃 크기, 경과 일수, 아카이브 포함 여부와 수동 정리 후보를 보고한다.
+각 설정된 state의 `worktrees/` 아래 프로젝트
+디렉터리, `.orchestra/wt/<slot>` worktree, 아카이브 정책의 extra bases 아래
+`archive-tmp*` 디렉터리를 찾는다. `CC_ORCH_STATE_DIR`, `CC_ORCH_WORKTREE_ROOT`도
+반영하며 `--root`를 지정하면 기본 탐색을 대신한다.
+
+- SAFE: 깨끗한 체크아웃이며 HEAD와 삭제될 모든 ref가 기준 저장소의 대상 ref에
+  병합됨. 완료 레지스트리 행(PASS/ACCEPTED/CLOSED)과 완전한 비활성 증거가 필요하다.
+- CAUTION: 복구·활동 여부가 불확실하거나 dirty/미병합 작업, 누락·비활성 레지스트리,
+  ignored 출력, 체크포인트, 숨김 index 플래그, Git 필터, lock, 중첩 체크아웃,
+  세션 기록, 임시 백업, 진행 중인 Git 작업, 검사할 수 없는 프로세스, reflog에만 남은 커밋 또는 잠긴 worktree가 있음.
+- DANGER: 열린 레지스트리 행, 실행 중인 프로세스, 비밀 파일 형태의 이름, mount,
+  루트 밖 경로, 다른 저장소가 빌려 쓰는 객체 또는 기준 저장소를 포함하는 체크아웃.
+
+```bash
+orch-gc                                  # 읽기 전용 스캔 (기본)
+orch-gc scan --json
+orch-gc scan --root DIR
+orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
+```
+
+`--merged-into` 기본값은 `local/installed-main`, `--repo` 기본값은
+`~/.claude/orchestra`의 저장소다. 지원 모드는 scan이며 이번 릴리스에서는 apply가 비활성화되어
+아무것도 삭제하지 않는다. scan 출력을 읽고 후보를 검토한 뒤 수동으로 정리한다.
+클론을 삭제하면 그 클론의 로컬 ref와
+자체 레지스트리를 포함한 git-ignored `.orchestra/` 산출물도 삭제된다.
+아카이브 포함 여부는 참고 정보이며 전체 복사본을 뜻하지 않는다
+(체크포인트, 원본 이미지와 크기 제한을 넘는 payload는 저장하지 않음).
+스캔 루트 밖에서 클론의 객체를 빌려 쓰는 저장소는 탐지하지 못한다.
+알려진 한계 / 후속 작업: `--repo`는 linked worktree 항목의 기준 저장소를 바꾸지 않는다.
+실제 이름이 ` (deleted)`로 끝나면 삭제된 프로세스 경로로 잘못 해석될 수 있다.
+자동 생성한 `~N` 항목 ID가 실제 디렉터리 이름과 충돌할 수 있다.
+Git 2.34는 scan 중 partial-clone 기준 저장소의 누락 객체를 fetch할 수 있다.
+Codex-only 설치는 링크를 만들지 않으므로 `~/.claude/orchestra/bin/orch-gc` 또는 `<repo>/bin/orch-gc`로 실행한다.
 
 ## 설정 튜닝
 

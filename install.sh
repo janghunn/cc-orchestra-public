@@ -347,7 +347,8 @@ check() {
     "$BIN_DIR/orch-model-guard:$REPO_DIR/bin/orch-model-guard-runtime" \
     "$BIN_DIR/orch-summary-check:$REPO_DIR/bin/orch-summary-check" \
     "$BIN_DIR/orch-usage-report:$REPO_DIR/bin/orch-usage-report" \
-    "$BIN_DIR/orch-archive:$REPO_DIR/bin/orch-archive"
+    "$BIN_DIR/orch-archive:$REPO_DIR/bin/orch-archive" \
+    "$BIN_DIR/orch-gc:$REPO_DIR/bin/orch-gc"
   do
     dest="${pair%%:*}"; src="${pair#*:}"
     if [[ -L "$dest" && "$(readlink -f "$dest")" == "$(readlink -f "$src")" ]]; then
@@ -903,6 +904,7 @@ install_repo() {
   link "$REPO_DIR/bin/orch-summary-check"        "$BIN_DIR/orch-summary-check"
   link "$REPO_DIR/bin/orch-usage-report"         "$BIN_DIR/orch-usage-report"
   link "$REPO_DIR/bin/orch-archive"              "$BIN_DIR/orch-archive"
+  link "$REPO_DIR/bin/orch-gc"                   "$BIN_DIR/orch-gc"
   link "$REPO_DIR/bin/cc-orch-codex"             "$BIN_DIR/cc-orch-codex"
   link "$REPO_DIR/bin/codex-run-codex"           "$BIN_DIR/codex-run-codex"
   link "$REPO_DIR/bin/orch-codex-route"          "$BIN_DIR/orch-codex-route"
