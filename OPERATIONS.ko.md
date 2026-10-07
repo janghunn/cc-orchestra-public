@@ -476,6 +476,35 @@ hook/compact 상태에는 `codex=healthy(pinned; real=watch, …)`가 표시되�
 고정 중에는 review/verify 예비 quota가 보존되지 않습니다. quota가 소진되면 provider에서 실패하고 기존 exit-code 처리를 따릅니다. Astra가 없으면 `model-policy.conf`에 따라 fallback합니다.
 정책을 호출마다 읽고 policy revision에서 제외하므로 `cc-orch --reload`는 필요 없습니다. `CODEX_PRESSURE_PIN=""`로 바꾸면 동적 라우팅이 복구됩니다.
 
+### Spawn observer mod (프로토타입, 기본 미설치)
+
+`mods/orch-spawn-observer`는 생성된 agent의 모델과 첫 step의 effort를 현재 생성 프로필과
+비교하고 `$CC_ORCH_STATE_DIR/spawn-observer.jsonl`에 verdict를 기록합니다
+(기본값 `~/.claude/orchestra-state/spawn-observer.jsonl`). spawn을 거부하거나 변경하지 않습니다.
+사용 이벤트는 `agent.spawn`, `turn.step`(spawn에는 effort 필드가 없음), `session.start`,
+`session.end`입니다. 응답 모델은 step 결과의 `usage.model`을 우선하고, 없으면 step 입력과
+spawn 결과 모델을 순서대로 사용합니다. `step_effort`는 요청이 이 hook에 도달할 때 지정한
+effort이며, 엔진이 이후에 조정하는지는 관측하지 않습니다. 뒤의 mod가 effort를 바꾸는 것도
+관측하지 못합니다. cc-orchestra는 다른 mod를 설치하지 않습니다.
+
+`install.sh`는 이 mod를 설치하지 않습니다. 한 세션에서 사용하려면
+`claude --plugin-dir /absolute/path/to/cc-orchestra/mods/orch-spawn-observer`를 실행하거나,
+`CLAUDE_CODE_PLUGIN_DIRS`에 해당 절대 경로를 넣습니다(여러 경로는 `:`로 구분).
+cc-orchestra는 어느 방식도 설정하지 않습니다.
+[mods reference](https://code.claude.com/docs/en/plugins/mods/reference.md)에 두 방식이 명시되어
+있습니다. 로드되면 `/plugin`에
+`1 mod active · orch-spawn-observer`가 표시됩니다. 불일치는
+`jq -c 'select(.verdict=="mismatch")' ~/.claude/orchestra-state/spawn-observer.jsonl`로 읽습니다
+(`CC_ORCH_STATE_DIR`을 설정했다면 경로 조정). 제거하려면 flag 사용을 중단하거나 환경변수에서
+경로를 지운 뒤 새 세션을 시작합니다. 로그는 필요에 따라 삭제합니다.
+
+Claude Code >= 2.1.287이 필요하며, reference 확인에는 2.1.287 types와 CLI 2.1.292를 사용했습니다.
+실제 세션의 alias 해석, spawn/step agent ID 일치, 프로필 effort의 step 전달 여부와 다른 host
+버전은 아직 검증하지 않았습니다. fork와 teammate도 일반 agent type처럼 비교하며 별도 실환경
+검증은 없습니다. read-modify-write 로그는 여러 프로세스가 동시에 쓰면 줄을 잃을 수 있고,
+hot reload는 대기 중인 spawn을 잃습니다. 필드, 검증 명령과 런타임 한계는
+[mod README](mods/orch-spawn-observer/README.md)를 참고하세요.
+
 ## Jev 자문 사이드카 (선택 사항, hybrid 모드 전용)
 
 `orch-jev`는 TypeSafe AI의 Jev를 통해 세 번째 모델의 자문 신호를 제공합니다.

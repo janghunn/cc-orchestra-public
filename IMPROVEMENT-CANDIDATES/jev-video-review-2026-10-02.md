@@ -25,6 +25,7 @@ This file follows the entry shape and append-only rules of ../IMPROVEMENT-CANDID
 - **Summary:** The docs describe mods, function hooks loaded as a plugin and hot-reloaded in a session: `turn.step` can change model or effort per request, `agent.spawn` can set a model or deny a spawn, `session.compact` can skip compaction, and `session.measure` reports usage.
 - **Critical assessment (cc-orchestra-specific):** Today model/effort pinning and spawn limits are enforced by generated agent profiles and prompt text, which a running agent can in principle disregard; a mod acting on `agent.spawn` or `turn.step` would enforce the same policy in the runtime instead. Caveats: the surface is documented as experimental and its types can differ per build, so anything built on it needs a version check; it applies to Claude Code only, not Codex lanes; this repo has not tried it, so none of the above is measured here.
 - **Status:** NEW
+- **Update 2026-10-07:** observe-only prototype `mods/orch-spawn-observer` added in orch/66 (logs spawn model/effort vs profile; no enforcement; not installed by default). Status remains NEW for enforcement.
 
 ### 2026-10-02 — Exact token-to-call matching via a run identifier in `codex.log`
 - **Source:** orch/45 (`orch-usage-report --cost`) deferred finding and its documented estimate limit.

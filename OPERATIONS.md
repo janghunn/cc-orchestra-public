@@ -446,6 +446,34 @@ Explicit `--model`, `--effort`, `--critical` and `--fast` flags still win.
 The review/verify reserve is gone while pinned; exhausted quota fails at the provider with existing exit-code handling. Missing Astra falls back per `model-policy.conf`.
 No `cc-orch --reload` is needed: the policy is read per invocation and excluded from the policy revision. Set `CODEX_PRESSURE_PIN=""` to restore dynamic routing.
 
+### Spawn observer mod (prototype, not installed)
+
+`mods/orch-spawn-observer` observes spawned agents' model and first-step effort against their
+current generated profile. It records verdicts in `$CC_ORCH_STATE_DIR/spawn-observer.jsonl`
+(default `~/.claude/orchestra-state/spawn-observer.jsonl`) without denying or rewriting spawns.
+It uses `agent.spawn`, `turn.step` (spawn has no effort field), `session.start`, and `session.end`.
+The answering model comes from step result `usage.model`, with input/spawn model fallbacks;
+`step_effort` is the effort the request names when it reaches this hook; whether the engine
+adjusts it later is not observed. A later mod could also rewrite effort unseen; cc-orchestra
+installs no other mods.
+
+`install.sh` does not install it. For one session, use
+`claude --plugin-dir /absolute/path/to/cc-orchestra/mods/orch-spawn-observer`, or include that
+absolute path in `CLAUDE_CODE_PLUGIN_DIRS` (`:`-separated). cc-orchestra sets neither mechanism.
+The [mods reference](https://code.claude.com/docs/en/plugins/mods/reference.md) documents both.
+`/plugin` shows `1 mod active · orch-spawn-observer`
+when loaded. Read mismatches with
+`jq -c 'select(.verdict=="mismatch")' ~/.claude/orchestra-state/spawn-observer.jsonl`
+(adjust for `CC_ORCH_STATE_DIR`). To remove it, stop passing the flag or remove the environment
+path and start a new session; optionally delete the log.
+
+Requires Claude Code >= 2.1.287; reference checks used 2.1.287 types and CLI 2.1.292.
+Live alias resolution, spawn/step agent-ID matching, profile-to-step effort propagation, and
+other host versions remain unverified. Forks and teammates are compared like any agent type,
+without separate live verification. Read-modify-write logging can lose lines across simultaneous
+processes; hot reload loses pending spawns. See the [mod README](mods/orch-spawn-observer/README.md)
+for record fields, validation/tests, and runtime limits.
+
 ## Jev advisory sidecar (optional, hybrid mode only)
 
 `orch-jev` adds a third-model advisory signal from TypeSafe AI's Jev. Invoke it explicitly;
