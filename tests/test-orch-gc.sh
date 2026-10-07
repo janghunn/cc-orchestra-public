@@ -832,12 +832,26 @@ def case12partial():
     git(F, 'clone', '--bare', str(R / 'unmerged'), str(promisor))
     missing = git(R / 'unmerged', 'rev-parse', 'HEAD')
     partial = F / 'partial'
+    def remove_partial():
+        for attempt in range(10):
+            try:
+                shutil.rmtree(partial)
+                return
+            except OSError:
+                if not partial.exists():
+                    return
+                if attempt == 9:
+                    raise
+                time.sleep(0.2)
+
     for url, protocol in (('counting::stub', 'counting'), (str(promisor), 'file')):
         def reset_partial():
             if partial.exists():
-                shutil.rmtree(partial)
+                remove_partial()
             git(F, 'clone', str(L), str(partial))
-            for key, value in (('core.repositoryformatversion', '1'),
+            for key, value in (('maintenance.auto', 'false'), ('gc.auto', '0'),
+                               ('gc.autoDetach', 'false'), ('fetch.writeCommitGraph', 'false'),
+                               ('core.repositoryformatversion', '1'),
                                ('extensions.partialClone', 'origin'),
                                ('remote.origin.promisor', 'true'), ('remote.origin.url', url),
                                ('protocol.' + protocol + '.allow', 'always')):
