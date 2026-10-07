@@ -611,13 +611,15 @@ dry_run_install_rest() {
   python3 - "$REPO_DIR" "$BIN_DIR" "$bin" "$poll" <<'PY'
 import glob, json, os, pathlib, shutil, stat, subprocess, sys, tempfile
 repo, bin_dir, claude, poll = sys.argv[1:]
+# Guard facades resolve their own script path; the installer and roster keep the logical path.
+guard_repo = os.path.realpath(repo)
 home = os.environ['HOME']
-agents = os.environ.get('CC_ORCH_AGENTS_DIR', home + '/.claude/agents')
-manifest = os.environ.get('CC_ORCH_MANIFEST', agents + '/.install-manifest.json')
-state = os.environ.get('CC_ORCH_STATE_DIR', home + '/.claude/orchestra-state')
-units = os.environ.get('CC_ORCH_UNIT_DIR', home + '/.config/systemd/user')
+agents = os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents'
+manifest = os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json'
+state = os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state'
+units = os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user'
 h = home + '/.claude/settings.json'
-s = os.environ.get('CC_ORCH_SETTINGS', h)
+s = os.environ.get('CC_ORCH_SETTINGS') or h
 
 def plan(action, detail):
     print(f'{action:20s} {detail}', flush=True)
@@ -652,7 +654,7 @@ for path in sorted(glob.glob(repo + '/*.sh') + glob.glob(repo + '/bin/*') + glob
         unchanged += 1
 plan('unchanged', f'chmod +x ({unchanged} files already executable)')
 plan_dir(state)
-backend_codex = os.environ.get('CC_ORCH_BACKEND', 'claude') == 'codex'
+backend_codex = (os.environ.get('CC_ORCH_BACKEND') or 'claude') == 'codex'
 if backend_codex:
     plan('state-dependent', state + '/ (CC_ORCH_BACKEND=codex: Codex budget refresh only)')
 else:
@@ -729,10 +731,10 @@ if backend_codex:
     plan('error', 'orch-model-guard install (CC_ORCH_BACKEND=codex refuses it; the real install stops here: no units, hooks or status line)')
     raise SystemExit(1)
 if not os.access(claude, os.X_OK):
-    plan('unchanged', units + '/ (claude not on PATH: orch-model-guard install skips units and the notice hook)')
+    plan('unchanged', 'orch-model-guard install (claude not on PATH: skips units and the notice hook)')
 else:
     plan_dir(units)
-    source = pathlib.Path(repo + '/bin/orch-model-guard').read_text()
+    source = pathlib.Path(guard_repo + '/bin/orch-model-guard').read_text()
     for ext in ('service', 'timer'):
         path = units + '/orch-model-guard.' + ext
         marker = '  cat > "$UNIT_DIR/orch-model-guard.' + ext + '" <<EOF\n'
@@ -740,7 +742,7 @@ else:
             plan('replace', path + ' (content not previewed)')
             continue
         body = source.split(marker, 1)[1].split('\nEOF\n', 1)[0] + '\n'
-        body = body.replace('$(dirname "$bin")', os.path.dirname(claude)).replace('$REPO_DIR', repo).replace('${POLL_MINUTES}', poll)
+        body = body.replace('$(dirname "$bin")', os.path.dirname(claude) or '.').replace('$REPO_DIR', guard_repo).replace('${POLL_MINUTES}', poll)
         plan(*compare(path, body.encode(), through=True))
     detail = ('systemctl --user daemon-reload; enable --now' if shutil.which('systemctl') else
               'systemctl not found; the install will report an error here')
@@ -752,26 +754,40 @@ PY
 }
 
 dry_run_settings() {
-  python3 - "$REPO_DIR" "$1" "$2" <<'PY'
-import copy, json, os, sys
-repo, claude, refresh = sys.argv[1:]
+  python3 - "$REPO_DIR" "$BIN_DIR" "$1" "$2" <<'PY'
+import copy, json, os, pathlib, sys
+repo, bin_dir, claude, refresh = sys.argv[1:]
+guard_repo = os.path.realpath(repo)
 home = os.environ['HOME']
 h = os.path.abspath(home + '/.claude/settings.json')
-s = os.path.abspath(os.environ.get('CC_ORCH_SETTINGS', h))
-state = os.environ.get('CC_ORCH_STATE_DIR', home + '/.claude/orchestra-state')
+s = os.path.abspath(os.environ.get('CC_ORCH_SETTINGS') or h)
+state = os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state'
+agents = os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents'
+manifest = os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json'
+units = os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user'
 settings = {}
 created = set()
-planned_dirs = {os.path.dirname(h), os.path.abspath(state)}
+planned_dirs = set()
+
+# Account for mkdir -p from every preceding install step, including shared ancestors.
+def remember(path):
+    directory = pathlib.Path(os.path.abspath(path))
+    planned_dirs.update(os.path.realpath(p) for p in (directory, *directory.parents))
+
+for directory in (home + '/.claude/agents', bin_dir, state, agents, os.path.dirname(manifest)):
+    remember(directory)
+if os.access(claude, os.X_OK):
+    remember(units)
 
 def plan(action, detail):
     print(f'{action:20s} {detail}')
 
 def plan_dir(path):
-    if path in planned_dirs or os.path.isdir(path):
+    if os.path.realpath(path) in planned_dirs or os.path.isdir(path):
         return
     plan_dir(os.path.dirname(path))
     plan('create', path + '/')
-    planned_dirs.add(path)
+    remember(path)
 
 def load(path):
     if path not in settings:
@@ -791,7 +807,7 @@ path = s
 try:
     current = load(s)
     if os.access(claude, os.X_OK):
-        if os.path.dirname(s) not in planned_dirs and not os.path.isdir(os.path.dirname(s)):
+        if os.path.realpath(os.path.dirname(s)) not in planned_dirs and not os.path.isdir(os.path.dirname(s)):
             plan('merge-json', s + ' hooks.UserPromptSubmit: skipped orch-model-notice.sh (parent directory missing; orch-model-guard install cannot write it — existing behaviour)')
         else:
             if os.path.exists(s):
@@ -802,7 +818,7 @@ try:
             before = copy.deepcopy(hooks.get('UserPromptSubmit', []))
             removed = [e for e in before if any('orch-model-notice.sh' in hook.get('command', '') for hook in e.get('hooks', []))]
             kept = [e for e in before if e not in removed]
-            canonical = {'matcher': '*', 'hooks': [{'type': 'command', 'command': "bash '%s'" % (repo + '/hooks/orch-model-notice.sh'), 'timeout': 10}]}
+            canonical = {'matcher': '*', 'hooks': [{'type': 'command', 'command': "bash '%s'" % (guard_repo + '/hooks/orch-model-notice.sh'), 'timeout': 10}]}
             after = kept + [canonical]
             hooks['UserPromptSubmit'] = after
             action = 'unchanged' if before == after else 'replace' if removed else 'add'
@@ -817,7 +833,7 @@ try:
     cur = current.get('statusLine')
     ours = isinstance(cur, dict) and 'orch-statusline.sh' in str(cur.get('command', ''))
     replacement = dict(cur) if isinstance(cur, dict) else {}
-    replacement.update(type='command', command='bash ' + repr(repo + '/hooks/orch-statusline.sh'))
+    replacement.update(type='command', command='bash ' + repr(guard_repo + '/hooks/orch-statusline.sh'))
     replacement.setdefault('refreshInterval', int(refresh))
     detail = 'unchanged (already orch-statusline.sh)' if replacement == cur else 'replace ' + str(cur.get('command', 'none') if isinstance(cur, dict) else 'none')
     previous = state + '/statusline.previous.json'

@@ -69,7 +69,7 @@ preview() {
   rm -f "$TMP/calls.log" "$TMP/systemctl.log"
   snap "$HOME" > "$TMP/before-home"
   snap "$TMP/repo" > "$TMP/before-repo"
-  bash "$TMP/repo/install.sh" "$@" > "$output" 2>&1 || rc=$?
+  bash "${INSTALL_REPO:-$TMP/repo}/install.sh" "$@" > "$output" 2>&1 || rc=$?
   [[ "$rc" == "$expected" ]] || { cat "$output"; fail "exit $rc, expected $expected"; }
   snap "$HOME" > "$TMP/after-home"
   snap "$TMP/repo" > "$TMP/after-repo"
@@ -78,7 +78,24 @@ preview() {
   [[ ! -s "$TMP/calls.log" && ! -e "$TMP/systemctl.log" ]] || fail 'dry-run called a provider or systemctl'
   [[ -z "$(ls -A "$TMPDIR")" ]] || fail 'dry-run left temporary files'
 }
-real_install() { bash "$TMP/repo/install.sh" > "$TMP/install.log" 2>&1 || { cat "$TMP/install.log"; fail 'real install'; }; }
+real_install() { bash "${INSTALL_REPO:-$TMP/repo}/install.sh" > "$TMP/install.log" 2>&1 || { cat "$TMP/install.log"; fail 'real install'; }; }
+assert_created_paths() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, os, sys
+before, after = (json.load(open(p)) for p in sys.argv[1:3])
+home = os.environ['HOME']
+actual = {home + '/' + p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+planned = set()
+for line in open(sys.argv[3]):
+    parts = line.split()
+    if parts[0] in ('create', 'replace', 'relink', 'backup-then-replace'):
+        path = parts[1].rstrip('/')
+        planned.add(path)
+        if parts[0] == 'backup-then-replace':
+            planned.add(path + '.pre-cc-orchestra')
+assert actual == planned, ('unplanned', sorted(actual-planned), 'not changed', sorted(planned-actual))
+PY
+}
 assert_stable_plan() {
   python3 - "$1" "$2" <<'PY'
 import os, sys
@@ -133,21 +150,7 @@ PY
 echo 'PASS: fresh dry-run preserves HOME/repo contents, modes, timestamps and inodes; no external calls'
 real_install
 snap "$HOME" content > "$TMP/installed"
-python3 - "$TMP/initial" "$TMP/installed" "$TMP/first" <<'PY'
-import json, os, sys
-before, after = (json.load(open(p)) for p in sys.argv[1:3])
-home = os.environ['HOME']
-actual = {home + '/' + p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
-planned = set()
-for line in open(sys.argv[3]):
-    parts = line.split()
-    if parts[0] in ('create', 'replace', 'relink', 'backup-then-replace'):
-        path = parts[1].rstrip('/')
-        planned.add(path)
-        if parts[0] == 'backup-then-replace':
-            planned.add(path + '.pre-cc-orchestra')
-assert actual == planned, ('unplanned', sorted(actual-planned), 'not changed', sorted(planned-actual))
-PY
+assert_created_paths "$TMP/initial" "$TMP/installed" "$TMP/first"
 preview 0 "$TMP/second" --dry-run
 assert_stable_plan "$TMP/second" reorder
 real_install
@@ -249,4 +252,111 @@ grep -q '^merge-json .*ERROR: .*the install would stop here' "$TMP/invalid"
 preview 1 "$TMP/invalid-safety" --dry-run --safety-hooks-only
 grep -q '^merge-json .*ERROR:' "$TMP/invalid-safety"
 echo 'PASS: custom settings parent prediction, statusLine repair and invalid JSON errors'
+
+fresh_home logical-repo
+ln -s "$TMP/repo" "$TMP/repo-link"
+INSTALL_REPO="$TMP/repo-link" real_install
+INSTALL_REPO="$TMP/repo-link" real_install
+INSTALL_REPO="$TMP/repo-link" preview 0 "$TMP/logical-repo.out" --dry-run
+assert_stable_plan "$TMP/logical-repo.out" stable
+python3 - <<'PY'
+import json, os, pathlib, shlex
+repo = os.environ['TMP'] + '/repo'
+logical = os.environ['TMP'] + '/repo-link'
+settings = json.load(open(os.environ['CC_ORCH_SETTINGS']))
+commands = [hook['command'] for entry in settings['hooks']['UserPromptSubmit'] for hook in entry['hooks']]
+assert "bash '%s/hooks/orch-model-notice.sh'" % repo in commands, commands
+assert logical + '/hooks/orch-runtime-context.sh' in commands, commands
+assert settings['statusLine']['command'] == 'bash ' + repr(repo + '/hooks/orch-statusline.sh')
+safety = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+assert safety == 'bash ' + shlex.quote(logical + '/hooks/orch-worktree-guard.sh') + ' || true', safety
+unit = pathlib.Path(os.environ['CC_ORCH_UNIT_DIR'], 'orch-model-guard.service').read_text()
+assert 'ExecStart=' + repo + '/bin/orch-model-guard check\n' in unit, unit
+assert os.readlink(os.environ['HOME'] + '/.claude/orchestra') == logical
+PY
+echo 'PASS: symlinked repo keeps logical installer paths and physical guard paths; stable after two installs'
+
+fresh_home relative-claude
+(
+  cd "$TMP/fakebin"
+  CLAUDE_BIN=claude real_install
+  CLAUDE_BIN=claude real_install
+  CLAUDE_BIN=claude preview 0 "$TMP/relative-claude.out" --dry-run
+  assert_stable_plan "$TMP/relative-claude.out" stable
+  grep -Fx 'Environment=PATH=.:/usr/local/bin:/usr/bin:/bin' "$CC_ORCH_UNIT_DIR/orch-model-guard.service" >/dev/null
+)
+echo 'PASS: relative Claude executable uses the same dirname in previewed and installed units'
+
+fresh_home empty-overrides
+preview 0 "$TMP/default-overrides.out" --dry-run
+for name in CC_ORCH_SETTINGS CC_ORCH_STATE_DIR CC_ORCH_AGENTS_DIR CC_ORCH_MANIFEST CC_ORCH_UNIT_DIR CC_ORCH_BACKEND CC_ORCH_BIN_DIR CLAUDE_BIN; do
+  (
+    export "$name="
+    preview 0 "$TMP/empty-$name.out" --dry-run
+    cmp "$TMP/default-overrides.out" "$TMP/empty-$name.out"
+  )
+done
+(
+  export CC_ORCH_SETTINGS='' CC_ORCH_STATE_DIR='' CC_ORCH_AGENTS_DIR='' CC_ORCH_MANIFEST=''
+  export CC_ORCH_UNIT_DIR='' CC_ORCH_BACKEND='' CC_ORCH_BIN_DIR='' CLAUDE_BIN=''
+  preview 0 "$TMP/all-empty.out" --dry-run
+  cmp "$TMP/default-overrides.out" "$TMP/all-empty.out"
+  grep -F "$HOME/.claude/settings.json hooks.UserPromptSubmit: add orch-model-notice.sh" "$TMP/all-empty.out" >/dev/null
+  preview 0 "$TMP/empty-safety.out" --dry-run --safety-hooks-only
+  grep -F "$HOME/.claude/settings.json hooks.PreToolUse[Bash]: add" "$TMP/empty-safety.out" >/dev/null
+)
+(
+  export CC_ORCH_AGENTS_DIR="$HOME/custom/agents" CC_ORCH_MANIFEST=''
+  preview 0 "$TMP/empty-manifest.out" --dry-run
+  grep -Eq "^create +$CC_ORCH_AGENTS_DIR/.install-manifest.json\$" "$TMP/empty-manifest.out"
+)
+echo 'PASS: individual and combined empty overrides match default plans with zero writes'
+
+# Every mkdir -p before settings registration makes both its target and ancestors available.
+fresh_home earlier-dirs
+export CC_ORCH_BIN_DIR="$HOME/earlier/bin/deep" CC_ORCH_STATE_DIR="$HOME/earlier/state/deep"
+export CC_ORCH_AGENTS_DIR="$HOME/earlier/agents/deep" CC_ORCH_MANIFEST="$HOME/earlier/manifest/deep/manifest.json"
+export CC_ORCH_UNIT_DIR="$HOME/earlier/units/deep"
+for directory in "$HOME/.claude/agents" "$CC_ORCH_BIN_DIR" "$CC_ORCH_STATE_DIR" "$CC_ORCH_AGENTS_DIR" "$(dirname "$CC_ORCH_MANIFEST")" "$CC_ORCH_UNIT_DIR"; do
+  for parent in "$directory" "$(dirname "$directory")"; do
+    CC_ORCH_SETTINGS="$parent/settings.json" preview 0 "$TMP/earlier-dirs.out" --dry-run
+    grep -F "$parent/settings.json hooks.UserPromptSubmit: add orch-model-notice.sh" "$TMP/earlier-dirs.out" >/dev/null
+    ! grep -q 'skipped orch-model-notice.sh' "$TMP/earlier-dirs.out"
+    # Settings must not report another creation of a directory already planned earlier.
+    python3 - "$TMP/earlier-dirs.out" <<'PY'
+import sys
+directories = [line.split()[1] for line in open(sys.argv[1])
+               if line.startswith('create ') and line.split()[1].endswith('/')]
+assert len(directories) == len(set(directories)), directories
+PY
+  done
+done
+echo 'PASS: notice registration recognizes all earlier directory creations and their ancestors'
+
+fresh_home unit-settings
+export CC_ORCH_SETTINGS="$CC_ORCH_UNIT_DIR/settings.json"
+snap "$HOME" content > "$TMP/unit-initial"
+preview 0 "$TMP/unit-settings.out" --dry-run
+grep -F "$CC_ORCH_SETTINGS hooks.UserPromptSubmit: add orch-model-notice.sh" "$TMP/unit-settings.out" >/dev/null
+! grep -q 'skipped orch-model-notice.sh' "$TMP/unit-settings.out"
+real_install
+snap "$HOME" content > "$TMP/unit-installed"
+assert_created_paths "$TMP/unit-initial" "$TMP/unit-installed" "$TMP/unit-settings.out"
+python3 - <<'PY'
+import json, os
+settings = json.load(open(os.environ['CC_ORCH_SETTINGS']))
+assert any('orch-model-notice.sh' in h['command']
+           for e in settings['hooks']['UserPromptSubmit'] for h in e['hooks'])
+assert 'statusLine' in settings
+PY
+echo 'PASS: settings in newly created unit directory match real install paths and notice hook'
+
+fresh_home no-claude-unit-settings
+export CC_ORCH_SETTINGS="$CC_ORCH_UNIT_DIR/settings.json"
+CLAUDE_BIN="$TMP/missing-claude" preview 0 "$TMP/no-claude-unit-settings.out" --dry-run
+grep -Eq "^create +$CC_ORCH_UNIT_DIR/\$" "$TMP/no-claude-unit-settings.out"
+! grep -Eq "^unchanged +$CC_ORCH_UNIT_DIR/" "$TMP/no-claude-unit-settings.out"
+! grep -q '^merge-json .*orch-model-notice.sh\|^enable-unit' "$TMP/no-claude-unit-settings.out"
+grep -F "$CC_ORCH_SETTINGS statusLine: replace" "$TMP/no-claude-unit-settings.out" >/dev/null
+echo 'PASS: without Claude, statusLine still plans creation of the missing custom settings parent'
 echo 'PASS: all install dry-run tests'
