@@ -630,8 +630,11 @@ remember(home + '/.claude/agents')
 remember(bin_dir)
 def plan_dir(path):
     path = os.path.abspath(path)
-    if path in planned or os.path.isdir(path):
+    if path in planned:
+        return
+    if os.path.isdir(path):
         plan('unchanged', path.rstrip('/') + '/')
+        planned.add(path)
         return
     plan_dir(os.path.dirname(path))
     plan('create', path.rstrip('/') + '/')

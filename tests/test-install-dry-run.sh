@@ -114,6 +114,22 @@ grep -Eq '^generate-profiles .*39 profiles: 39 create' "$TMP/first"
 grep -Eq '^enable-unit +orch-model-guard.timer' "$TMP/first"
 grep -Eq '^merge-json .*orch-worktree-guard.sh' "$TMP/first"
 ! grep -q '^backup-then-replace' "$TMP/first"
+python3 - "$TMP/before-home" "$TMP/first" <<'PY'
+import json, os, sys
+before = json.load(open(sys.argv[1]))
+existing_dirs = {os.path.normpath(os.path.join(os.environ['HOME'], path))
+                 for path, entry in before.items() if entry[0] == 'dir'}
+paths = {'create': set(), 'unchanged': set()}
+for line in open(sys.argv[2]):
+    parts = line.split()
+    if parts[0] not in paths or not parts[1].startswith('/'):
+        continue
+    path = os.path.normpath(parts[1])
+    paths[parts[0]].add(path)
+    if parts[0] == 'unchanged' and parts[1].endswith('/'):
+        assert path in existing_dirs, ('unchanged directory absent before dry-run', path)
+assert not paths['create'] & paths['unchanged'], ('both create and unchanged', paths['create'] & paths['unchanged'])
+PY
 echo 'PASS: fresh dry-run preserves HOME/repo contents, modes, timestamps and inodes; no external calls'
 real_install
 snap "$HOME" content > "$TMP/installed"
