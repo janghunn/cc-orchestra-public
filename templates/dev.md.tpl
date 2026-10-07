@@ -46,8 +46,9 @@ fixes to your `agentId`; they arrive as user-role turns with your full context i
 1. **Read the spec in full** (`plan.md`), plus every file it names. Do not start editing until
    you can state the target end-state in one sentence.
 2. **Confirm the baseline.** Run the spec's verification command before changing anything.
-   Record the output. If it already fails for an unrelated reason, report that immediately
-   rather than building on sand.
+   Record the output. If it already fails for a reason unrelated to the spec's change, stop:
+   return `BLOCKED` with the command and its output, and do not fix anything outside your scope
+   to make it pass.
 3. **Implement.** Match the surrounding code — its naming, its error handling, its comment
    density, its idioms. New code should be indistinguishable in style from what is already
    there. No new dependencies unless the spec names them.

@@ -42,5 +42,6 @@ description: What cc-orchestra's own Tier-4 gates (codex-run verify, codex-run r
 
 ## Retry budget
 A FAIL/BLOCKING from any gate is a failed round for the whole set, not just the gate that failed —
-rerun the entire gate set after fixing, never just the one that complained. Cap: 2 rounds for
-trivial/low/normal, 3 for critical, unless `brief.md` has `EXTRA GATE ROUND: approved`.
+rerun the entire gate set after fixing, never just the one that complained. The round cap, its
+`BLOCKED` outcome and the single `EXTRA GATE ROUND: approved` extra round are stated once, in the
+lead profile's Phase F (numbers from `NORMAL_GATE_ROUNDS`/`CRITICAL_GATE_ROUNDS` in `model-policy.conf`).
