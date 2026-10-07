@@ -155,17 +155,22 @@ decode_path() {
   done
 }
 
+hunk_regex_ok() {
+  local header='@@ -1,2 +34,5 @@ probe'
+  # Probe the exact hunk-header match the original loop uses.
+  [[ "$header" =~ ^@@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,[0-9]+)?\ @@ ]] && [ "${BASH_REMATCH[2]}" = 34 ]
+}
+
 fast_path_shell_ok() {
   # The helper mirrors the original loop's Bash matches; inherited nocasematch or a compat
   # level (BASHOPTS, BASH_COMPAT) can change them, so those shells use the original loop.
-  local option header='@@ -1,2 +34,5 @@ probe'
+  local option
   shopt -q nocasematch && return 1
   [ -z "${BASH_COMPAT:-}" ] || return 1
   for option in compat31 compat32 compat40 compat41 compat42 compat43 compat44; do
     shopt -q "$option" 2>/dev/null && return 1
   done
-  # Probe the exact hunk-header match the original loop uses.
-  [[ "$header" =~ ^@@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,[0-9]+)?\ @@ ]] && [ "${BASH_REMATCH[2]}" = 34 ]
+  hunk_regex_ok
 }
 
 scan_patch_fast() {
@@ -239,6 +244,11 @@ scan_diff() {
   if ! patch="$(git -C "$repo" -c core.quotePath=false diff --no-ext-diff --no-textconv \
       --no-color --src-prefix=a/ --dst-prefix=b/ -U0 "$base" "$head" "$@" 2>/dev/null)"; then
     echo 'SECURITY SCAN: git diff unavailable; skipping'
+    return 0
+  fi
+  # A compat level (e.g. BASH_COMPAT=3.1) can disable the hunk regex; never report that as clean.
+  if ! hunk_regex_ok; then
+    printf 'SECURITY SCAN: skipped (BASH_COMPAT=%s disables diff parsing)\n' "${BASH_COMPAT:-unset}"
     return 0
   fi
   if ! scan_patch_fast "$patch"; then
