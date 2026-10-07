@@ -29,6 +29,7 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import stat
@@ -516,7 +517,8 @@ def case8():
                'rev-list', 'cat-file', 'merge-base'}
     for args, git_env in calls:
         assert git_env == {'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_LAZY_FETCH': '1',
-                           'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1'}, git_env
+                           'GIT_ALLOW_PROTOCOL': '', 'GIT_CONFIG_GLOBAL': '/dev/null',
+                           'GIT_CONFIG_NOSYSTEM': '1'}, git_env
         assert args[0] == '-C' or args[0].startswith('--git-dir='), args
         offset = 2 if args[0] == '-C' else 1
         assert args[offset:offset+4] == ['-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never'], args
@@ -525,7 +527,8 @@ def case8():
         if command[0] == 'rev-list':
             assert command[1:] == ['--reflog', '--not', '--all'], args
         if command[0] == 'config':
-            assert command[1:] == ['--get-regexp', r'^filter\.'], args
+            assert command[1:] in (['--get-regexp', r'^filter\.'],
+                                   ['--get-regexp', r'^(extensions\.partialclone|remote\..*\.promisor)$']), args
         if command[0] == 'cat-file':
             assert command[1] == '-e', args
         if command[0] == 'merge-base':
@@ -600,6 +603,228 @@ def case11():
         assert before == snapshot()
     print('apply refusal: non-UTF-8 SAFE and CAUTION ids; fixture unchanged')
 
+def case12repo():
+    reference = F / 'otherref'
+    git(F, 'init', str(reference))
+    git(reference, 'checkout', '-b', 'local/installed-main')
+    write(reference / 'unrelated', 'unrelated repository\n')
+    git(reference, 'add', 'unrelated')
+    git(reference, 'commit', '-m', 'unrelated')
+    before = snapshot()
+    report = json.loads(run('scan', '--root', str(R), '--repo', str(reference), '--json'))
+    item = next(i for i in report['items'] if i['id'] == 'proj/wtsafe')
+    assert item['class'] != 'SAFE', item
+    assert any('not merged into local/installed-main' in r['text'] for r in item['reasons']), item
+    report = json.loads(run('scan', '--root', str(R), '--repo', str(R / 'wtsafe'), '--json'))
+    item = next(i for i in report['items'] if i['id'] == 'proj/wtsafe')
+    assert item['class'] == 'DANGER', item
+    assert any(r['text'] == 'contains the reference repository' for r in item['reasons']), item
+    assert before == snapshot()
+
+def case12deleted():
+    original, renamed = R / 'merged', R / 'merged (deleted)'
+    original.rename(renamed)
+    process = None
+    try:
+        process = subprocess.Popen(['sleep', '300'], cwd=renamed)
+        item = next(i for i in scan_json()['items'] if i['id'] == 'proj/merged (deleted)')
+        assert item['class'] == 'DANGER', item
+        assert any(f'in use by pid {process.pid} ' in r['text'] for r in item['reasons']), item
+    finally:
+        if process is not None:
+            process.terminate()
+            process.wait()
+        renamed.rename(original)
+
+def case12ids():
+    first, second = F / 'ida/proj', F / 'idb/proj'
+    for path in (first / 'dup', second / 'dup', second / 'dup~2'):
+        path.mkdir(parents=True)
+    report = json.loads(run('scan', '--root', str(first), '--root', str(second),
+                            '--repo', str(L), '--json'))
+    ids = [i['id'] for i in report['items']]
+    assert len(ids) == len(set(ids)), ids
+    paths = {i['id']: i['path'] for i in report['items']}
+    assert paths['proj/dup~2'] == str(second / 'dup~2'), paths
+    assert paths['proj/dup'] == str(first / 'dup'), paths
+    assert paths['proj/dup~3'] == str(second / 'dup'), paths
+
+def case12partial():
+    shim = F.parent / ('partial-' + F.name)
+    shim.mkdir()
+    helper_log, trace_log = shim / 'helper.log', shim / 'trace.log'
+    real_git = shutil.which('git')
+    write(shim / 'git-remote-counting', '#!/usr/bin/env python3\nimport sys\n' +
+          f'with open({str(helper_log)!r}, "a") as f: f.write(repr(sys.argv) + "\\n")\n' +
+          'sys.exit(1)\n')
+    # Model upstream Git 2.34, which ignores GIT_NO_LAZY_FETCH; Ubuntu 2.34.1 backports it.
+    write(shim / 'git', '#!/usr/bin/env python3\nimport os, sys\n' +
+          'env = dict(os.environ)\nenv.pop("GIT_NO_LAZY_FETCH", None)\n' +
+          f'env["GIT_TRACE"] = {str(trace_log)!r}\n' +
+          f'os.execve({real_git!r}, [{real_git!r}, *sys.argv[1:]], env)\n')
+    for name in ('git', 'git-remote-counting'):
+        (shim / name).chmod(0o755)
+    env = dict(os.environ, PATH=str(shim) + ':' + os.environ['PATH'])
+    promisor = F.parent / ('promisor-' + F.name)
+    git(F, 'clone', '--bare', str(R / 'unmerged'), str(promisor))
+    missing = git(R / 'unmerged', 'rev-parse', 'HEAD')
+    partial = F / 'partial'
+    for url, protocol in (('counting::stub', 'counting'), (str(promisor), 'file')):
+        def reset_partial():
+            if partial.exists():
+                shutil.rmtree(partial)
+            git(F, 'clone', str(L), str(partial))
+            for key, value in (('core.repositoryformatversion', '1'),
+                               ('extensions.partialClone', 'origin'),
+                               ('remote.origin.promisor', 'true'), ('remote.origin.url', url),
+                               ('protocol.' + protocol + '.allow', 'always')):
+                git(partial, 'config', key, value)
+
+        reset_partial()
+        subprocess.run(['git', '--git-dir=' + str(partial / '.git'), 'cat-file', '-e',
+                        missing + '^{commit}'], env=env, capture_output=True, text=True)
+        assert any(' fetch ' in line for line in trace_log.read_text().splitlines()), trace_log.read_text()
+        if protocol == 'counting':
+            assert helper_log.exists() and helper_log.read_bytes(), 'positive control did not run helper'
+        reset_partial()
+        helper_log.unlink(missing_ok=True)
+        trace_log.unlink(missing_ok=True)
+        before = snapshot(exclude=('partial',))
+        report = json.loads(run('scan', '--root', str(R), '--repo', str(partial), '--json', env=env))
+        trace = trace_log.read_text()
+        assert not any(' fetch ' in line for line in trace.splitlines()), trace
+        assert not helper_log.exists(), 'scan ran a remote helper'
+        items = {i['id']: i for i in report['items']}
+        assert items['proj/unmerged']['class'] != 'SAFE', items['proj/unmerged']
+        merged = items['proj/merged']
+        assert merged['class'] == 'CAUTION', merged
+        assert any('partial clone' in r['text'] for r in merged['reasons']), merged
+        result = subprocess.run([real_git, '--git-dir=' + str(partial / '.git'), 'cat-file', '-e', missing],
+                                env=dict(os.environ, GIT_NO_LAZY_FETCH='1'), capture_output=True)
+        assert result.returncode != 0, 'scan fetched the missing object'
+        assert before == snapshot(exclude=('partial',))
+        print(f'partial clone: {protocol} positive control attempted fetch; scan spawned no fetch or helper')
+
+    repo = R / 'merged'
+    registry_path = F / 'coord/.orchestra/REGISTRY.md'
+    original_registry = registry_path.read_text()
+    git(repo, 'config', 'core.repositoryformatversion', '1')
+    git(repo, 'config', 'extensions.partialClone', 'origin')
+    git(repo, 'config', 'remote.origin.promisor', 'true')
+    try:
+        row(F / 'coord', 'orch/merged', 'RUNNING', 'nowhere/')
+        trace_log.unlink(missing_ok=True)
+        report = json.loads(run('scan', '--root', str(R), '--repo', str(L), '--json', env=env))
+        merged = next(i for i in report['items'] if i['id'] == 'proj/merged')
+        assert merged['class'] == 'DANGER', merged
+        assert any('open registry row' in r['text'] for r in merged['reasons']), merged
+        assert any('partial clone:' in r['text'] for r in merged['reasons']), merged
+        trace = trace_log.read_text()
+        assert not any(' fetch ' in line for line in trace.splitlines()), trace
+        print('partial clone: branch-only RUNNING row keeps merged DANGER; scan spawned no fetch')
+    finally:
+        git(repo, 'config', '--unset', 'remote.origin.promisor')
+        git(repo, 'config', '--unset', 'extensions.partialClone')
+        git(repo, 'config', 'core.repositoryformatversion', '0')
+        registry_path.write_text(original_registry)
+
+def case12zombie():
+    syscall = {'x86_64': 60, 'aarch64': 93}.get(platform.machine())
+    if syscall is None:
+        print('skip: zombie leader syscall unavailable on ' + platform.machine())
+        return
+    private_tables = hasattr(os, 'unshare') and hasattr(os, 'CLONE_FILES')
+    if not private_tables:
+        print('skip: private-table sub-checks require os.unshare and os.CLONE_FILES')
+    ready = F.parent / (F.name + '.zombie.ready')
+    code = ('import ctypes, os, sys, threading, time\n'
+            'os.chdir("/")\n'
+            'a_ready, b_ready = threading.Event(), threading.Event()\n'
+            'tids = [None, None]\n'
+            'def worker_a():\n'
+            '    tids[0] = threading.get_native_id()\n'
+            '    a_ready.set()\n'
+            '    time.sleep(300)\n'
+            'def worker_b():\n'
+            '    if hasattr(os, "unshare") and hasattr(os, "CLONE_FILES"):\n'
+            '        os.unshare(os.CLONE_FILES)\n'
+            '    held = open(sys.argv[1])\n'
+            '    tids[1] = threading.get_native_id()\n'
+            '    b_ready.set()\n'
+            '    time.sleep(300)\n'
+            'threading.Thread(target=worker_a).start()\na_ready.wait()\n'
+            'threading.Thread(target=worker_b).start()\nb_ready.wait()\n'
+            'with open(sys.argv[2], "w") as stream: stream.write(" ".join(map(str, tids)))\n'
+            f'ctypes.CDLL(None).syscall({syscall}, 0)\n')
+    holder = subprocess.Popen(['python3', '-c', code, str(R / 'merged/tracked'), str(ready)])
+    pid = str(holder.pid)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if ready.exists() and Path(f'/proc/{pid}/stat').read_bytes().rpartition(b') ')[2][:1] == b'Z':
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError('holder did not become a zombie leader')
+        tid_a, tid_b = ready.read_text().split()
+        worker_a = f'/proc/{pid}/task/{tid_a}'
+        worker_b = f'/proc/{pid}/task/{tid_b}'
+        if private_tables:
+            tracked = str(R / 'merged/tracked')
+            assert not any(os.readlink(worker_a + '/fd/' + fd) == tracked
+                           for fd in os.listdir(worker_a + '/fd'))
+            assert any(os.readlink(worker_b + '/fd/' + fd) == tracked
+                       for fd in os.listdir(worker_b + '/fd'))
+        item = next(i for i in scan_json()['items'] if i['id'] == 'proj/merged')
+        assert item['class'] == 'DANGER', item
+        assert any(f'in use by pid {pid} ' in r['text'] for r in item['reasons']), item
+        mod = module()
+        worker_fd = worker_b + '/fd'
+        original_lstat = mod.os.lstat
+        for persistent in (False, True):
+            attempts = []
+            def vanished_lstat(path, *args, **kwargs):
+                if path == worker_fd:
+                    attempts.append(path)
+                    if persistent or len(attempts) == 1:
+                        raise FileNotFoundError(path)
+                return original_lstat(path, *args, **kwargs)
+            mod.os.lstat = vanished_lstat
+            try:
+                paths, incomplete = mod.process_table()
+            finally:
+                mod.os.lstat = original_lstat
+            if persistent:
+                assert not any(found_pid == pid for _, found_pid, _ in paths), paths
+                assert any(f'pid {pid} ' in message for message in incomplete), incomplete
+            else:
+                assert len(attempts) == 2, attempts
+                assert any(path.startswith(str(R / 'merged') + '/') and found_pid == pid
+                           for path, found_pid, _ in paths), paths
+                assert not any(f'pid {pid} ' in message for message in incomplete), incomplete
+        original_read_bytes = mod.Path.read_bytes
+        vanished = []
+        def vanished_stat(path, *args, **kwargs):
+            if str(path) == worker_a + '/stat':
+                vanished.append(str(path))
+                if len(vanished) == 1:
+                    raise ProcessLookupError(str(path))
+            return original_read_bytes(path, *args, **kwargs)
+        mod.Path.read_bytes = vanished_stat
+        try:
+            paths, incomplete = mod.process_table()
+        finally:
+            mod.Path.read_bytes = original_read_bytes
+        assert len(vanished) == 1, vanished
+        assert any(path.startswith(str(R / 'merged') + '/') and found_pid == pid
+                   for path, found_pid, _ in paths), paths
+        assert not any(f'pid {pid} ' in message for message in incomplete), incomplete
+        print('process scan: all zombie workers inspected; vanished worker stat preserves surviving worker paths')
+    finally:
+        holder.terminate()
+        holder.wait()
+        ready.unlink(missing_ok=True)
+
 if action == 'fixture':
     fixture_setup()
 elif action == 'preflight':
@@ -618,6 +843,13 @@ make_fixture() {
 }
 case_run() { python3 "$TMP/cases.py" "$1" "$2" "$GC"; }
 python3 "$TMP/cases.py" preflight "$TMP/preflight" "$GC" || fail 'external process preflight'
+fixture="$TMP/case-12"
+make_fixture "$fixture"
+failed=()
+for finding in 12repo 12deleted 12ids 12partial 12zombie; do
+  if case_run "$finding" "$fixture"; then ok "case $finding"; else echo "FAIL: case $finding" >&2; failed+=("$finding"); fi
+done
+[[ ${#failed[@]} -eq 0 ]] || fail "regression cases: ${failed[*]}"
 for number in {1..9}; do
   fixture="$TMP/case-$number"
   make_fixture "$fixture"
