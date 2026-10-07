@@ -503,8 +503,12 @@ Run `git diff` and `git status`. Read every hunk. Check:
 - **Leftovers** — debug prints, commented-out code, stray TODOs, temp files, hardcoded paths.
 - **Honesty** — does the dev's claimed output match what you get when you re-run it yourself?
 
-Write findings to `<dir>/review.md`, then send fixes back to the lane that wrote the code —
-the dev via `SendMessage`, or the codex thread via `codex-run resume`.
+Write each finding to `<dir>/review.md` as one line, `BLOCKING` for what you would hold the
+merge for and `NONBLOCKING` for what you only record:
+`BLOCKING|NONBLOCKING <file>:<line> — <why it is wrong> — <how to show it fails>`.
+A clean review is the single line `REVIEW: CLEAN — <n> hunks read, no findings`. Send fixes
+back to the lane that wrote the code — the dev via `SendMessage`, or the codex thread via
+`codex-run resume`.
 
 When the diff is clean, **commit it** with the scoped pathspecs before moving on. Every review
 round that produces changes gets its own commit — that is what makes a bad round revertible
@@ -591,7 +595,7 @@ weakens this gate set.
   retry once with a different model the Codex catalog lists (`--model sol` if Astra was rejected,
   otherwise `--model terra` or a full slug such as `gpt-5.6-sol`); if none is listed or the retry
   also exits 6, it is `unavailable`.
-  Exit 4/5 is `unavailable`, never silently waived.
+  Exit 4/5, or a second exit 3, is `unavailable`, never silently waived.
 - Docs-only or pure-config low-risk diffs may waive adversarial review, but executable verification
   still runs. Record the exact waiver reason.
 - Any FAIL/BLOCKING result is a failed round: fix it, then rerun the entire gate set for that risk.
@@ -603,7 +607,8 @@ A FAIL from any gate → diagnose, fix via the lane that owns the code, then rer
 
 Cap: **2 rounds for trivial/low/normal, 3 for critical**, then return `BLOCKED`. One additional round is
 allowed only when `brief.md` contains `EXTRA GATE ROUND: approved`. Prompt-level judgment cannot
-override this written token.
+override this written token. This is the authoritative statement of the cap; its numbers come from
+`NORMAL_GATE_ROUNDS`/`CRITICAL_GATE_ROUNDS` in `model-policy.conf`, enforced by `orch-summary-check`.
 
 ### Phase G — Report up
 

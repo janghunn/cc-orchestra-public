@@ -58,6 +58,30 @@ assert_has "$ORCH_TEXT" '[verifier: normal]' "brief tag for sandbox-impossible c
 assert_has "$ORCH_TEXT" 'USER ACCEPTED: <YYYY-MM-DD>' "user-only ACCEPTED record"
 ok "lead returns its summary block; Tier 1 saves it"
 
+for lead_profile in lead-alpha-light lead-alpha lead-alpha-critical lead-alpha-critical-xhigh; do
+  PROFILE_TEXT="$(cat "$AGENTS/$lead_profile.md")"
+  assert_has "$PROFILE_TEXT" '`BLOCKING|NONBLOCKING <file>:<line> — <why it is wrong> — <how to show it fails>`.' "$lead_profile Phase D finding format"
+  assert_has "$PROFILE_TEXT" 'A clean review is the single line `REVIEW: CLEAN — <n> hunks read, no findings`.' "$lead_profile Phase D clean-review line"
+  assert_has "$PROFILE_TEXT" 'Exit 4/5, or a second exit 3, is `unavailable`, never silently waived.' "$lead_profile review quota disposition"
+  assert_has "$PROFILE_TEXT" '`NORMAL_GATE_ROUNDS`/`CRITICAL_GATE_ROUNDS` in `model-policy.conf`, enforced by `orch-summary-check`.' "$lead_profile Phase F policy source"
+done
+for dev_profile in dev-1 dev-opus-1; do
+  PROFILE_TEXT="$(cat "$AGENTS/$dev_profile.md")"
+  assert_has "$PROFILE_TEXT" 'Record the output. If it already fails for a reason unrelated to the spec'"'"'s change, stop:' "$dev_profile baseline-failure trigger"
+  assert_has "$PROFILE_TEXT" 'return `BLOCKED` with the command and its output, and do not fix anything outside your scope' "$dev_profile baseline-failure stop"
+  assert_not_has "$PROFILE_TEXT" 'report that immediately' "$dev_profile old baseline wording removed"
+done
+WORKER_TEXT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import orch_codex; print(orch_codex.instructions("worker"))' "$ROOT/lib")"
+assert_has "$WORKER_TEXT" 'Cap those fix-and-rerun attempts at the' "codex worker retry cap"
+assert_has "$WORKER_TEXT" '(`NORMAL_GATE_ROUNDS`, or `CRITICAL_GATE_ROUNDS` for RISK critical, in' "codex worker cap names the policy keys"
+assert_has "$WORKER_TEXT" '/model-policy.conf). If a check still fails when that cap is reached, or fails for a cause' "codex worker cap points at the policy file"
+assert_has "$WORKER_TEXT" 'outside your unit, stop and return the failing command and output as unfinished work. Do not' "codex worker stop-and-report on exhaustion"
+assert_not_has "$WORKER_TEXT" '@REPO@' "codex worker placeholders rendered"
+SKILL_TEXT="$(cat "$ROOT/skills/orch-verification-loop/SKILL.md")"
+assert_has "$SKILL_TEXT" "lead profile's Phase F" "verification skill points to the authoritative cap"
+assert_not_has "$SKILL_TEXT" 'Cap: 2 rounds for' "verification skill no longer restates the cap"
+ok "prompt contract lines: review format, baseline stop, worker cap, single cap source"
+
 CONF_REPO="$TMP/conf-repo"
 mkdir -p "$CONF_REPO/templates"
 cp "$ROOT/build-roster.sh" "$ROOT/model-policy.conf" "$CONF_REPO/"
