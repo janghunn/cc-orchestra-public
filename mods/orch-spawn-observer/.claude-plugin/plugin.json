@@ -1,0 +1,6 @@
+{
+  "name": "orch-spawn-observer",
+  "version": "0.1.0",
+  "description": "Observe-only: logs spawned agents whose model/effort differs from their cc-orchestra profile",
+  "author": { "name": "cc-orchestra" }
+}
