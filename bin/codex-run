@@ -543,7 +543,7 @@ python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/orch-cli-update" codex 
 mkdir -p "$STATE_DIR"
 RUN_ATTEMPT=0
 run_once() {
-  local start LOG_LINE LOG_OFFSET RUNS_LOCKED RUNS_UMASK
+  local start LOG_LINE LOG_OFFSET LOG_POS FDINFO_KEY FDINFO_VALUE RUNS_LOCKED RUNS_UMASK
   start="$(date -Is)"
   env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null > "$EVENTS" 2> "$STDERR"
   RC=$?
@@ -560,8 +560,28 @@ run_once() {
       flock -w 30 9 2>/dev/null && RUNS_LOCKED=1
     fi
     umask "$RUNS_UMASK"
-    LOG_OFFSET="$(stat -c %s "$GLOBAL_LOG" 2>/dev/null || echo 0)"
-    printf '%s\n' "$LOG_LINE" >> "$GLOBAL_LOG"
+    LOG_OFFSET=""
+    if { exec 8>>"$GLOBAL_LOG"; } 2>/dev/null; then
+      if printf '%s\n' "$LOG_LINE" >&8; then
+        # O_APPEND advances this descriptor to the end of our own write, even
+        # when an unlocked legacy wrapper appends an identical line concurrently.
+        LOG_POS=""
+        {
+          while read -r FDINFO_KEY FDINFO_VALUE; do
+            if [ "$FDINFO_KEY" = pos: ]; then
+              LOG_POS="$FDINFO_VALUE"
+              break
+            fi
+          done < "/proc/$BASHPID/fdinfo/8"
+        } 2>/dev/null
+        if [[ "$LOG_POS" =~ ^[0-9]+$ ]]; then
+          LOG_OFFSET="$(LC_ALL=C; printf '%s' "$((10#$LOG_POS - ${#LOG_LINE} - 1))")"
+          [ "$LOG_OFFSET" -ge 0 ] || LOG_OFFSET=""
+        fi
+      fi
+    else
+      printf '%s\n' "$LOG_LINE" >> "$GLOBAL_LOG"
+    fi
     if ! python3 - "$RUNS_LOG" "$RUN_ATTEMPT" "$$" "$start" "$(date -Is)" \
         "$MODE" "$LANE" "$RUN_TAG" "$MODEL" "$EFFORT" "$FAST_MODE" "$FALLBACK_NOTE" \
         "$RC" "$WORKDIR" "$TASK_DIR" "$EVENTS" "$LOG_OFFSET" "$LOG_LINE" "$RUNS_LOCKED" \
@@ -609,7 +629,7 @@ record = dict(v=1, run_id=uuid.uuid4().hex, attempt=int(attempt), pid=int(pid),
               fallback_from=fallback.removeprefix("fallback-from:") if fallback else None,
               exit=int(exit_code), workdir=workdir, task_dir=task_dir, events=events,
               events_mtime_ns=mtime_ns, events_size=size, usage=usage,
-              log_offset=int(offset), log_line=log_line)
+              log_offset=int(offset) if offset else None, log_line=log_line)
 fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 try:
     # Reuse the shell's open-file description: locking fd separately would deadlock.

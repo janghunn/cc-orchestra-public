@@ -617,6 +617,9 @@ printf '{"type":"turn.completed","usage":{"input_tokens":%s,"cached_input_tokens
   "${FAKE_USAGE_IN:-1000000}" "${FAKE_USAGE_CACHED:-0}" "${FAKE_USAGE_OUT:-0}"
 if [ -n "${FAKE_EXTRA_EVENTS:-}" ]; then printf '%s\n' "$FAKE_EXTRA_EVENTS"; fi
 printf 'ok\n' > "$output"
+if [ "${FAKE_LEGACY_APPEND:-0}" = 1 ]; then
+  printf '%s\n' "$RACE_LINE" >> "$CC_ORCH_STATE_DIR/codex.log"
+fi
 CODEX
 cat > "$FAKEBIN/claude" <<'CLAUDE'
 #!/usr/bin/env bash
@@ -709,5 +712,61 @@ assert_eq "$(wc -l < "$WRAP_STATE/codex.log" | tr -d ' ')" 1 'legacy log written
 assert_eq "$(grep -c '^codex-run: warning:' "$TMP/wrapper.err")" 1 'one sidecar warning'
 assert_has "$(cat "$TMP/wrapper.err")" "codex-run: warning: run record not written to $WRAP_STATE/codex-runs.jsonl" 'sidecar failure warning'
 ok 'writer validates every completed turn and sidecar failure preserves successful exit and log'
+
+# An unlocked legacy writer can append identical text after a size snapshot.
+# The stat shim reproduces the old defect; the descriptor-based writer bypasses it.
+export REAL_STAT="$(command -v stat)"
+cat > "$FAKEBIN/stat" <<'STAT'
+#!/usr/bin/env bash
+if [ "$#" = 3 ] && [ "$1" = -c ] && [ "$2" = %s ] && [[ "$3" == */codex.log ]]; then
+  "$REAL_STAT" "$@"
+  printf '%s\n' "$RACE_LINE" >> "$3"
+  exit 0
+fi
+exec "$REAL_STAT" "$@"
+STAT
+chmod +x "$FAKEBIN/stat"
+WRAP_REPO="$TMP/legacy 한글 race"
+WRAP_TASK="$WRAP_REPO/.orchestra/task"
+mkdir -p "$WRAP_TASK"
+printf 'race fixture\n' > "$WRAP_TASK/plan.md"
+printf 'race fixture\n' > "$WRAP_TASK/brief.md"
+export RACE_LINE="$(printf '%s  %-11s  %s  exit=%s  %s' "$FROZEN_START" implement gpt-6.1-sol@high 0 "$WRAP_REPO")"
+for foreign in 0 1; do
+  WRAP_STATE="$TMP/legacy-race-$foreign"
+  mkdir -p "$WRAP_STATE"
+  : > "$WRAP_STATE/codex.log"
+  # Also append independently of stat, before the real wrapper writes its line.
+  FAKE_LEGACY_APPEND="$foreign" FAKE_USAGE_IN=6000000 \
+    wrapper "$ROOT/bin/codex-run-runtime" implement "$WRAP_REPO" "$WRAP_TASK" --model sol --effort high
+  python3 - "$WRAP_STATE" "$RACE_LINE" "$foreign" <<'PY'
+import json, sys
+from pathlib import Path
+state, line, foreign = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+lines = (state / 'codex.log').read_bytes().splitlines(keepends=True)
+record, = [json.loads(row) for row in (state / 'codex-runs.jsonl').read_text().splitlines()]
+own_offset = sum(map(len, lines[:-1]))
+assert record['log_offset'] == own_offset, f"record joined a foreign line: {record['log_offset']} != {own_offset}"
+assert len(lines) == foreign + 1, lines
+assert all(row == line.encode() + b'\n' for row in lines), lines
+assert record['log_line'] == line
+assert record['usage']['input_tokens'] == 6000000
+if foreign:
+    assert own_offset == len(line.encode()) + 1
+    assert own_offset != len(line) + 1, 'fixture must exercise UTF-8 byte length'
+PY
+  CC_ORCH_CODEX_LOG="$WRAP_STATE/codex.log"
+  run --cost
+  assert_success 'legacy append race'
+  assert_row $'gpt-6.1-sol\t1\t0\t6000000\t0\t0\t12.0000\t60.0000'
+  attribution 1 0
+  if [ "$foreign" = 1 ]; then
+    assert_has "$RUN_OUTPUT" 'coverage: 1/2 calls priced (50.0%)' 'foreign identical line unpriced'
+    assert_has "$RUN_OUTPUT" 'unpriced: 1 call(s) without surviving token data (gpt-6.1-sol 1)' 'foreign line cannot consume exact tokens'
+  else
+    assert_has "$RUN_OUTPUT" 'coverage: 1/1 calls priced (100.0%)' 'no stat race window'
+  fi
+done
+ok 'legacy append races cannot claim the run identifier, including identical UTF-8 lines'
 
 echo "PASS: $pass usage-cost test groups"
