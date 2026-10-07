@@ -1224,7 +1224,7 @@ are included; `--root` replaces default discovery.
 - CAUTION: uncertain recovery or activity, dirty/unmerged work, missing/inactive registry
   rows, ignored outputs, checkpoints, hidden index flags, Git filters, locks, nested
   checkouts, session records, temp backups, in-progress Git operations or non-inspectable
-  processes. These cannot be selected for deletion.
+  processes, reflog-only commits or locked worktrees. These cannot be selected for deletion.
 - DANGER: open registry rows, running processes, secret-shaped files, mounts, escaped
   paths, objects borrowed by another repository or a checkout containing the reference
   repository. These cannot be deleted.
@@ -1246,6 +1246,7 @@ session records, temp backups and anything outside a scanned root are never dele
 Removing a clone does remove its local refs and git-ignored `.orchestra/` artifacts,
 including its own registry. Archive coverage is informational: the archive is not a
 full copy (checkpoints, original images and oversized payloads are not stored).
+Repositories outside the scanned roots that borrow a clone's objects are not detected.
 Codex-only installs do not link it; run `~/.claude/orchestra/bin/orch-gc` or `<repo>/bin/orch-gc`.
 
 ## Tuning

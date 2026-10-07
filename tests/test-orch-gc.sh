@@ -89,8 +89,17 @@ def fixture_setup():
     write(L / '.orchestra/REGISTRY.md', '# Registry\n')
     for name in ('merged', 'dirty', 'unmerged', 'open', 'stale', 'secret', 'norow', 'blocked',
                  'branch2', 'tagged', 'stash', 'ignored', 'hidden', 'filter', 'proc', 'parent', 'archive-tmp-x',
-                 'lent', 'shared', 'midop'):
+                 'lent', 'shared', 'midop', 'submod', 'nlstale', 'stalereg', 'badrow', 'ancestor', 'reflogonly'):
         make_merged(name)
+    make_merged('trail ', 'orch/trail')
+    git(F, 'init', '--bare', str(R / 'submod/.git/modules/sub'))
+    git(R / 'stalereg', 'worktree', 'add', str(F / 'tmpwt'), '-b', 'tmp/x')
+    shutil.rmtree(F / 'tmpwt')
+    # The registered worktree protects tmp/x; its tip is already merged into L.
+    git(F, 'clone', '--separate-git-dir', str(F / 'sepgit'), str(L), str(R / 'sepdir'))
+    write(R / 'reflogonly/tracked', 'reflog-only change\n')
+    git(R / 'reflogonly', 'commit', '-am', 'reflog-only commit')
+    git(R / 'reflogonly', 'reset', '--hard', 'HEAD~1')
     write(L / '.git/objects/info/alternates', str(R / 'lent/.git/objects') + '\n')
     git(F, 'clone', '--shared', str(R / 'shared'), str(R / 'borrower'))
     # Keep the borrower independent of shared's completion row and the exact SAFE set.
@@ -138,19 +147,24 @@ def fixture_setup():
     write(F / 'outside/victim/file', 'must survive')
     (F / 'outside/.orchestra/wt/x').mkdir(parents=True)
     (R / 'escape').symlink_to(F / 'outside')
-    for name, path in [('wtsafe', R / 'wtsafe'), ('wtrewritten', R / 'wtrewritten'),
-                       ('orch', R / 'orch'), ('coord', F / 'coord'),
+    for name, path in [('wtsafe', R / 'wtsafe'), ('wtrewritten', R / 'wtrewritten'), ('wtlocked', R / 'wtlocked'),
+                       ('orch', R / 'orch'), ('coord', F / 'coord'), ('nlcoord', F / 'co\nord'),
                        ('lead-y', L / '.orchestra/wt/lead-y')]:
         git(L, 'worktree', 'add', '-b', 'wt/' + name, str(path))
-        if name in ('wtsafe', 'wtrewritten'):
+        if name in ('wtsafe', 'wtrewritten', 'wtlocked'):
             artifacts(path)
             row(L, 'wt/' + name, directory=str(path / '.orchestra' / TASK))
+    git(L, 'worktree', 'lock', str(R / 'wtlocked'))
+    row(F / 'co\nord', 'orch/nlstale', 'RUNNING', str(R / 'nlstale/.orchestra' / TASK))
     private = git(L, 'commit-tree', git(L, 'rev-parse', 'HEAD^{tree}'),
                   '-p', git(L, 'rev-parse', 'HEAD'), '-m', 'worktree-private commit')
     git(R / 'wtrewritten', 'update-ref', 'refs/rewritten/keep', private)
     write(F / 'state/worktrees/other/broken/.git', f'gitdir: {F}/missing/.git/worktrees/broken\n')
     write(F / 'state/worktrees/other/broken/plain', 'broken worktree')
     row(R / 'orch', 'orch/open', 'RUNNING', 'open/.orchestra/' + TASK + '/')
+    with (R / 'orch/.orchestra/REGISTRY.md').open('a') as stream:
+        stream.write('| lead-bad | a2 | t | orch/badrow | badrow/.orchestra/01-task/ | RUNNING |\n')
+    row(R.parent, 'orch/ancestor', 'RUNNING', 'proj/ancestor/.orchestra/' + TASK + '/')
     row(F / 'coord', 'orch/stale', 'RUNNING', str(R / 'stale/.orchestra' / TASK))
     write(F / 'state/sessions/orch.conf', f'WORKDIR={R}/orch\nREPO={L}\n')
     write(F / 'state/codex-projects/aborted/.launch.lock', '')
@@ -197,28 +211,40 @@ def module():
 def options(mod):
     return mod.parser().parse_args(['scan', '--root', str(R), '--repo', str(L)])
 
+def preflight():
+    _, incomplete = module().process_table()
+    if incomplete:
+        for message in incomplete:
+            print('preflight: external ' + message, flush=True)
+        raise AssertionError('preflight: external process scan incomplete')
+    print('preflight: process scan complete')
+
 def case1():
     before = snapshot()
     report = scan_json()
     items = {i['id']: i for i in report['items']}
     expected = {
-        'SAFE': {'merged': 'merged into', 'wtsafe': 'merged into'},
+        'SAFE': {'merged': 'merged into', 'wtsafe': 'merged into', 'trail ': 'merged into'},
         'CAUTION': {'dirty': 'dirty', 'unmerged': 'not merged', 'norow': 'no registry row',
                     'blocked': 'BLOCKED', 'branch2': 'not merged', 'tagged': 'not merged',
                     'stash': 'stash', 'ignored': 'git-ignored', 'hidden': 'index flags',
                     'filter': 'git filter', 'nogit': 'not a git checkout',
                     'parent': 'nested checkout', 'archive-tmp-x': 'temp backup',
-                    'wtrewritten': 'not merged', 'midop': 'git operation in progress: MERGE_HEAD'},
+                    'wtrewritten': 'not merged', 'midop': 'git operation in progress: MERGE_HEAD',
+                    'submod': 'submodule repository present', 'stalereg': 'has linked worktree registration',
+                    'sepdir': 'separate git dir', 'badrow': 'unparseable registry row',
+                    'reflogonly': 'reflog-only commits', 'wtlocked': 'worktree locked'},
         'DANGER': {'open': 'open registry row', 'stale': 'open registry row', 'secret': 'secret-shaped',
                    'escape': 'escapes root', 'proc': 'in use by pid', 'orch': 'session record',
-                   'lent': 'objects borrowed by', 'shared': 'objects borrowed by'}}
+                   'lent': 'objects borrowed by', 'shared': 'objects borrowed by',
+                   'nlstale': 'open registry row', 'ancestor': 'open registry row'}}
     # The specified relative-dir matching also places orch's own RUNNING row under orch.
     for category, names in expected.items():
         for name, keyword in names.items():
             item = items['proj/' + name]
             assert item['class'] == category, item
             assert any(keyword in r['text'] for r in item['reasons']), item
-    assert {i['id'] for i in items.values() if i['class'] == 'SAFE'} == {'proj/merged', 'proj/wtsafe'}
+    assert {i['id'] for i in items.values() if i['class'] == 'SAFE'} == {'proj/merged', 'proj/wtsafe', 'proj/trail '}
     assert 'proj/parent/.orchestra/wt/lead-x' in items
     assert not any(id.startswith('proj/escape/') for id in items)
     assert len(items) == sum(map(len, expected.values())) + 2, items.keys()  # nested worktree and borrower
@@ -227,7 +253,7 @@ def case1():
     table = run('--root', str(R), '--repo', str(L))
     assert table.startswith('CLASS  SIZE  AGE  ARCHIVE  ID  REASON\n')
     assert len([line for line in table.splitlines() if line.startswith(('SAFE ', 'CAUTION ', 'DANGER '))]) == len(items)
-    assert 'totals: SAFE 2 (' in table and 'archive is not a full copy' in table
+    assert 'totals: SAFE 3 (' in table and 'archive is not a full copy' in table
     assert r'0-\xff.ckpt' in table, table
     assert report['totals']['all']['count'] == len(items)
     assert report['totals']['all']['bytes'] == sum(i['bytes'] for i in items.values())
@@ -271,14 +297,17 @@ def case3():
     assert before == snapshot()
 
 def case4():
-    exclude = ('state/worktrees/proj/merged', 'state/worktrees/proj/wtsafe', 'L/.git/worktrees/wtsafe')
+    exclude = ('state/worktrees/proj/merged', 'state/worktrees/proj/wtsafe', 'state/worktrees/proj/trail ',
+               'L/.git/worktrees/wtsafe')
     ignore = ('state/worktrees/proj', 'L/.git/worktrees')
     before = snapshot(exclude, ignore)
     refs = git(L, 'for-each-ref')
     out = run('apply', '--root', str(R), '--repo', str(L), '--yes', '--class', 'safe')
     assert 'deleted proj/merged ' in out and 'deleted proj/wtsafe ' in out, out
-    assert re.search(r'freed \d+ bytes .* from 2 item\(s\)', out), out
+    assert 'deleted proj/trail ' in out, out
+    assert re.search(r'freed \d+ bytes .* from 3 item\(s\)', out), out
     assert not (R / 'merged').exists() and not (R / 'wtsafe').exists()
+    assert not (R / 'trail ').exists()
     after = snapshot(exclude, ignore)
     assert before == after, [(p, before.get(p), after.get(p)) for p in before.keys() | after.keys() if before.get(p) != after.get(p)]
     assert refs == git(L, 'for-each-ref'), 'live refs changed'
@@ -353,6 +382,42 @@ def case7():
     assert any(path == cwd and found_pid == pid for path, found_pid, _ in paths), paths
     print('process scan: vanished fd retains cwd')
 
+    zombie = os.fork()
+    if zombie == 0:
+        os._exit(0)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = Path(f'/proc/{zombie}/stat').read_bytes().rpartition(b') ')[2][:1]
+            if state == b'Z':
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError('child did not become a zombie')
+        _, incomplete = mod.process_table()
+        assert not any(f'pid {zombie} ' in message for message in incomplete), incomplete
+    finally:
+        os.waitpid(zombie, 0)
+    print('process scan: zombie skipped without incomplete reason')
+
+    original_lstat = mod.os.lstat
+    attempts = []
+    def transient_lstat(path, *args, **kwargs):
+        if path == f'/proc/{pid}/fd':
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise PermissionError(path)
+        return original_lstat(path, *args, **kwargs)
+    mod.os.lstat = transient_lstat
+    try:
+        paths, incomplete = mod.process_table()
+    finally:
+        mod.os.lstat = original_lstat
+    assert len(attempts) == 2, attempts
+    assert not any(f'pid {pid} ' in message for message in incomplete), incomplete
+    assert any(path == cwd and found_pid == pid for path, found_pid, _ in paths), paths
+    print('process scan: transient inspection failure retried successfully')
+
     write(F / 'state/sessions/bad.conf', 'this is not a record\n')
     item = next(i for i in mod.scan(opts).items if i.id == 'proj/merged')
     assert item.classification == 'CAUTION' and 'activity records incomplete' in item.reason(), item.reasons
@@ -395,6 +460,19 @@ def case7python():
 def case7daemon():
     nondumpable(True)
 
+def case7mapped():
+    ready = F.parent / (F.name + '.mapped.ready')
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ready.exists(), 'mapped-file child did not become ready'
+    pid = (F.parent / (F.name + '.mapped.pid')).read_text().strip()
+    mod = module()
+    item = next(i for i in mod.scan(options(mod)).items if i.id == 'proj/merged')
+    assert item.classification == 'DANGER', item.reasons
+    assert any(f'in use by pid {pid} ' in r['text'] for r in item.reasons), item.reasons
+    print('process scan: closed-fd mapping makes merged DANGER')
+
 def case8():
     shim = F.parent / ('shim-' + F.name)
     shim.mkdir()
@@ -411,7 +489,7 @@ def case8():
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert calls
     allowed = {'rev-parse', 'config', 'status', 'ls-files', 'for-each-ref', 'symbolic-ref',
-               'worktree', 'cat-file', 'merge-base'}
+               'rev-list', 'cat-file', 'merge-base'}
     for args, git_env in calls:
         assert git_env == {'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_LAZY_FETCH': '1',
                            'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1'}, git_env
@@ -420,8 +498,8 @@ def case8():
         assert args[offset:offset+4] == ['-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never'], args
         command = args[offset+4:]
         assert command[0] in allowed, args
-        if command[0] == 'worktree':
-            assert command[1:] == ['list', '--porcelain'], args
+        if command[0] == 'rev-list':
+            assert command[1:] == ['--reflog', '--not', '--all'], args
         if command[0] == 'config':
             assert command[1:] == ['--get-regexp', r'^filter\.'], args
         if command[0] == 'cat-file':
@@ -432,7 +510,7 @@ def case8():
     result = subprocess.run(['python3', '-c', code, gc, 'scan', '--root', str(R), '--repo', str(L), '--json'],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['totals']['SAFE']['count'] == 2
+    assert json.loads(result.stdout)['totals']['SAFE']['count'] == 3
     assert before == snapshot()
 
 def case9():
@@ -449,8 +527,35 @@ def case9():
     assert 'refused backup/archive-tmp' in out and 'nothing deleted' in out
     assert before == snapshot()
 
+def byte_items():
+    names = [os.fsdecode(b'bytes-safe-\xff'), os.fsdecode(b'bytes-dirty-\xff')]
+    for original, name in zip(('bytes-safe', 'bytes-dirty'), names):
+        path = make_merged(original)
+        path.rename(R / name)
+    write(R / names[1] / 'tracked', 'changed dirty bytes fixture\n')
+    return names
+
+def byte_apply(name, code, keyword):
+    argv = [os.fsencode(s) for s in ('python3', gc, 'apply', '--root', str(R), '--repo', str(L),
+                                    '--yes', '--item', 'proj/' + name)]
+    result = subprocess.run(argv, capture_output=True)
+    assert result.returncode == code, (result.returncode, result.stdout, result.stderr)
+    text = result.stdout.decode('utf-8')
+    assert keyword in text and r'\xff' in text, text
+    return text
+
+def case11():
+    safe, dirty = byte_items()
+    out = byte_apply(dirty, 1, 'refused ')
+    assert 'nothing deleted' in out and (R / dirty).is_dir(), out
+    out = byte_apply(safe, 0, 'deleted ')
+    assert 'freed ' in out and not (R / safe).exists(), out
+    print('apply output: non-UTF-8 refusal and deletion reported')
+
 if action == 'fixture':
     fixture_setup()
+elif action == 'preflight':
+    preflight()
 else:
     globals()['case' + action]()
 PY
@@ -464,10 +569,21 @@ make_fixture() {
   worker_pids+=("$(cat "$fixture.pid")")
 }
 case_run() { python3 "$TMP/cases.py" "$1" "$2" "$GC"; }
+python3 "$TMP/cases.py" preflight "$TMP/preflight" "$GC" || fail 'external process preflight'
 for number in {1..9}; do
   fixture="$TMP/case-$number"
   make_fixture "$fixture"
   if [[ "$number" == 7 ]]; then
+    (
+      exec python3 -c 'import mmap,os,sys,time; f=open(sys.argv[1],"rb"); mapping=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ,trackfd=False); f.close(); os.chdir("/"); open(sys.argv[2],"w").close(); time.sleep(300)' \
+        "$fixture/state/worktrees/proj/merged/tracked" "$fixture.mapped.ready"
+    ) &
+    worker_pids+=("$!")
+    child_pid="$!"
+    printf '%s\n' "$child_pid" > "$fixture.mapped.pid"
+    case_run 7mapped "$fixture" || fail 'mapped-file activity'
+    kill "$child_pid"
+    wait "$child_pid" 2>/dev/null || true
     (
       cd "$fixture"
       exec python3 -c 'import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(300)'
@@ -522,4 +638,8 @@ for marker in yes selection recheck contain-tree contain-worktree; do
 done
 GC="$original_gc"
 ok "case 10: all five guard mutations caught"
+fixture="$TMP/case-11"
+make_fixture "$fixture"
+case_run 11 "$fixture" || fail 'case 11'
+ok 'case 11: non-UTF-8 apply output'
 echo "PASS: $pass orch-gc cases"

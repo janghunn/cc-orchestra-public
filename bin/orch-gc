@@ -109,29 +109,45 @@ def process_table():
             continue
         base = "/proc/" + pid
         comm = "unknown"
-        try:
-            if os.stat(base).st_uid != os.getuid():
-                continue
-            comm = Path(base, "comm").read_text().strip()
-            if (os.lstat(base + "/fd").st_uid != os.getuid()
-                    or os.lstat(base + "/cwd").st_uid != os.getuid()):
-                if comm not in SESSION_DAEMONS:
-                    incomplete.append(f"process scan incomplete: pid {pid} ({comm}) not inspectable")
-                continue
-            links = [base + "/" + name for name in ("cwd", "exe", "root")]
-            links += [base + "/fd/" + name for name in os.listdir(base + "/fd")]
-            found = []
-            for link in links:
-                try:
-                    target = os.readlink(link).removesuffix(" (deleted)")
-                except FileNotFoundError:
-                    continue
-                if os.path.isabs(target) and not (link.endswith("/root") and target == "/"):
-                    found.append((target, pid, comm))
-            paths.extend(found)
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except (OSError, UnicodeError):
+        for attempt in range(4):
+            try:
+                if os.stat(base).st_uid != os.getuid():
+                    break
+                state = Path(base, "stat").read_bytes().rpartition(b") ")[2][:1]
+                if not state:
+                    raise OSError("invalid process stat")
+                if state in (b"Z", b"X"):
+                    break
+                comm = Path(base, "comm").read_text().strip()
+                if (os.lstat(base + "/fd").st_uid != os.getuid()
+                        or os.lstat(base + "/cwd").st_uid != os.getuid()):
+                    if comm in SESSION_DAEMONS:
+                        break
+                    raise PermissionError("process entries not owned by current uid")
+                links = [base + "/" + name for name in ("cwd", "exe", "root")]
+                links += [base + "/fd/" + name for name in os.listdir(base + "/fd")]
+                found = []
+                for link in links:
+                    try:
+                        target = os.readlink(link).removesuffix(" (deleted)")
+                    except FileNotFoundError:
+                        continue
+                    if os.path.isabs(target) and not (link.endswith("/root") and target == "/"):
+                        found.append((target, pid, comm))
+                for line in Path(base, "maps").read_bytes().decode("utf-8", "surrogateescape").split("\n"):
+                    fields = line.split(None, 5)
+                    if len(fields) == 6:
+                        target = fields[5].removesuffix(" (deleted)")
+                        if os.path.isabs(target):
+                            found.append((target, pid, comm))
+                paths.extend(found)
+                break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            except (OSError, UnicodeError):
+                if attempt < 3:
+                    time.sleep(0.05)
+        else:
             incomplete.append(f"process scan incomplete: pid {pid} ({comm}) not inspectable")
     return paths, incomplete
 
@@ -147,19 +163,35 @@ def mount_table():
         return [], True
 
 
-def worktrees(target, common=False):
-    records = []
-    for block in git(target, "worktree", "list", "--porcelain", common=common).split("\n\n"):
-        fields = dict(line.partition(" ")[::2] for line in block.splitlines())
-        if "worktree" in fields:
-            records.append(fields)
-    return records
+def worktrees(common):
+    """Read registrations without line-oriented Git porcelain path parsing."""
+    records, errors = [], []
+    directory = os.path.join(common, "worktrees")
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        return [], [directory] if os.path.lexists(directory) else []
+    except OSError:
+        return [], [directory]
+    for name in names:
+        record = {"id": name}
+        path = os.path.join(directory, name, "gitdir")
+        try:
+            target = Path(path).read_bytes().decode("utf-8", "surrogateescape").removesuffix("\n")
+            if not target or not os.path.isabs(target) or "\0" in target:
+                raise ValueError("invalid registered gitdir")
+            record["worktree"] = os.path.dirname(target)
+        except (OSError, ValueError):
+            errors.append(path)
+        records.append(record)
+    return records, errors
 
 
 class Context:
     def __init__(self, options):
         self.options, self.policy = options, orch_archive.load_policy()
         self.incomplete, self.sessions, self.rows = [], [], []
+        self.bad_rows = []
         self.incomplete_by_top, self.item_common, self.borrowed_objects = {}, {}, set()
         self.items, self.roots, self.reference = [], {}, None
         self.states = sorted({os.path.realpath(p) for p in
@@ -168,8 +200,8 @@ class Context:
         self.read_sessions()
         candidate = options.repo or os.path.realpath(os.path.expanduser("~/.claude/orchestra"))
         try:
-            top = git(candidate, "rev-parse", "--show-toplevel").strip()
-            common = git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+            top = git(candidate, "rev-parse", "--show-toplevel").removesuffix("\n")
+            common = git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir").removesuffix("\n")
             self.reference = {"top": os.path.realpath(top), "common": os.path.realpath(common)}
         except GitError:
             if options.repo or os.path.lexists(candidate):
@@ -275,6 +307,14 @@ class Context:
 
     def read_registries(self):
         repos = {p for p, _, _ in self.sessions}
+        for root in self.roots:
+            ancestor = root
+            while True:
+                repos.add(ancestor)
+                parent = os.path.dirname(ancestor)
+                if parent == ancestor:
+                    break
+                ancestor = parent
         common_dirs = {}
         if self.reference:
             repos.add(self.reference["top"])
@@ -287,19 +327,19 @@ class Context:
             if os.path.lexists(dotgit):
                 try:
                     common = os.path.realpath(git(item.path, "rev-parse", "--path-format=absolute",
-                                                  "--git-common-dir").strip())
+                                                  "--git-common-dir").removesuffix("\n"))
                     self.item_common[item.path] = common
-                    if os.path.isfile(dotgit):
-                        common_dirs.setdefault(common, set()).add(item.top)
+                    common_dirs.setdefault(common, set()).add(item.top)
                 except GitError:
                     self.incomplete_at(item.path, item.top)
         for common in sorted(common_dirs):
-            repos.add(os.path.dirname(common))
-            try:
-                repos.update(w["worktree"] for w in worktrees(common, common=True))
-            except GitError:
+            if os.path.basename(common) == ".git":
+                repos.add(os.path.dirname(common))
+            records, errors = worktrees(common)
+            repos.update(w["worktree"] for w in records if "worktree" in w)
+            for path in errors:
                 for top in common_dirs[common]:
-                    self.incomplete_at(common, top)
+                    self.incomplete_at(path, top)
         seen = set()
         for repo in sorted(repos):
             path = os.path.join(repo, ".orchestra", "REGISTRY.md")
@@ -316,11 +356,13 @@ class Context:
             except (OSError, UnicodeError):
                 self.incomplete_at(path)
                 continue
-            for line in lines:
+            for number, line in enumerate(lines, 1):
                 parts = [part.strip() for part in line.split("|")]
                 if len(parts) == 9 and parts[0] == parts[-1] == "" and parts[1].startswith("lead-"):
                     self.rows.append(dict(zip(("slot", "agentId", "task", "branch", "dir",
                                                "status", "updated"), parts[1:-1]), registry=path))
+                elif len(parts) > 1 and parts[1].startswith("lead-"):
+                    self.bad_rows.append((path, number, line))
 
     def read_alternates(self):
         common_dirs = set(self.item_common.values())
@@ -409,12 +451,27 @@ def inspect_git(item, context):
     if not os.path.exists(os.path.join(path, ".git")):
         item.add("CAUTION", "not a git checkout")
         return
-    if os.path.realpath(git(path, "rev-parse", "--show-toplevel").strip()) != os.path.realpath(path):
+    if os.path.realpath(git(path, "rev-parse", "--show-toplevel").removesuffix("\n")) != os.path.realpath(path):
         item.add("CAUTION", "not a git checkout root")
         return
     item.kind = "clone" if os.path.isdir(os.path.join(path, ".git")) else "worktree"
-    git_dir = git(path, "rev-parse", "--absolute-git-dir").strip()
-    item.common_dir = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    git_dir = git(path, "rev-parse", "--absolute-git-dir").removesuffix("\n")
+    item.common_dir = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir").removesuffix("\n")
+    if item.kind == "clone":
+        modules = os.path.join(path, ".git", "modules")
+        try:
+            names = sorted(os.listdir(modules))
+        except FileNotFoundError:
+            if os.path.lexists(modules):
+                raise
+            names = []
+        if names:
+            item.add("CAUTION", f"submodule repository present: .git/modules/{names[0]}" +
+                     (f" +{len(names) - 1} more" if len(names) > 1 else ""))
+    elif os.path.realpath(git_dir) == os.path.realpath(item.common_dir):
+        item.add("CAUTION", f"separate git dir (main worktree of {item.common_dir})")
+    elif os.path.lexists(os.path.join(git_dir, "locked")):
+        item.add("CAUTION", "worktree locked")
     filters = git(path, "config", "--get-regexp", r"^filter\.", allowed=(0, 1))
     if filters:
         item.add("CAUTION", f"git filter configured: {filters.split()[0]} (status not run)")
@@ -452,6 +509,9 @@ def inspect_git(item, context):
         item.add("CAUTION", "no commits")
         return
     item.branch = git(path, "symbolic-ref", "-q", "--short", "HEAD", allowed=(0, 1)).strip()
+    reflog_only = git(path, "rev-list", "--reflog", "--not", "--all").splitlines()
+    if reflog_only:
+        item.add("CAUTION", f"reflog-only commits would be lost: {len(reflog_only)}")
     tips = [(head, "HEAD")]
     refs = git(path, "for-each-ref", "--format=%(objectname) %(objecttype) %(*objectname) %(*objecttype) %(refname)")
     for line in refs.splitlines():
@@ -470,9 +530,11 @@ def inspect_git(item, context):
         else:
             tips.append((sha, name))
     if item.kind == "clone":
-        for wt in worktrees(path):
-            if os.path.realpath(wt["worktree"]) != os.path.realpath(path) and "prunable" not in wt:
-                item.add("CAUTION", f"has linked worktree: {wt['worktree']}")
+        records, errors = worktrees(item.common_dir)
+        for wt in records:
+            item.add("CAUTION", f"has linked worktree registration: {wt['id']}")
+        for unreadable in errors:
+            item.add("CAUTION", f"worktree registration unreadable: {unreadable}")
         reference = context.reference
     else:
         reference = {"top": os.path.dirname(item.common_dir), "common": item.common_dir}
@@ -504,28 +566,32 @@ def inspect_git(item, context):
             item.add("CAUTION", f"{name} not merged into {ref}")
 
 
-def activity(item, context):
+def activity(item, context, real_path):
     for path, pid, comm in context.processes:
-        if under(path, os.path.realpath(item.path)):
+        if under(path, real_path):
             item.add("DANGER", f"in use by pid {pid} ({comm})")
     for message in context.proc_incomplete:
         item.add("CAUTION", message)
     for message in context.incomplete + context.incomplete_by_top.get(item.top, []):
         item.add("CAUTION", message)
     for path, source, _ in context.sessions:
-        if under(path, item.path) or under(os.path.realpath(path), os.path.realpath(item.path)):
+        if under(path, item.path) or under(os.path.realpath(path), real_path):
             item.add("CAUTION", f"session record {source}")
 
 
-def registry(item, context):
+def registry(item, context, real_path):
     matches = []
+    for path, number, raw in context.bad_rows:
+        branch_match = item.branch and re.search(r"(?:^|[\s|])" + re.escape(item.branch) + r"(?=$|[\s|])", raw)
+        if branch_match or os.path.basename(item.path) + "/" in raw or item.path in raw:
+            item.add("CAUTION", f"unparseable registry row mentions this item: {path}:{number}")
     for row in context.rows:
         checkout = os.path.dirname(os.path.dirname(row["registry"]))
         paths = ([row["dir"]] if os.path.isabs(row["dir"]) else
                  [os.path.join(checkout, row["dir"]), os.path.join(os.path.dirname(checkout), row["dir"])])
         if not ((item.branch and row["branch"] == item.branch) or
                 (row["dir"] and any(under(os.path.normpath(p), base)
-                                    for p in paths for base in (item.path, os.path.realpath(item.path))))):
+                                    for p in paths for base in (item.path, real_path)))):
             continue
         status = row["status"]
         matches.append(status)
@@ -566,6 +632,7 @@ def classify(item, context):
     if not contained(item.path, item):
         item.add("DANGER", f"path escapes root: {os.path.realpath(item.path)}")
         return item
+    real_path = os.path.realpath(item.path)
     try:
         walk_item(item, context)
     except OSError:
@@ -573,19 +640,19 @@ def classify(item, context):
     for objects, common in sorted(context.borrowed_objects):
         own_repo = (os.path.isdir(os.path.join(item.path, ".git"))
                     and common == context.item_common.get(item.path))
-        if not own_repo and under(objects, os.path.realpath(item.path)):
+        if not own_repo and under(objects, real_path):
             item.add("DANGER", f"objects borrowed by {common}")
     archive(item, context)
     if item.backup:
         item.add("CAUTION", "temp backup (report-only)")
-        activity(item, context)
+        activity(item, context, real_path)
         return item
     try:
         inspect_git(item, context)
     except (GitError, OSError, ValueError) as error:
         item.add("CAUTION", f"git unreadable: {error}")
-    activity(item, context)
-    statuses = registry(item, context)
+    activity(item, context, real_path)
+    statuses = registry(item, context, real_path)
     if item.classification == "SAFE":
         item.add("SAFE", f"merged into {context.options.merged_into}; clean; registry {statuses[0]}")
     return item
@@ -642,7 +709,12 @@ def table_field(value):
     text = "".join(" " if unicodedata.category(char) in ("Cc", "Zl", "Zp") else
                    f"\\x{ord(char) - 0xdc00:02x}" if 0xdc80 <= ord(char) <= 0xdcff else char
                    for char in str(value))
-    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(encoding, "backslashreplace").decode(encoding)
+
+
+def print_line(text):
+    print(table_field(text))
 
 
 def report(context, as_json):
@@ -673,17 +745,17 @@ def apply(context, options):
     invalid = [id for id in selected if id not in by_id or by_id[id].classification != "SAFE" or by_id[id].backup]
     if invalid:  # GUARD:selection
         for id in invalid:
-            print(f"refused {id}: " + (f"{by_id[id].classification}: {by_id[id].reason()}" if id in by_id else "unknown item"))
-        print("nothing deleted")
+            print_line(f"refused {id}: " + (f"{by_id[id].classification}: {by_id[id].reason()}" if id in by_id else "unknown item"))
+        print_line("nothing deleted")
         return 1
     if not selected:
-        print("nothing to delete")
+        print_line("nothing to delete")
         return 0
     if not options.yes:  # GUARD:yes
         for id in selected:
             item = by_id[id]
-            print(f"dry run: would delete {id} {item.path} ({item.bytes} bytes)")
-        print("dry run: nothing deleted; re-run with --yes to delete")
+            print_line(f"dry run: would delete {id} {item.path} ({item.bytes} bytes)")
+        print_line("dry run: nothing deleted; re-run with --yes to delete")
         return 0
     freed, count = 0, 0
     for id in selected:
@@ -692,11 +764,11 @@ def apply(context, options):
             size = delete_item(item, options)
             freed += size
             count += 1
-            print(f"deleted {id} {item.path} ({size} bytes)")
+            print_line(f"deleted {id} {item.path} ({size} bytes)")
         except (Refused, GitError, OSError, ValueError, orch_archive.ArchiveError) as error:
-            print(f"error: {id}: {error}")
+            print_line(f"error: {id}: {error}")
             break
-    print(f"freed {freed} bytes ({human(freed)}) from {count} item(s)")
+    print_line(f"freed {freed} bytes ({human(freed)}) from {count} item(s)")
     return 0 if count == len(selected) else 1
 
 
@@ -731,7 +803,7 @@ def main(argv):
             return 0
         return apply(context, options)
     except (OSError, ValueError, orch_archive.ArchiveError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(table_field(f"error: {error}"), file=sys.stderr)
         return 2
 
 
