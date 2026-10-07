@@ -593,22 +593,26 @@ plan() { printf '%-20s %s\n' "$1" "$2"; }
 
 plan_path() { python3 -c '
 import os, sys
-def physical(path):
+def physical(path, planned=()):
+    planned = {os.path.realpath(p) for p in planned}
     current = "/" if os.path.isabs(path) else os.getcwd()
     parts = path.split("/")
     for index, part in enumerate(parts):
         if part in ("", "."):
             continue
         if part == "..":
+            if os.path.islink(current):
+                target = os.path.realpath(current)
+                if os.path.isdir(target) or target in planned:
+                    current = os.path.dirname(target)
+                    continue
             if os.path.lexists(current) and not os.path.isdir(current):
                 return current + "/" + "/".join(parts[index:])
-            if os.path.islink(current):
-                current = os.path.realpath(current)
             current = os.path.dirname(current)
         else:
             current = os.path.join(current, part)
     return current
-print(physical(sys.argv[1]))' "$1"; }
+print(physical(sys.argv[1], sys.argv[2:]))' "$1" "${!PLANNED_DIRS[@]}"; }
 
 declare -A PLANNED_DIRS=()
 plan_dir() {
@@ -634,59 +638,74 @@ dry_run_install_rest() {
   refresh="$(. "$REPO_DIR/budget-policy.conf"; printf '%s' "${BUDGET_STATUSLINE_REFRESH_SECONDS:-60}")"
   python3 - "$REPO_DIR" "$BIN_DIR" "$bin" "$poll" <<'PY'
 import glob, json, os, pathlib, shutil, stat, subprocess, sys, tempfile
-def physical(path):
+def physical(path, planned=()):
+    planned = {os.path.realpath(p) for p in planned}
     current = '/' if os.path.isabs(path) else os.getcwd()
     parts = path.split('/')
     for index, part in enumerate(parts):
         if part in ('', '.'):
             continue
         if part == '..':
+            if os.path.islink(current):
+                target = os.path.realpath(current)
+                if os.path.isdir(target) or target in planned:
+                    current = os.path.dirname(target)
+                    continue
             if os.path.lexists(current) and not os.path.isdir(current):
                 return current + '/' + '/'.join(parts[index:])
-            if os.path.islink(current):
-                current = os.path.realpath(current)
             current = os.path.dirname(current)
         else:
             current = os.path.join(current, part)
     return current
 
+planned = set()
+def remember(path):
+    directory = pathlib.Path(physical(path, planned))
+    planned.update(os.path.realpath(p) for p in (directory, *directory.parents))
+
 repo, bin_dir, claude, poll = sys.argv[1:]
 # Guard facades resolve their own script path; the installer and roster keep the logical path.
 guard_repo = os.path.realpath(repo)
-bin_dir = physical(bin_dir)
 home = os.environ['HOME']
+# Resolve each override against directories created by earlier install steps.
+remember(home + '/.claude/agents')
+bin_dir = physical(bin_dir, planned)
+remember(bin_dir)
+initial_dirs = planned.copy()
+state = physical(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state', planned)
+remember(state)
 raw_agents = os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents'
-agents = physical(raw_agents)
-manifest = physical(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json')
-state = physical(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state')
-units = physical(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user')
+agents = physical(raw_agents, planned)
+remember(agents)
+manifest = physical(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json', planned)
+remember(os.path.dirname(manifest))
+units = physical(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user', planned)
+if os.access(claude, os.X_OK):
+    remember(units)
 h = os.path.abspath(home + '/.claude/settings.json')
 raw_settings = os.environ.get('CC_ORCH_SETTINGS') or h
-s = physical(raw_settings)
+s = physical(raw_settings, planned)
+# Only the initial mkdir calls were reported by bash; report later directories below.
+planned = initial_dirs
 
 def plan(action, detail):
     print(f'{action:20s} {detail}', flush=True)
 
-planned = set()
-def remember(path):
-    path = physical(path)
-    planned.update(str(p) for p in (pathlib.Path(path), *pathlib.Path(path).parents))
-remember(home + '/.claude/agents')
-remember(bin_dir)
 def plan_dir(path):
-    path = physical(path)
+    path = physical(path, planned)
     if os.path.lexists(path) and not os.path.isdir(path):
         plan('error', path + ' (exists and is not a directory; the install would stop here)')
         raise SystemExit(1)
-    if path in planned:
+    # An unresolved .. must recurse to its blocking component before deduplication.
+    if '..' not in path.split('/') and os.path.realpath(path) in planned:
         return
     if os.path.isdir(path):
         plan('unchanged', path.rstrip('/') + '/')
-        planned.add(path)
+        planned.add(os.path.realpath(path))
         return
     plan_dir(os.path.dirname(path))
     plan('create', path.rstrip('/') + '/')
-    planned.add(path)
+    planned.add(os.path.realpath(path))
 
 mask = os.umask(0)
 os.umask(mask)
@@ -819,57 +838,63 @@ PY
 dry_run_settings() {
   python3 - "$REPO_DIR" "$BIN_DIR" "$1" "$2" <<'PY'
 import copy, json, os, pathlib, sys
-def physical(path):
+def physical(path, planned=()):
+    planned = {os.path.realpath(p) for p in planned}
     current = '/' if os.path.isabs(path) else os.getcwd()
     parts = path.split('/')
     for index, part in enumerate(parts):
         if part in ('', '.'):
             continue
         if part == '..':
+            if os.path.islink(current):
+                target = os.path.realpath(current)
+                if os.path.isdir(target) or target in planned:
+                    current = os.path.dirname(target)
+                    continue
             if os.path.lexists(current) and not os.path.isdir(current):
                 return current + '/' + '/'.join(parts[index:])
-            if os.path.islink(current):
-                current = os.path.realpath(current)
             current = os.path.dirname(current)
         else:
             current = os.path.join(current, part)
     return current
 
-repo, bin_dir, claude, refresh = sys.argv[1:]
-guard_repo = os.path.realpath(repo)
-bin_dir = physical(bin_dir)
-home = os.environ['HOME']
-h = os.path.abspath(home + '/.claude/settings.json')
-raw_settings = os.environ.get('CC_ORCH_SETTINGS') or h
-s = physical(raw_settings)
-s_lex = os.path.abspath(raw_settings)
-state = physical(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state')
-agents = physical(os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents')
-manifest = physical(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json')
-units = physical(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user')
-settings = {}
-created = set()
 planned_dirs = set()
-
-# Account for mkdir -p from every preceding install step, including shared ancestors.
+# Account for mkdir -p in real-install order, including shared ancestors.
 def remember(path):
-    directory = pathlib.Path(physical(path))
+    directory = pathlib.Path(physical(path, planned_dirs))
     planned_dirs.update(os.path.realpath(p) for p in (directory, *directory.parents))
 
-for directory in (home + '/.claude/agents', bin_dir, state, agents, os.path.dirname(manifest)):
-    remember(directory)
+repo, bin_dir, claude, refresh = sys.argv[1:]
+guard_repo = os.path.realpath(repo)
+home = os.environ['HOME']
+remember(home + '/.claude/agents')
+bin_dir = physical(bin_dir, planned_dirs)
+remember(bin_dir)
+state = physical(os.environ.get('CC_ORCH_STATE_DIR') or home + '/.claude/orchestra-state', planned_dirs)
+remember(state)
+agents = physical(os.environ.get('CC_ORCH_AGENTS_DIR') or home + '/.claude/agents', planned_dirs)
+remember(agents)
+manifest = physical(os.environ.get('CC_ORCH_MANIFEST') or agents + '/.install-manifest.json', planned_dirs)
+remember(os.path.dirname(manifest))
+units = physical(os.environ.get('CC_ORCH_UNIT_DIR') or home + '/.config/systemd/user', planned_dirs)
 if os.access(claude, os.X_OK):
     remember(units)
+h = os.path.abspath(home + '/.claude/settings.json')
+raw_settings = os.environ.get('CC_ORCH_SETTINGS') or h
+s = physical(raw_settings, planned_dirs)
+s_lex = os.path.abspath(raw_settings)
+settings = {}
+created = set()
 
 def plan(action, detail):
     print(f'{action:20s} {detail}')
 
 def plan_dir(path):
-    path = physical(path)
+    path = physical(path, planned_dirs)
     if os.path.lexists(path) and not os.path.isdir(path):
         plan('error', path + ' (exists and is not a directory; the install would stop here)')
         raise SystemExit(1)
-    if os.path.realpath(path) in planned_dirs or os.path.isdir(path):
+    if '..' not in path.split('/') and (os.path.realpath(path) in planned_dirs or os.path.isdir(path)):
         return
     plan_dir(os.path.dirname(path))
     plan('create', path + '/')

@@ -699,4 +699,37 @@ echo 'PASS: manifest comparison preserves ./, trailing and repeated slashes, and
   done
 )
 echo 'PASS: profile directories and directory symlinks predict builder failure before units and settings'
+
+# T1h: BIN creation makes a dangling AGENTS symlink usable before .. .
+(
+  fresh_home planned-bin-agents
+  ln -s "$HOME/.local/bin" "$HOME/link"
+  export CC_ORCH_AGENTS_DIR="$HOME/link/../profiles"
+  unset CC_ORCH_MANIFEST
+  snap "$HOME" content > "$TMP/planned-bin-agents-initial"
+  preview 0 "$TMP/planned-bin-agents-first.out" --dry-run
+  grep -Eq "^generate-profiles +$HOME/.local/profiles/ \(39 profiles: 39 create" "$TMP/planned-bin-agents-first.out"
+  real_install
+  snap "$HOME" content > "$TMP/planned-bin-agents-installed"
+  assert_created_paths "$TMP/planned-bin-agents-initial" "$TMP/planned-bin-agents-installed" "$TMP/planned-bin-agents-first.out"
+  real_install
+  preview 0 "$TMP/planned-bin-agents-stable.out" --dry-run
+  assert_stable_plan "$TMP/planned-bin-agents-stable.out" stable
+)
+echo 'PASS: AGENTS symlink/.. uses the BIN directory planned earlier and stabilizes'
+
+# T1i: Static agent directory creation makes a dangling BIN symlink usable.
+(
+  fresh_home planned-agents-bin
+  ln -s "$HOME/.claude/agents" "$HOME/link"
+  export CC_ORCH_BIN_DIR="$HOME/link/../bin"
+  snap "$HOME" content > "$TMP/planned-agents-bin-initial"
+  preview 0 "$TMP/planned-agents-bin-first.out" --dry-run
+  grep -Eq "^create +$HOME/.claude/bin/cc-orch -> " "$TMP/planned-agents-bin-first.out"
+  real_install
+  snap "$HOME" content > "$TMP/planned-agents-bin-installed"
+  assert_created_paths "$TMP/planned-agents-bin-initial" "$TMP/planned-agents-bin-installed" "$TMP/planned-agents-bin-first.out"
+  [[ -L "$HOME/.claude/bin/cc-orch" ]]
+)
+echo 'PASS: BIN symlink/.. uses the static agents directory planned earlier'
 echo 'PASS: all install dry-run tests'
