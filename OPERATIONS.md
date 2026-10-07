@@ -87,6 +87,14 @@ profile comparison is reported as unavailable. Scratch storage is removed before
 reads the repository commit and uses a temporary copy of current guard state; the 16 `lead-*.md`
 profiles and manifest remain state-dependent because a real install refreshes quota first.
 `--dry-run` rejects `--bootstrap` and `--check` combinations.
+Override paths are previewed as their writers resolve them: `..` after a symlink climbs from
+the symlink target, as `mkdir`, `ln` and the roster builders do. Safety-hook registration
+normalises the settings path lexically, while status-line registration writes its temporary file
+in the lexical parent. Such a settings path can split across two files; the preview lists each.
+Manifest comparison preserves the builder's exact destination spelling. A directory at a
+generated-profile path is reported as `error` because the builder fails there. Known limits:
+when `..` follows a directory that does not yet exist, `mkdir -p` also creates that directory,
+but the preview does not list it; directories at manifest or unit-file paths are not detected.
 
 | When | What changes |
 |---|---|
