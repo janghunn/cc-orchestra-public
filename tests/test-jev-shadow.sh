@@ -367,10 +367,49 @@ if scenario != 'failure':
     session = (task / '.codex-session').read_text().split('=', 1)[1].split('|')[0]
     assert row['thread_id'] == session, row
 if scenario == 'fallback': assert row['final_fallback_from'] == 'gpt-6-astra', row
+records = [json.loads(line) for line in (state / 'codex-runs.jsonl').read_text().splitlines()]
+assert len(records) == len(lines), records
+assert [record['log_line'] for record in records] == lines
+assert len({record['run_id'] for record in records}) == len(lines)
+assert all(record['usage'] is None for record in records), records
+assert [record['attempt'] for record in records] == list(range(1, len(lines) + 1))
 PY
   if [ "$scenario" = fallback ]; then assert_has "$(cat "$TMP/real-1.err")" MODEL_FALLBACK "real fallback"; fi
   ok "real core off/on argv, stdout, stderr, exit, final observation: $scenario"
 done
+# The legacy printf, Jev parser and status output remain compatible with spaced paths.
+COMPAT_WORK="$TMP/work with spaces"
+COMPAT_STATE="$TMP/compat-new"
+LEGACY_STATE="$TMP/compat-legacy"
+mkdir -p "$COMPAT_WORK" "$LEGACY_STATE"
+CC_ORCH_STATE_DIR="$COMPAT_STATE" FAKE_CODEX_ERROR_STYLE=success \
+  "$ROOT/bin/codex-run" implement "$COMPAT_WORK" "$TASK" --model sol --effort high \
+  > "$TMP/compat.out" 2> "$TMP/compat.err"
+start="$(python3 - "$COMPAT_STATE/codex-runs.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text())['start'])
+PY
+)"
+printf '%s  %-11s  %s  exit=%s  %s\n' "$start" implement gpt-6.1-sol@high 0 "$COMPAT_WORK" > "$LEGACY_STATE/codex.log"
+cmp "$COMPAT_STATE/codex.log" "$LEGACY_STATE/codex.log" || fail 'legacy log bytes changed'
+python3 - "$ROOT/bin/orch-jev" "$COMPAT_STATE/codex.log" "$LEGACY_STATE/codex.log" "$COMPAT_WORK" <<'PY'
+import importlib.machinery, importlib.util, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader('jev_compat', sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+jev = importlib.util.module_from_spec(spec)
+loader.exec_module(jev)
+new = jev.CODEX_LOG_LINE.fullmatch(Path(sys.argv[2]).read_text().rstrip('\n'))
+legacy = jev.CODEX_LOG_LINE.fullmatch(Path(sys.argv[3]).read_text().rstrip('\n'))
+assert new and legacy
+assert new.groups() == legacy.groups()
+assert new.groups()[-1] == sys.argv[4]
+PY
+CC_ORCH_STATE_DIR="$COMPAT_STATE" "$ROOT/bin/codex-run" status "$TASK" > "$TMP/status-new"
+CC_ORCH_STATE_DIR="$LEGACY_STATE" "$ROOT/bin/codex-run" status "$TASK" > "$TMP/status-legacy"
+cmp "$TMP/status-new" "$TMP/status-legacy" || fail 'status output changed'
+ok "legacy log bytes, Jev parse and status output with a spaced workdir"
 bash -n "$ROOT/bin/codex-run-runtime"
 python3 -m py_compile "$ROOT/bin/orch-jev"
 ok "shell and Python syntax"
