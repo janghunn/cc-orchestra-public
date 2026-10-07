@@ -1343,10 +1343,8 @@ orch-gc scan --merged-into local/installed-main --repo /path/to/live/repo
 아카이브 포함 여부는 참고 정보이며 전체 복사본을 뜻하지 않는다
 (체크포인트, 원본 이미지와 크기 제한을 넘는 payload는 저장하지 않음).
 스캔 루트 밖에서 클론의 객체를 빌려 쓰는 저장소는 탐지하지 못한다.
-알려진 한계 / 후속 작업: `--repo`는 linked worktree 항목의 기준 저장소를 바꾸지 않는다.
-실제 이름이 ` (deleted)`로 끝나면 삭제된 프로세스 경로로 잘못 해석될 수 있다.
-자동 생성한 `~N` 항목 ID가 실제 디렉터리 이름과 충돌할 수 있다.
-Git 2.34는 scan 중 partial-clone 기준 저장소의 누락 객체를 fetch할 수 있다.
+linked worktree 항목은 자체 저장소와 기준 저장소(`--repo` 또는 기본값) 양쪽을 모두 확인한다.
+scan은 빈 `GIT_ALLOW_PROTOCOL`로 Git을 실행하므로 partial-clone lazy fetch를 포함한 어떤 전송도 실행하지 않으며, 로컬에 없는 객체는 미병합으로 판정하고 partial-clone 항목이나 기준 저장소는 객체를 읽지 않고 CAUTION으로 보고한다.
 Codex-only 설치는 링크를 만들지 않으므로 `~/.claude/orchestra/bin/orch-gc` 또는 `<repo>/bin/orch-gc`로 실행한다.
 
 ## 설정 튜닝

@@ -29,8 +29,9 @@ class GitError(Exception):
 
 def git(target, *args, common=False, allowed=(0,)):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # An empty allow-list overrides protocol.*.allow and blocks every lazy-fetch transport even without GIT_NO_LAZY_FETCH.
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1",
-               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", LC_ALL="C")
+               GIT_ALLOW_PROTOCOL="", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", LC_ALL="C")
     argv = ["git"] + (["--git-dir=" + target] if common else ["-C", target])
     argv += ["-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args]
     try:
@@ -43,6 +44,11 @@ def git(target, *args, common=False, allowed=(0,)):
         raise GitError(result.stderr.decode("utf-8", "replace").strip() or
                        f"{args[0]} exited {result.returncode}", result.returncode)
     return output
+
+
+def partial_clone(target, common=False):
+    return git(target, "config", "--get-regexp", r"^(extensions\.partialclone|remote\..*\.promisor)$",
+               common=common, allowed=(0, 1)).split("\n")[0]
 
 
 def under(path, root):
@@ -105,6 +111,7 @@ def process_table():
         base = "/proc/" + pid
         comm = "unknown"
         for attempt in range(4):
+            inspect = base
             try:
                 if os.stat(base).st_uid != os.getuid():
                     break
@@ -112,33 +119,56 @@ def process_table():
                 if not state:
                     raise OSError("invalid process stat")
                 if state in (b"Z", b"X"):
-                    break
-                comm = Path(base, "comm").read_text().strip()
-                if (os.lstat(base + "/fd").st_uid != os.getuid()
-                        or os.lstat(base + "/cwd").st_uid != os.getuid()):
+                    for tid in sorted(os.listdir(base + "/task")):
+                        if tid == pid:
+                            continue
+                        thread = base + "/task/" + tid
+                        try:
+                            state = Path(thread, "stat").read_bytes().rpartition(b") ")[2][:1]
+                        except FileNotFoundError:
+                            continue
+                        if state and state not in (b"Z", b"X"):
+                            inspect = thread
+                            break
+                    else:
+                        break
+                comm = Path(inspect, "comm").read_text().strip()
+                if (os.lstat(inspect + "/fd").st_uid != os.getuid()
+                        or os.lstat(inspect + "/cwd").st_uid != os.getuid()):
                     if comm in SESSION_DAEMONS:
                         break
                     raise PermissionError("process entries not owned by current uid")
-                links = [base + "/" + name for name in ("cwd", "exe", "root")]
-                links += [base + "/fd/" + name for name in os.listdir(base + "/fd")]
+                links = [inspect + "/" + name for name in ("cwd", "exe", "root")]
+                links += [inspect + "/fd/" + name for name in os.listdir(inspect + "/fd")]
                 found = []
                 for link in links:
                     try:
-                        target = os.readlink(link).removesuffix(" (deleted)")
+                        target = os.readlink(link)
                     except FileNotFoundError:
                         continue
                     if os.path.isabs(target) and not (link.endswith("/root") and target == "/"):
                         found.append((target, pid, comm))
-                for line in Path(base, "maps").read_bytes().decode("utf-8", "surrogateescape").split("\n"):
+                    if target.endswith(" (deleted)"):
+                        stripped = target.removesuffix(" (deleted)")
+                        if os.path.isabs(stripped):
+                            found.append((stripped, pid, comm))
+                for line in Path(inspect, "maps").read_bytes().decode("utf-8", "surrogateescape").split("\n"):
                     fields = line.split(None, 5)
                     if len(fields) == 6:
-                        target = fields[5].removesuffix(" (deleted)").replace(r"\012", "\n")
+                        target = fields[5].replace(r"\012", "\n")
                         if os.path.isabs(target):
                             found.append((target, pid, comm))
+                        if target.endswith(" (deleted)"):
+                            stripped = target.removesuffix(" (deleted)")
+                            if os.path.isabs(stripped):
+                                found.append((stripped, pid, comm))
                 paths.extend(found)
                 break
             except (FileNotFoundError, ProcessLookupError):
-                break
+                if inspect == base or not os.path.lexists(base):
+                    break
+                if attempt < 3:
+                    time.sleep(0.05)
             except (OSError, UnicodeError):
                 if attempt < 3:
                     time.sleep(0.05)
@@ -189,6 +219,7 @@ class Context:
         self.bad_rows = []
         self.incomplete_by_top, self.item_common, self.borrowed_objects = {}, {}, set()
         self.items, self.roots, self.reference = [], {}, None
+        self.partial = {}
         self.states = sorted({os.path.realpath(p) for p in
                               ([os.environ["CC_ORCH_STATE_DIR"]] if os.environ.get("CC_ORCH_STATE_DIR") else [])
                               + list(self.policy["STATE_DIRS"]) if os.path.isdir(p)})
@@ -277,14 +308,20 @@ class Context:
                     self.add_root(nested, os.path.basename(repo) + "/.orchestra/wt")
             for base in self.policy["EXTRA_BASES"]:
                 self.add_root(str(base), "backup", backups=True)
-        ids, seen = {}, set()
+        used, seen = set(), set()
 
         def add(path, root, top, id):
             if path in seen:
                 return
             seen.add(path)
-            ids[id] = ids.get(id, 0) + 1
-            item = Item(id + (f"~{ids[id]}" if ids[id] > 1 else ""), path, root, top)
+            chosen = id
+            if chosen in used:
+                n = 2
+                while id + f"~{n}" in used or id + f"~{n}" in reserved:
+                    n += 1
+                chosen = id + f"~{n}"
+            used.add(chosen)
+            item = Item(chosen, path, root, top)
             self.items.append(item)
             if contained(path, item):
                 nested = os.path.join(path, ".orchestra", "wt")
@@ -293,6 +330,10 @@ class Context:
                         if child.is_symlink() or child.is_dir(follow_symlinks=False):
                             add(child.path, nested, top, item.id + "/.orchestra/wt/" + child.name)
 
+        reserved = {prefix + "/" + entry.name for root, (prefix, backups) in self.roots.items()
+                    for entry in self.entries(root)
+                    if (not backups or entry.name.startswith("archive-tmp"))
+                    and (entry.is_symlink() or entry.is_dir(follow_symlinks=False))}
         for root, (prefix, backups) in sorted(self.roots.items()):
             for entry in self.entries(root):
                 if backups and not entry.name.startswith("archive-tmp"):
@@ -452,6 +493,22 @@ def inspect_git(item, context):
     item.kind = "clone" if os.path.isdir(os.path.join(path, ".git")) else "worktree"
     git_dir = git(path, "rev-parse", "--absolute-git-dir").removesuffix("\n")
     item.common_dir = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir").removesuffix("\n")
+    partial = partial_clone(path)
+    own = ({"top": os.path.dirname(item.common_dir), "common": item.common_dir}
+           if item.kind == "worktree" else None)
+    references = [own] if own else []
+    if context.reference and (not own or os.path.realpath(context.reference["common"])
+                              != os.path.realpath(item.common_dir)):
+        references.append(context.reference)
+    contains_reference = any(under(os.path.realpath(p), os.path.realpath(path))
+                             for reference in (own, context.reference) if reference
+                             for p in reference.values())
+    if partial:
+        item.add("CAUTION", f"partial clone: {partial.split()[0]} (objects not read; scan stays offline)")
+        if contains_reference:
+            item.add("DANGER", "contains the reference repository")
+        item.branch = git(path, "symbolic-ref", "-q", "--short", "HEAD", allowed=(0, 1)).strip()
+        return
     if item.kind == "clone":
         modules = os.path.join(path, ".git", "modules")
         try:
@@ -551,35 +608,38 @@ def inspect_git(item, context):
             item.add("CAUTION", f"has linked worktree registration: {wt['id']}")
         for unreadable in errors:
             item.add("CAUTION", f"worktree registration unreadable: {unreadable}")
-        reference = context.reference
-    else:
-        reference = {"top": os.path.dirname(item.common_dir), "common": item.common_dir}
-    if not reference:
+    if not references:
         item.add("CAUTION", "no reference repository (use --repo)")
         return
-    if any(under(os.path.realpath(p), os.path.realpath(path)) for p in reference.values()):
+    if contains_reference:
         item.add("DANGER", "contains the reference repository")
     ref = context.options.merged_into
-    repo = reference["common"]
-    merged = git(repo, "rev-parse", "--verify", "-q", ref + "^{commit}", common=True, allowed=(0, 1)).strip()
-    if not merged:
-        item.add("CAUTION", f"merged ref {ref} not found in {repo}")
-        return
-    for sha, name in tips:
-        try:
-            git(repo, "cat-file", "-e", sha + "^{commit}", common=True)
-        except GitError as error:
-            if error.returncode not in (1, 128):
-                raise
-            item.add("CAUTION", f"{name} not merged into {ref}")
+    for reference in references:
+        repo = reference["common"]
+        if repo not in context.partial:
+            context.partial[repo] = partial_clone(repo, common=True)
+        if context.partial[repo]:
+            item.add("CAUTION", f"reference {repo} is a partial clone; merge state not checked offline")
             continue
-        # merge-base has no output; use an explicit return-code result for its predicate.
-        try:
-            git(repo, "merge-base", "--is-ancestor", sha, merged, common=True)
-        except GitError as error:
-            if error.returncode != 1:
-                raise
-            item.add("CAUTION", f"{name} not merged into {ref}")
+        merged = git(repo, "rev-parse", "--verify", "-q", ref + "^{commit}", common=True, allowed=(0, 1)).strip()
+        if not merged:
+            item.add("CAUTION", f"merged ref {ref} not found in {repo}")
+            continue
+        for sha, name in tips:
+            try:
+                git(repo, "cat-file", "-e", sha + "^{commit}", common=True)
+            except GitError as error:
+                if error.returncode not in (1, 128):
+                    raise
+                item.add("CAUTION", f"{name} not merged into {ref}")
+                continue
+            # merge-base has no output; use an explicit return-code result for its predicate.
+            try:
+                git(repo, "merge-base", "--is-ancestor", sha, merged, common=True)
+            except GitError as error:
+                if error.returncode != 1:
+                    raise
+                item.add("CAUTION", f"{name} not merged into {ref}")
 
 
 def activity(item, context, real_path):

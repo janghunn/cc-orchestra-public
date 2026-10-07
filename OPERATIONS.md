@@ -1301,10 +1301,8 @@ Removing a clone does remove its local refs and git-ignored `.orchestra/` artifa
 including its own registry. Archive coverage is informational: the archive is not a
 full copy (checkpoints, original images and oversized payloads are not stored).
 Repositories outside the scanned roots that borrow a clone's objects are not detected.
-Known limits / follow-up: `--repo` does not override the reference repository for linked worktree items.
-Literal names ending in ` (deleted)` can be misread as deleted process paths.
-Generated `~N` item IDs can collide with literal directory names.
-Git 2.34 may fetch missing objects from a partial-clone reference repository during scan.
+Linked worktree items are checked against both their own repository and the reference repository (`--repo` or the default).
+Scan runs Git with an empty `GIT_ALLOW_PROTOCOL`, so no transport (including partial-clone lazy fetch) runs and objects missing locally count as not merged; a partial-clone item or reference repository is reported CAUTION without reading its objects.
 Codex-only installs do not link it; run `~/.claude/orchestra/bin/orch-gc` or `<repo>/bin/orch-gc`.
 
 ## Tuning
