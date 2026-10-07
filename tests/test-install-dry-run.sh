@@ -28,6 +28,10 @@ cat > "$TMP/fakebin/systemctl" <<'EOF'
 printf 'systemctl %s\n' "$*" >> "$TMP/calls.log"
 printf '%s\n' "$*" >> "$TMP/systemctl.log"
 EOF
+cat > "$TMP/fakebin/notify-send" <<'EOF'
+#!/usr/bin/env bash
+printf 'notify-send %s\n' "$*" >> "$TMP/calls.log"
+EOF
 chmod +x "$TMP/fakebin/"*
 cat > "$TMP/snapshot.py" <<'PY'
 import hashlib, json, os, pathlib, stat, sys

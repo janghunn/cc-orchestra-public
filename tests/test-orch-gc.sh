@@ -833,6 +833,41 @@ else:
     globals()['case' + action]()
 PY
 
+cat > "$TMP/map_closed_fd.py" <<'PY'
+import ctypes
+import os
+import sys
+import time
+
+path, ready = sys.argv[1:]
+fd = os.open(path, os.O_RDONLY)
+mapped_stat = os.fstat(fd)
+size = mapped_stat.st_size
+if size <= 0:
+    raise SystemExit(f'cannot map empty file: {path}')
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                      ctypes.c_int, ctypes.c_int, ctypes.c_long]
+libc.mmap.restype = ctypes.c_void_p
+PROT_READ, MAP_PRIVATE = 1, 2
+address = libc.mmap(None, size, PROT_READ, MAP_PRIVATE, fd, 0)
+if address is None or address == ctypes.c_void_p(-1).value:
+    raise OSError(ctypes.get_errno(), f'mmap failed: {path}')
+os.close(fd)
+for entry in os.listdir('/proc/self/fd'):
+    try:
+        fd_stat = os.stat('/proc/self/fd/' + entry)
+    except FileNotFoundError:
+        # The descriptor used by listdir has already closed.
+        continue
+    if (fd_stat.st_dev, fd_stat.st_ino) == (mapped_stat.st_dev, mapped_stat.st_ino):
+        raise SystemExit(f'mapped file still has an open descriptor: {entry}')
+os.chdir('/')
+with open(ready, 'w'):
+    pass
+time.sleep(300)
+PY
+
 make_fixture() {
   local fixture="$1"
   export HOME="$fixture/home" CC_ORCH_STATE_DIR="$fixture/state"
@@ -855,7 +890,7 @@ for number in {1..9}; do
   make_fixture "$fixture"
   if [[ "$number" == 7 ]]; then
     (
-      exec python3 -c 'import mmap,os,sys,time; f=open(sys.argv[1],"rb"); mapping=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ,trackfd=False); f.close(); os.chdir("/"); open(sys.argv[2],"w").close(); time.sleep(300)' \
+      exec python3 "$TMP/map_closed_fd.py" \
         "$fixture/state/worktrees/proj/merged/tracked" "$fixture.mapped.ready"
     ) &
     worker_pids+=("$!")
@@ -866,7 +901,7 @@ for number in {1..9}; do
     wait "$child_pid" 2>/dev/null || true
     case_run 7nlsetup "$fixture" || fail 'newline-mapped-file setup'
     (
-      exec python3 -c 'import mmap,os,sys,time; f=open(sys.argv[1],"rb"); mapping=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ,trackfd=False); f.close(); os.chdir("/"); open(sys.argv[2],"w").close(); time.sleep(300)' \
+      exec python3 "$TMP/map_closed_fd.py" \
         "$fixture/state/worktrees/proj/"$'mapped\ncheckout/tracked' "$fixture.nlmapped.ready"
     ) &
     worker_pids+=("$!")

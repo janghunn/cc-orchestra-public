@@ -11,8 +11,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok $((++pass)) - $*"; }
 field() { sed -n "s/^$2: //p" "$1" | head -1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
-assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
-assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
+assert_has() { grep -qF -- "$2" <<<"$1" || fail "missing '$2' ($3)"; }
+assert_not_has() { ! grep -qF -- "$2" <<<"$1" || fail "unexpected '$2' ($3)"; }
 assert_verifier_matches_template() { # <rendered> <template> <label>
   diff <(sed -e 's/^model: .*/model: __MODEL__/' -e 's/^effort: .*/effort: __EFFORT__/' "$1") "$2" \
     >/dev/null || fail "generated verifier differs from its template beyond model/effort ($3)"
@@ -46,6 +46,33 @@ assert_eq "$(field "$AGENTS/verifier.md" model)" "opus[1m]" "verifier model from
 assert_eq "$(field "$AGENTS/verifier.md" effort)" "max" "verifier effort from conf"
 assert_verifier_matches_template "$AGENTS/verifier.md" "$ROOT/templates/verifier.md.tpl" "default render"
 ok "primary roster models and efforts"
+
+(
+  BIG="$(python3 -c 'print("sigpipe-needle"); [print("filler %06d" % i) for i in range(80000)]')"
+  [ "${#BIG}" -gt 1048576 ] || fail "SIGPIPE fixture must exceed 1 MiB"
+  old_has() { printf '%s' "$1" | grep -qF -- "$2"; } # sigpipe-regression-old-form
+  if ( set -o pipefail; old_has "$BIG" sigpipe-needle ) 2>/dev/null; then
+    fail "old assertion did not reproduce SIGPIPE under pipefail"
+  fi
+  if ( trap '' PIPE; set -o pipefail; old_has "$BIG" sigpipe-needle ) 2>/dev/null; then
+    fail "old assertion did not reproduce ignored SIGPIPE under pipefail"
+  fi
+  assert_has "$BIG" sigpipe-needle "large input under pipefail"
+  ( trap '' PIPE; assert_has "$BIG" sigpipe-needle "large input with SIGPIPE ignored" )
+  if ( assert_not_has "$BIG" sigpipe-needle x ) 2>/dev/null; then
+    fail "negative assertion missed a present string in large input"
+  fi
+  assert_not_has "$BIG" absent-needle "absent string in large input"
+  if ( assert_has "$BIG" absent-needle x ) 2>/dev/null; then
+    fail "positive assertion accepted an absent string in large input"
+  fi
+  if grep -nE "(printf|echo)[^|]*\|[[:space:]]*grep[^|]*[[:space:]]-[A-Za-z]*q" "$ROOT"/tests/*.sh \
+      | grep -v '# sigpipe-regression-old-form$'; then
+    fail "test assertion reintroduces a SIGPIPE-prone producer"
+  fi
+)
+ok "assertion helpers are SIGPIPE-safe under pipefail"
+
 LEAD_TEXT="$(cat "$AGENTS/lead-alpha.md")"
 assert_not_has "$LEAD_TEXT" 'Write `summary.md`' "lead is not told to write summary.md"
 assert_has "$LEAD_TEXT" '## Running record' "lead keeps its running record in plan.md"

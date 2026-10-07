@@ -14,8 +14,8 @@ pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok $((++pass)) - $*"; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1' ($3)"; }
-assert_has() { printf '%s' "$1" | grep -qF -- "$2" || fail "missing '$2' ($3)"; }
-assert_not_has() { ! printf '%s' "$1" | grep -qF -- "$2" || fail "unexpected '$2' ($3)"; }
+assert_has() { grep -qF -- "$2" <<<"$1" || fail "missing '$2' ($3)"; }
+assert_not_has() { ! grep -qF -- "$2" <<<"$1" || fail "unexpected '$2' ($3)"; }
 
 stop_live() {
   if [[ -n "$LIVE_PID" ]]; then
