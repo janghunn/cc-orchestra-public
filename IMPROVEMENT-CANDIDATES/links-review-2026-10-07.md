@@ -1,0 +1,51 @@
+# Link review candidates (2026-10-07)
+
+This file follows the entry shape and append-only rules of ../IMPROVEMENT-CANDIDATES.md. Each entry is a proposal for a human to weigh; none is approved except where a status names a task. Six outside links were reviewed on 2026-10-07; each URL was fetched or probed during task 69, and what was and was not confirmed is stated per entry. Task statuses below refer to branches (`orch/<NN>`), not merges.
+
+### 2026-10-07 — Opus 5.5 prompting and long-run advice
+- **Source:** https://claude.dev/blog/getting-the-most-out-of-opus-5-5/ (fetched 2026-10-07).
+- **Summary:** The post advises deleting "think carefully" lines, naming a finish line, putting stop-and-continue rules in CLAUDE.md, keeping a checklist in TASKS.md, reading what the run is "waiting on you for" first, and a review prompt that lists "only problems you'd block the merge for" with file, line, why, and how to show it fails.
+- **Critical assessment (cc-orchestra-specific):** Several of these already exist here in other words: lead prompts say to proceed without asking and to put status notes in the same message as the next action, and the final block has a `NEEDS USER DECISION` line. Task 67 (branch `orch/67-prompt-hygiene`) is reported in its brief as finding no obsolete "think carefully" directives and as changing review, stop and retry wording; this task did not read that branch's diff. The TASKS.md checklist maps to `TodoWrite` plus `.orchestra/REGISTRY.md`, so a third tracker is not obviously useful. Caveat: the post is vendor guidance for one model, with no measurements in the fetched text, and the page summary was produced by a small model, so quotes are as reported.
+- **Status:** USER APPROVED — see orch/67
+
+### 2026-10-07 — Claude Code mods: mechanics and an observe-only prototype
+- **Source:** https://claude.dev/blog/getting-started-with-claude-code-mods/ (fetched 2026-10-07).
+- **Summary:** A mod exports `register(on, options)` and adds hooks with `on(event, matcher?, hook)`; a hook observes (`await next(e)`), rewrites (`next({...e, command})`) or answers (`return { deny }`). Mods run in an isolated sandbox with a `$` API, a hook gets 10 seconds per dispatch (time inside `$` calls excluded), and `claude plugin validate` / `claude plugin test` check them. The post also says to use permission rules for a hard block.
+- **Critical assessment (cc-orchestra-specific):** Task 66 (branch `orch/66-mods-observer`) is reported in its brief as an observe-only prototype that is not installed by default; deny/rewrite was deliberately left out. The post's own advice that permission rules are the hard block matches how `guardrails.json` already works here, so a mod enforcement layer would duplicate it unless it can see something hooks cannot. No concrete next step is known, so no separate "mods as enforcement" entry is added. Caveat: the prototype's live behaviour is unverified; one opt-in session with `claude --plugin-dir` and a read of its `spawn-observer.jsonl` would show it, and this task did not do that.
+- **Status:** USER APPROVED — see orch/66
+
+### 2026-10-07 — DDD with AI: a shared vocabulary file for agents
+- **Source:** https://threedots.tech/post/ddd-and-ai-coding/ (fetched 2026-10-07).
+- **Summary:** The post argues that design should precede generation, that knowledge crunching stays a human team activity, that a consistent ubiquitous language gives agents better context ("If you give the agent more high-quality context, its output will be more accurate"), that bounded contexts may name similar things differently on purpose, and that review should be a double-check, not a debate about the approach.
+- **Critical assessment (cc-orchestra-specific):** Design before code is already the lead's `plan.md` plus the plan cross-check, and review as verification is the Tier 4 gate. The gap is that harness terms (`lead`, `slot`, `profile`, `route`, `pin`, `ACCEPTED`) are defined across README, OPERATIONS and agent prompts, and some words mean different things in different places. Task 69 adds `GLOSSARY.md` for that. Caveat: the fetched summary did not say the language should be a markdown file; that framing is this repo's choice. Whether agents read the glossary and behave differently is not measured.
+- **Status:** USER APPROVED — see orch/69
+
+### 2026-10-07 — "Brand as Software" post (X link): not readable, not relevant
+- **Source:** https://x.com/PaulJun_/status/2098386367898079729 (WebFetch returned HTTP 402 Payment Required; no body).
+- **Summary:** The page could not be read directly. A mirror reviewed earlier by Tier 1 reportedly showed a marketing essay titled "Brand as Software"; the lead did not re-fetch that mirror, so its content is unverified here.
+- **Critical assessment (cc-orchestra-specific):** Nothing readable ties this link to code orchestration, delivery gates or model routing, so no change is proposed. This is a partial review: the direct page was blocked and the mirror was not re-checked, so a relevant thread under the post cannot be ruled out.
+- **Status:** NOT PURSUED — not relevant to cc-orchestra
+
+### 2026-10-07 — OpenRig: what it is and what was taken from it
+- **Source:** https://github.com/mvschwarz/openrig (README via `gh api`, 2026-10-07; Apache-2.0, 5548 stars, last push 2026-10-07).
+- **Summary:** OpenRig is a local daemon, CLI, terminal UI and MCP server on tmux that runs persistent multi-agent teams defined in a RigSpec YAML (pods, members, edges, continuity policies, a culture file). Its README has a table of what each phase writes on the machine and a `rig setup --dry-run`.
+- **Critical assessment (cc-orchestra-specific):** The architecture differs: OpenRig runs long-lived peer seats you message (`rig send`, a queue), while this repo runs in-session hierarchical leads with evidence gates and a second provider as reviewer, so it is not adoptable wholesale. The install-transparency idea is the part tied to a gap here and is task 65 (branch `orch/65-install-dry-run`). Ideas judged not applicable: the typing guard (`rig seat set-typing-guard`) holds automatic messages for a seat a human types into, but cc-orch leads are subagents of one session with no hand-typed seats; `CULTURE.md` resembles `.orchestra/DIRECTIVES.md` only loosely, since DIRECTIVES holds the user's dated standing directives and OpenRig's culture file holds coordination norms, which here live in agent prompts, so no concrete gap is shown. Caveat: the README was read, not the code, and the star count is a snapshot.
+- **Status:** USER APPROVED — see orch/65
+
+### 2026-10-07 — Vocabulary for the outcome of resuming a lead after interruption
+- **Source:** https://github.com/mvschwarz/openrig README, section on snapshot/restore (fetched 2026-10-07); this repo's `agents/orchestrator.md` (REGISTRY, agentId routing) and `OPERATIONS.md` ("Compaction recovery hook").
+- **Summary:** OpenRig's restore reports a per-node outcome: `resumed`, `fresh-primed`, `awaiting-decision` (the original conversation cannot resume; choose `--fresh`), `attention_required` or `failed`. Here, Tier 1 resumes a lead by looking up its agentId in `.orchestra/REGISTRY.md` and sending to it, and the compaction hook re-injects registry rows, the slot board and `DIRECTIVES.md`.
+- **Critical assessment (cc-orchestra-specific):** The registry has a `status` column (`RUNNING`, `PASS`, `FAIL`, `BLOCKED`, `ACCEPTED`, `CLOSED`) but no field says whether a lead was resumed with its context, replaced by a fresh agent, or is waiting on a decision after a failed send. That distinction would matter when a lead's agentId is stale. How often that happens here is not measured, and this task did not search past summaries for such cases. Caveat: OpenRig restores tmux processes; here a failed `SendMessage` means the lead's context is gone, so only the vocabulary transfers, not the mechanism.
+- **Status:** NEW
+
+### 2026-10-07 — agent-gc: classified cleanup of stale agent worktrees
+- **Source:** https://news.hada.io/topic?id=34893 and https://github.com/williamjeong2/agent-gc (both fetched 2026-10-07).
+- **Summary:** agent-gc is a Rust TUI/CLI that finds agent worktrees and build artifacts and classifies them SAFE, CAUTION or DANGER. DANGER items (for example those holding `.env`, `.pem`, `.db`) are locked and cannot be selected; batch delete is SAFE-only; interactive deletion needs a confirmation prompt, and `--yes` is for trusted automation. The post's author reports about 70 GB reclaimed.
+- **Critical assessment (cc-orchestra-specific):** Task clones and worktrees under `~/.claude/orchestra-state/worktrees/` accumulate here too, and `cc-orch session remove` keeps branches by design, so a risk-classed cleaner fits. Task 64 (branch `orch/64-orch-gc`) is reported in its brief as acting on this; that branch was not visible on `origin` from this clone, so its state is unverified here. Caveats: the 70 GB figure is one user's self-report; the project is "early software (0.2.x)", MIT-licensed, with 2 stars at fetch time; and the post's wording that deletion needs human confirmation is looser than the README, which allows `--yes`.
+- **Status:** USER APPROVED — see orch/64
+
+### 2026-10-07 — Weekly hada.io routine could not reach `news.hada.io`
+- **Source:** Remote commit `8c3a629` (weekly routine, `EGRESS_BLOCKED`), already recorded in `followups-2026-10-05.md`; the lead's own fetch of https://news.hada.io/topic?id=34893 on 2026-10-07 succeeded from this session.
+- **Summary:** The weekly routine reported that `news.hada.io` was blocked by its egress policy and asked a human whether to allow it. This is context for link 6 and repeats the open question; it is not a new finding.
+- **Critical assessment (cc-orchestra-specific):** A successful fetch from a different session shows the site is reachable in at least one environment, which does not say anything about the routine's own policy. The routine's block could be permanent or one-off; only one occurrence is recorded. The decision stays with the user.
+- **Status:** NEW
