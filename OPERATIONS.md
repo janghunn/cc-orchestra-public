@@ -21,6 +21,7 @@ Codex automatic routing for an explicit invocation.
 
 ```bash
 git pull
+./install.sh --dry-run
 ./install.sh
 ./install.sh --check
 
@@ -63,17 +64,46 @@ After the first installation of this branch, reload an existing cc-orch session 
 caches the 16 new `route-lead-*` agent types. Ordinary quota/reset movement after that does not
 require another reload.
 
-`build-roster-runtime.sh` records all 38 rendered profiles in the NDJSON manifest
+`build-roster-runtime.sh` records all 39 rendered profiles in the NDJSON manifest
 `${CC_ORCH_AGENTS_DIR:-$HOME/.claude/agents}/.install-manifest.json` (override with
 `CC_ORCH_MANIFEST`), including destination, source template, both SHA-256 hashes, and repo commit.
 Run `~/.claude/orchestra/bin/orch-doctor [manifest-path]` to check for missing files, changed
 output, stale templates, or a repo-version mismatch; it exits 0 when all entries match, 1 for
 problems, and 2 when the manifest is absent or invalid. Its optional upstream note uses only
 the local tracking ref, without fetching, so it cannot detect remote changes that have never
-been fetched. Running `build-roster.sh` alone tracks only its 22 profiles; existing route files
+been fetched. Running `build-roster.sh` alone tracks only its 23 profiles; existing route files
 remain on disk but leave the manifest until the runtime builder runs again. A quota-driven
 `orch-model-guard set` switch intentionally changes rendered files without updating the manifest,
 so affected `lead-*.md` files show expected `DRIFTED` results until the next roster rebuild.
+
+## What cc-orchestra changes on a machine
+
+`./install.sh --dry-run` previews the install, including `--codex-only` or
+`--safety-hooks-only`. It never changes install targets or polls usage. Profile comparison renders
+in disposable storage under `$TMPDIR` (default `/tmp`), falling back to `/tmp` if the configured
+location resolves inside HOME, the repository or another install target; if neither is safe,
+profile comparison is reported as unavailable. Scratch storage is removed before exit. The builder
+reads the repository commit and uses a temporary copy of current guard state; the 16 `lead-*.md`
+profiles and manifest remain state-dependent because a real install refreshes quota first.
+`--dry-run` rejects `--bootstrap` and `--check` combinations.
+
+| When | What changes |
+|---|---|
+| `./install.sh`: links and modes | Links `~/.claude/orchestra`, `~/.claude/agents/{orchestrator,verifier-normal}.md`, and nine commands in `~/.local/bin`: `cc-orch`, `codex-run`, `orch-model-guard`, `orch-summary-check`, `orch-usage-report`, `orch-archive`, `cc-orch-codex`, `codex-run-codex`, `orch-codex-route` (`CC_ORCH_BIN_DIR`). Existing non-links move to `<dest>.pre-cc-orchestra`; other symlinks are relinked. Runs `chmod +x` on repo `*.sh`, `bin/*`, `hooks/*.sh`. |
+| `./install.sh`: profiles | Writes 39 generated profiles and `.install-manifest.json` under `~/.claude/agents` (`CC_ORCH_AGENTS_DIR`, `CC_ORCH_MANIFEST`); replaced profiles have no backup. |
+| `./install.sh`: settings | Merges `UserPromptSubmit` runtime-context and `orch-model-notice.sh` hooks, and `PreToolUse` / `SubagentStop` / `SessionStart` safety hooks into `~/.claude/settings.json`. Replaces `statusLine`, saving the previous value to `~/.claude/orchestra-state/statusline.previous.json` when taking over another status line. Notice-hook registration copies existing settings to `~/.claude/backups/settings.json.<epoch>.bak` on every install. `CC_ORCH_SETTINGS` redirects all except runtime-context, which always uses `~/.claude/settings.json`. |
+| `./install.sh`: guard and units | Polls usage and refreshes `~/.claude/orchestra-state/{state,guard.log,last-usage.txt,budget-state,.lock,.budget.lock}` (`CC_ORCH_STATE_DIR`); quota changes may rewrite lead models. Writes `~/.config/systemd/user/orch-model-guard.{service,timer}` (`CC_ORCH_UNIT_DIR`), runs `systemctl --user daemon-reload` and `systemctl --user enable --now orch-model-guard.timer`. Without an executable Claude CLI, units and the notice hook are skipped, but statusLine is still installed. |
+| `--codex-only` / `--safety-hooks-only` | Codex-only creates six `~/.local/bin` links: `cc-orch`, `cc-orch-codex`, `codex-run`, `codex-run-codex`, `orch-codex-route`, `orch-summary-check`. Safety-only merges the three safety hooks in the settings file. Both create required parent directories. |
+| `--dry-run` / `--check` | Dry-run changes nothing in install targets; only the temporary rendering described above writes files. `--check` does not replace installed files, but `budget --compact` can poll usage and refresh the state directory; profile validation also uses temporary rendering. |
+| `--bootstrap` | Installs system packages and provider CLIs, adds the PATH line to `~/.profile` / `~/.bashrc`, runs provider logins, then installs and checks the runtime. |
+| Runtime: sessions and tasks | Writes `<state>/projects/<name>`, `<state>/sessions/<name>.conf`, and `<state>/worktrees/<project>/<name>` (`CC_ORCH_WORKTREE_ROOT`) plus Git worktree/branch metadata; writes `.orchestra/BACKEND-HANDOFF.md`, `.orchestra/<task>/codex-*.jsonl`, `codex-*.stderr.log`, `.codex-session`, and `<state>/codex.log`. Hybrid state defaults to `~/.claude/orchestra-state`; Codex backend state defaults to `~/.local/state/cc-orchestra-codex`. |
+| Runtime: budget, archive, CLI updates | Refreshes budget/state files; the installed guard timer polls every 5 minutes (`POLL_MINUTES`). `orch-archive` writes `~/orchestra-vault` and `~/.claude/orchestra-archive/raw` (`ORCH_ARCHIVE_VAULT`, `ORCH_ARCHIVE_RAW`). `cc-orch` launch uses `${XDG_STATE_HOME:-~/.local/state}/cc-orchestra/cli-update.lock` (normally `~/.local/state/cc-orchestra/cli-update.lock`) and `npm install -g` for Claude Code / Codex, unless `CC_ORCH_CLI_AUTO_UPDATE=0`. |
+| Uninstall | `orch-model-guard uninstall` removes units and the notice hook, restores the previous statusLine, and deletes `statusline.previous.json`; state is kept. There is no full installer uninstall: remove command/repo/agent links, generated profiles and manifest, runtime-context/safety hooks, backups, state/registries/worktrees, archives, and bootstrap PATH entries or provider packages by hand as needed. |
+
+Repeated installs refresh guard state and create timestamped settings backups. The notice entry is
+removed and re-appended each time: the second install can reorder it after runtime-context;
+subsequent installs stabilize that order. A missing custom settings parent causes notice registration
+to fail before statusLine creates the parent, so the preview reports that notice step as skipped.
 
 ## Persistent sessions and worktrees
 
