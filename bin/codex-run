@@ -545,6 +545,7 @@ RUN_ATTEMPT=0
 run_once() {
   local start LOG_LINE LOG_OFFSET LOG_POS FDINFO_KEY FDINFO_VALUE RUNS_LOCKED RUNS_UMASK
   local EVENTS_SOURCE="$EVENTS" EVENTS_TMP="" EVENTS_MODE EVENTS_UMASK
+  local EVENTS_EXISTING_MODE EVENTS_CREATE_FAILED=0
   start="$(date -Is)"
   EVENTS_UMASK="$(umask)"
   printf -v EVENTS_MODE '%03o' "$((0666 & ~8#$EVENTS_UMASK))"
@@ -558,12 +559,30 @@ run_once() {
   } 2>/dev/null; then
     EVENTS_SOURCE=/dev/fd/7
     env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null >&7 7>&- 2> "$STDERR"
+    RC=$?
   else
     exec 7>&-
     [ -z "$EVENTS_TMP" ] || rm -f -- "$EVENTS_TMP"
-    env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null > "$EVENTS" 2> "$STDERR"
+    if [ -e "$EVENTS" ] && EVENTS_EXISTING_MODE="$(stat -c %a -- "$EVENTS" 2>/dev/null)"; then
+      EVENTS_MODE="$EVENTS_EXISTING_MODE"
+    fi
+    # Unlink without touching an open inode; noclobber closes the unlink/create race.
+    rm -f -- "$EVENTS"
+    umask 077
+    set -C
+    { exec 7>"$EVENTS"; } 2>/dev/null
+    RC=$?
+    set +C
+    umask "$EVENTS_UMASK"
+    if [ "$RC" -eq 0 ]; then
+      chmod "$EVENTS_MODE" /dev/fd/7 2>/dev/null
+      env -u CC_ORCH_CODEX_ROUTE timeout "$TIMEOUT" "${CMD[@]}" < /dev/null >&7 7>&- 2> "$STDERR"
+      RC=$?
+    else
+      RC=1
+      EVENTS_CREATE_FAILED=1
+    fi
   fi
-  RC=$?
   MODEL_SPEC="$MODEL@$EFFORT"
   [ "$FAST_MODE" = "1" ] && MODEL_SPEC="$MODEL_SPEC+fast-mode"
   [ -z "$FALLBACK_NOTE" ] || MODEL_SPEC="$MODEL_SPEC ($FALLBACK_NOTE)"
@@ -644,7 +663,7 @@ if events_source != "/dev/fd/7":
 record = dict(v=1, run_id=uuid.uuid4().hex, attempt=int(attempt), pid=int(pid),
               start=start, end=end, mode=mode, lane=lane if mode in ("implement", "resume") else mode,
               run_tag=run_tag, model=model, effort=effort, fast_mode=fast_mode == "1",
-              fallback_from=fallback.removeprefix("fallback-from:") if fallback else None,
+              fallback_from=(fallback[len("fallback-from:"):] if fallback.startswith("fallback-from:") else fallback) if fallback else None,
               exit=int(exit_code), workdir=workdir, task_dir=task_dir, events=events,
               events_mtime_ns=mtime_ns, events_size=size, usage=usage,
               log_offset=int(offset) if offset else None, log_line=log_line)
@@ -665,6 +684,10 @@ PY
     fi
   )
   exec 7>&-
+  if [ "$EVENTS_CREATE_FAILED" = 1 ]; then
+    echo "CODEX-RUN: FAILED — could not create events file $EVENTS; Codex not started" >&2
+    exit 1
+  fi
 }
 run_once
 
